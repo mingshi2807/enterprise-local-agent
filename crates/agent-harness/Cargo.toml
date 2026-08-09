@@ -1,0 +1,12 @@
+[package]
+name = "agent-harness"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agent-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

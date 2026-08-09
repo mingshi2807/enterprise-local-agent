@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "apps/agent-cli",
+    "crates/agent-core",
+    "crates/agent-harness",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+agent-core = { path = "crates/agent-core" }
+agent-harness = { path = "crates/agent-harness" }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+uuid = { version = "1.0", features = ["serde", "v4"] }

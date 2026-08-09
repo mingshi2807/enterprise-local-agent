@@ -1,0 +1,34 @@
+# Build output
+/target/
+
+# Keep Cargo.lock for applications.
+# Uncomment the next line only if this workspace is purely libraries.
+# Cargo.lock
+
+# Editor
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage/
+*.profraw
+*.profdata
+criterion/
+
+# Rust
+**/*.rs.bk
+.cargo-ok
+
+# Local environment
+.env
+.env.local
+.direnv/
+.envrc

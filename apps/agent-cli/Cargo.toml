@@ -1,0 +1,11 @@
+[package]
+name = "agent-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agent-core.workspace = true
+agent-harness.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
