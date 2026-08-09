@@ -55,6 +55,7 @@ macro_rules! define_id {
 
 define_id!(RunId);
 define_id!(SessionId);
+define_id!(ModelCallId);
 define_id!(ToolCallId);
 
 #[cfg(test)]
@@ -83,6 +84,7 @@ mod tests {
 
         let run_id = RunId::from_uuid(uuid);
         let session_id = SessionId::from_uuid(uuid);
+        let model_call_id = ModelCallId::from_uuid(uuid);
         let tool_call_id = ToolCallId::from_uuid(uuid);
 
         assert_eq!(
@@ -98,6 +100,13 @@ mod tests {
             )
             .expect("SessionId must deserialize"),
             session_id
+        );
+        assert_eq!(
+            serde_json::from_str::<ModelCallId>(
+                &serde_json::to_string(&model_call_id).expect("ModelCallId must serialize")
+            )
+            .expect("ModelCallId must deserialize"),
+            model_call_id
         );
         assert_eq!(
             serde_json::from_str::<ToolCallId>(

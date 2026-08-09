@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{BudgetDimension, CapabilityKind, RunId, RunOutcome, RunStatus, ToolCallId, ToolName};
+use crate::{
+    CapabilityKind, ModelCallId, RunId, RunOutcome, TokenUsage, ToolCallId, ToolDomainFailureKind,
+    ToolName,
+};
 
-pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(1);
+pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -87,30 +90,41 @@ impl AgentEvent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentEventKind {
-    RunStatusChanged {
-        status: RunStatus,
-    },
+    RunStarted,
     RunFinished {
         outcome: RunOutcome,
     },
-    ModelCallReserved {
+    ModelInvocationStarted {
+        model_call_id: ModelCallId,
         usage: u32,
         limit: u32,
     },
-    ToolCallReserved {
-        usage: u32,
-        limit: u32,
+    ModelInvocationCompleted {
+        model_call_id: ModelCallId,
+        token_usage: Option<TokenUsage>,
     },
-    BudgetExceeded {
-        dimension: BudgetDimension,
+    ModelInvocationFailed {
+        model_call_id: ModelCallId,
     },
-    ToolAuthorized {
-        call_id: ToolCallId,
+    ToolInvocationStarted {
+        tool_call_id: ToolCallId,
         tool_name: ToolName,
         capability: CapabilityKind,
+        usage: u32,
+        limit: u32,
     },
-    ToolDenied {
-        call_id: ToolCallId,
+    ToolInvocationCompleted {
+        tool_call_id: ToolCallId,
+    },
+    ToolInvocationDomainFailed {
+        tool_call_id: ToolCallId,
+        kind: ToolDomainFailureKind,
+    },
+    ToolInvocationAdapterFailed {
+        tool_call_id: ToolCallId,
+    },
+    ToolPolicyDenied {
+        tool_call_id: ToolCallId,
         tool_name: ToolName,
         capability: CapabilityKind,
     },
@@ -125,16 +139,64 @@ mod tests {
         let event = AgentEvent::new(
             RunId::new(),
             EventSequence::new(7),
-            AgentEventKind::RunStatusChanged {
-                status: RunStatus::Running,
-            },
+            AgentEventKind::RunStarted,
         );
 
         assert_eq!(event.schema_version(), CURRENT_EVENT_SCHEMA_VERSION);
+        assert_eq!(event.schema_version().get(), 2);
         assert_eq!(event.sequence().get(), 7);
 
         let json = serde_json::to_string(&event).expect("event must serialize");
         assert!(!json.contains("prompt"));
         assert!(!json.contains("input_schema"));
+    }
+
+    #[test]
+    fn model_events_carry_correlation_id_without_payloads() {
+        let model_call_id = ModelCallId::new();
+        let event = AgentEvent::new(
+            RunId::new(),
+            EventSequence::new(0),
+            AgentEventKind::ModelInvocationCompleted {
+                model_call_id,
+                token_usage: Some(TokenUsage::new(Some(3), Some(5))),
+            },
+        );
+
+        let json = serde_json::to_string(&event).expect("event must serialize");
+
+        assert!(json.contains(&model_call_id.to_string()));
+        assert!(!json.contains("sentinel prompt"));
+        assert!(!json.contains("sentinel model output"));
+    }
+
+    #[test]
+    fn tool_events_carry_correlation_id_without_payloads() {
+        let tool_call_id = ToolCallId::new();
+        let tool_name = ToolName::new("lookup").expect("tool name must be valid");
+        let event = AgentEvent::new(
+            RunId::new(),
+            EventSequence::new(0),
+            AgentEventKind::ToolInvocationDomainFailed {
+                tool_call_id,
+                kind: ToolDomainFailureKind::InvalidInput,
+            },
+        );
+        let denied = AgentEvent::new(
+            RunId::new(),
+            EventSequence::new(1),
+            AgentEventKind::ToolPolicyDenied {
+                tool_call_id,
+                tool_name,
+                capability: CapabilityKind::LocalWrite,
+            },
+        );
+
+        let json = serde_json::to_string(&(event, denied)).expect("events must serialize");
+
+        assert!(json.contains(&tool_call_id.to_string()));
+        assert!(!json.contains("sentinel tool input"));
+        assert!(!json.contains("sentinel tool output"));
+        assert!(!json.contains("provider failed noisily"));
     }
 }

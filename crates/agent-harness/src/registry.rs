@@ -1,13 +1,31 @@
 use std::{collections::HashMap, sync::Arc};
 
-use agent_core::ToolName;
+use agent_core::{ToolDefinition, ToolName};
 use thiserror::Error;
 
 use crate::ToolPort;
 
 #[derive(Default)]
 pub struct ToolRegistry {
-    tools: HashMap<ToolName, Arc<dyn ToolPort>>,
+    tools: HashMap<ToolName, ToolBinding>,
+}
+
+#[derive(Clone)]
+pub struct ToolBinding {
+    definition: ToolDefinition,
+    port: Arc<dyn ToolPort>,
+}
+
+impl ToolBinding {
+    #[must_use]
+    pub const fn definition(&self) -> &ToolDefinition {
+        &self.definition
+    }
+
+    #[must_use]
+    pub fn port(&self) -> Arc<dyn ToolPort> {
+        Arc::clone(&self.port)
+    }
 }
 
 impl ToolRegistry {
@@ -17,16 +35,23 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Arc<dyn ToolPort>) -> Result<(), ToolRegistryError> {
-        let name = tool.definition().name().clone();
+        let definition = tool.definition().clone();
+        let name = definition.name().clone();
         if self.tools.contains_key(&name) {
             return Err(ToolRegistryError::DuplicateName { name });
         }
-        self.tools.insert(name, tool);
+        self.tools.insert(
+            name,
+            ToolBinding {
+                definition,
+                port: tool,
+            },
+        );
         Ok(())
     }
 
     #[must_use]
-    pub fn get(&self, name: &ToolName) -> Option<Arc<dyn ToolPort>> {
+    pub fn get(&self, name: &ToolName) -> Option<ToolBinding> {
         self.tools.get(name).cloned()
     }
 
@@ -111,5 +136,25 @@ mod tests {
                 crate::PolicyDenialReason::CapabilityNotAllowedInM0,
             ))
         );
+    }
+
+    #[test]
+    fn registry_binding_uses_the_port_and_its_own_definition() {
+        let mut registry = ToolRegistry::new();
+        let concrete = Arc::new(FakeTool::new("lookup", CapabilityKind::ReadOnly));
+        let expected_definition = concrete.definition().clone();
+        let port: Arc<dyn ToolPort> = concrete;
+
+        registry
+            .register(Arc::clone(&port))
+            .expect("port-derived metadata must register");
+        let binding = registry
+            .get(expected_definition.name())
+            .expect("registered binding must be present");
+        let bound_port = binding.port();
+
+        assert_eq!(binding.definition(), &expected_definition);
+        assert_eq!(bound_port.definition(), binding.definition());
+        assert!(Arc::ptr_eq(&bound_port, &port));
     }
 }

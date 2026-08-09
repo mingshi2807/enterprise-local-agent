@@ -41,7 +41,7 @@ pub enum RunOutcome {
 pub enum RunFailureKind {
     Model,
     Tool,
-    Audit,
+    AuditUnavailable,
     Internal,
 }
 

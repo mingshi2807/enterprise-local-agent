@@ -3,10 +3,16 @@ name = "agent-harness"
 version.workspace = true
 edition.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 agent-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

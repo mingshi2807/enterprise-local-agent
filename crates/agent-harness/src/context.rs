@@ -1,13 +1,11 @@
-use std::time::Duration;
-
 use agent_core::{
     AgentEvent, AgentEventKind, BudgetDimension, BudgetUsage, EventSequence, RunBudget, RunId,
     RunOutcome, RunStateError, RunStatus, SessionId,
 };
-use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RunContext {
     run_id: RunId,
     session_id: SessionId,
@@ -15,6 +13,14 @@ pub struct RunContext {
     usage: BudgetUsage,
     status: RunStatus,
     next_event_sequence: EventSequence,
+    runtime: Option<RunRuntime>,
+    audit_degraded: bool,
+}
+
+struct RunRuntime {
+    _started_at: Instant,
+    deadline_at: Instant,
+    cancellation: CancellationToken,
 }
 
 impl RunContext {
@@ -27,6 +33,8 @@ impl RunContext {
             usage: BudgetUsage::new(0, 0),
             status: RunStatus::Pending,
             next_event_sequence: EventSequence::new(0),
+            runtime: None,
+            audit_degraded: false,
         }
     }
 
@@ -55,92 +63,108 @@ impl RunContext {
         &self.status
     }
 
-    pub fn start(&mut self) -> Result<AgentEvent, RunContextError> {
+    #[must_use]
+    pub const fn audit_degraded(&self) -> bool {
+        self.audit_degraded
+    }
+
+    pub(crate) fn commit_running(
+        &mut self,
+        started_at: Instant,
+    ) -> Result<RunCancellationHandle, RunContextError> {
         let status = self.status.clone().start()?;
-        let event = self.next_event(AgentEventKind::RunStatusChanged {
-            status: status.clone(),
-        })?;
+        let deadline_at = started_at
+            .checked_add(self.budget.max_elapsed())
+            .ok_or(RunContextError::DeadlineOutOfRange)?;
+        let cancellation = CancellationToken::new();
+        let handle = RunCancellationHandle {
+            token: cancellation.clone(),
+        };
+
         self.status = status;
-        Ok(event)
+        self.runtime = Some(RunRuntime {
+            _started_at: started_at,
+            deadline_at,
+            cancellation,
+        });
+        Ok(handle)
     }
 
-    pub fn finish(&mut self, outcome: RunOutcome) -> Result<AgentEvent, RunContextError> {
-        let status = self.status.clone().finish(outcome.clone())?;
-        let event = self.next_event(AgentEventKind::RunFinished { outcome })?;
-        self.status = status;
-        Ok(event)
+    pub(crate) fn commit_finished(&mut self, outcome: RunOutcome) -> Result<(), RunContextError> {
+        self.status = self.status.clone().finish(outcome)?;
+        Ok(())
     }
 
-    pub fn reserve_model_call(&mut self) -> Result<(), BudgetExceeded> {
+    pub(crate) fn reserve_model_call(&mut self) -> Result<(), BudgetExceeded> {
         let usage = self.usage.model_calls();
         let limit = self.budget.max_model_calls();
         if usage >= limit {
             return Err(BudgetExceeded::new(BudgetDimension::ModelCalls));
         }
 
-        let reserved = usage + 1;
-        self.usage = BudgetUsage::new(reserved, self.usage.tool_calls());
+        self.usage = BudgetUsage::new(usage + 1, self.usage.tool_calls());
         Ok(())
     }
 
-    pub fn reserve_tool_call(&mut self) -> Result<(), BudgetExceeded> {
+    pub(crate) fn reserve_tool_call(&mut self) -> Result<(), BudgetExceeded> {
         let usage = self.usage.tool_calls();
         let limit = self.budget.max_tool_calls();
         if usage >= limit {
             return Err(BudgetExceeded::new(BudgetDimension::ToolCalls));
         }
 
-        let reserved = usage + 1;
-        self.usage = BudgetUsage::new(self.usage.model_calls(), reserved);
+        self.usage = BudgetUsage::new(self.usage.model_calls(), usage + 1);
         Ok(())
     }
 
-    pub fn check_elapsed(&self, elapsed: Duration) -> Result<(), BudgetExceeded> {
-        if elapsed >= self.budget.max_elapsed() {
-            return Err(BudgetExceeded::new(BudgetDimension::Elapsed));
-        }
+    pub(crate) fn cancellation(&self) -> Result<CancellationToken, RunContextError> {
+        Ok(self.runtime()?.cancellation.clone())
+    }
+
+    pub(crate) fn deadline_at(&self) -> Result<Instant, RunContextError> {
+        Ok(self.runtime()?.deadline_at)
+    }
+
+    pub(crate) fn request_cancel(&self) -> Result<(), RunContextError> {
+        self.runtime()?.cancellation.cancel();
         Ok(())
     }
 
-    pub fn next_event(&mut self, kind: AgentEventKind) -> Result<AgentEvent, RunContextError> {
+    pub(crate) fn mark_audit_degraded(&mut self) {
+        self.audit_degraded = true;
+    }
+
+    pub(crate) fn next_event(
+        &mut self,
+        kind: AgentEventKind,
+    ) -> Result<AgentEvent, RunContextError> {
         let sequence = self.next_event_sequence;
         self.next_event_sequence = sequence
             .checked_next()
             .ok_or(RunContextError::EventSequenceExhausted)?;
         Ok(AgentEvent::new(self.run_id, sequence, kind))
     }
+
+    fn runtime(&self) -> Result<&RunRuntime, RunContextError> {
+        self.runtime
+            .as_ref()
+            .ok_or(RunContextError::RuntimeUnavailable)
+    }
 }
 
-impl<'de> Deserialize<'de> for RunContext {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Representation {
-            run_id: RunId,
-            session_id: SessionId,
-            budget: RunBudget,
-            usage: BudgetUsage,
-            status: RunStatus,
-            next_event_sequence: EventSequence,
-        }
+#[derive(Clone)]
+pub struct RunCancellationHandle {
+    token: CancellationToken,
+}
 
-        let representation = Representation::deserialize(deserializer)?;
-        if representation.usage.model_calls() > representation.budget.max_model_calls()
-            || representation.usage.tool_calls() > representation.budget.max_tool_calls()
-        {
-            return Err(de::Error::custom(RunContextError::UsageExceedsBudget));
-        }
+impl RunCancellationHandle {
+    pub fn request_cancel(&self) {
+        self.token.cancel();
+    }
 
-        Ok(Self {
-            run_id: representation.run_id,
-            session_id: representation.session_id,
-            budget: representation.budget,
-            usage: representation.usage,
-            status: representation.status,
-            next_event_sequence: representation.next_event_sequence,
-        })
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
     }
 }
 
@@ -166,115 +190,10 @@ impl BudgetExceeded {
 pub enum RunContextError {
     #[error(transparent)]
     InvalidState(#[from] RunStateError),
+    #[error("run deadline cannot be represented by the process-local monotonic clock")]
+    DeadlineOutOfRange,
+    #[error("run runtime state is unavailable")]
+    RuntimeUnavailable,
     #[error("event sequence is exhausted")]
     EventSequenceExhausted,
-    #[error("serialized budget usage exceeds the configured budget")]
-    UsageExceedsBudget,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn context(model_calls: u32, tool_calls: u32) -> RunContext {
-        let budget = RunBudget::new(model_calls, tool_calls, Duration::from_secs(10))
-            .expect("budget must be valid");
-        RunContext::new(RunId::new(), SessionId::new(), budget)
-    }
-
-    #[test]
-    fn model_budget_is_reserved_before_operation_and_never_overruns() {
-        let mut context = context(1, 0);
-
-        context
-            .reserve_model_call()
-            .expect("first reservation must succeed");
-        let denied = context
-            .reserve_model_call()
-            .expect_err("second reservation must be denied");
-
-        assert_eq!(denied.dimension(), BudgetDimension::ModelCalls);
-        assert_eq!(context.usage().model_calls(), 1);
-    }
-
-    #[test]
-    fn zero_call_limit_denies_without_incrementing() {
-        let mut context = context(0, 0);
-
-        assert_eq!(
-            context
-                .reserve_model_call()
-                .expect_err("zero model budget must deny")
-                .dimension(),
-            BudgetDimension::ModelCalls
-        );
-        assert_eq!(
-            context
-                .reserve_tool_call()
-                .expect_err("zero tool budget must deny")
-                .dimension(),
-            BudgetDimension::ToolCalls
-        );
-        assert_eq!(context.usage(), BudgetUsage::new(0, 0));
-    }
-
-    #[test]
-    fn tool_budget_is_reserved_before_operation_and_never_overruns() {
-        let mut context = context(0, 1);
-
-        context
-            .reserve_tool_call()
-            .expect("first reservation must succeed");
-        let denied = context
-            .reserve_tool_call()
-            .expect_err("second reservation must be denied");
-
-        assert_eq!(denied.dimension(), BudgetDimension::ToolCalls);
-        assert_eq!(context.usage().tool_calls(), 1);
-    }
-
-    #[test]
-    fn elapsed_limit_denies_at_the_limit_using_supplied_duration() {
-        let context = context(0, 0);
-
-        assert!(context.check_elapsed(Duration::from_secs(9)).is_ok());
-        assert_eq!(
-            context
-                .check_elapsed(Duration::from_secs(10))
-                .expect_err("elapsed time at limit must be denied")
-                .dimension(),
-            BudgetDimension::Elapsed
-        );
-    }
-
-    #[test]
-    fn context_emits_deterministically_sequenced_lifecycle_events() {
-        let mut context = context(0, 0);
-
-        let started = context.start().expect("run must start");
-        let finished = context
-            .finish(RunOutcome::Completed)
-            .expect("run must finish");
-
-        assert_eq!(started.sequence().get(), 0);
-        assert_eq!(finished.sequence().get(), 1);
-        assert_eq!(
-            context.status(),
-            &RunStatus::Finished(RunOutcome::Completed)
-        );
-    }
-
-    #[test]
-    fn context_serialization_preserves_valid_state() {
-        let mut context = context(1, 1);
-        context.start().expect("run must start");
-        context
-            .reserve_tool_call()
-            .expect("tool reservation must succeed");
-
-        let json = serde_json::to_string(&context).expect("context must serialize");
-        let restored: RunContext = serde_json::from_str(&json).expect("context must deserialize");
-
-        assert_eq!(restored, context);
-    }
 }

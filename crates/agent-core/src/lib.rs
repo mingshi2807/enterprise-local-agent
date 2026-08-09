@@ -13,7 +13,7 @@ pub use capability::CapabilityKind;
 pub use event::{
     AgentEvent, AgentEventKind, CURRENT_EVENT_SCHEMA_VERSION, EventSchemaVersion, EventSequence,
 };
-pub use ids::{RunId, SessionId, ToolCallId};
+pub use ids::{ModelCallId, RunId, SessionId, ToolCallId};
 pub use model::{
     ModelMessage, ModelOutputPart, ModelRequest, ModelResponse, ModelRole, TokenUsage,
 };

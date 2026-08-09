@@ -46,6 +46,8 @@ pub enum AuditPortError {
     Unavailable,
     #[error("audit sink failed to record the event")]
     RecordFailed,
+    #[error("audit sink did not record the event before its timeout")]
+    TimedOut,
 }
 
 #[cfg(test)]

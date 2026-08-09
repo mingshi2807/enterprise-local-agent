@@ -1,4 +1,4 @@
-09 / 08 / 2026
+09.08.2026
 
 # M0
 
@@ -343,6 +343,8 @@ must not silently choose one.
 
 Use explicit Serde names and include an event schema version from the beginning.
 
+---
+
 # M0 review by web OpenAI
 
 Your M0 architecture proposal is approved with the following required
@@ -598,3 +600,943 @@ At the end report:
 9. clippy results
 10. deliberately deferred functionality
 11. any deviations from the approved architecture and why
+
+---
+
+09.08.2026
+
+# M1 proposal
+
+M1 should introduce one executable ExecutionHarness that owns adapter access and policy enforcement. RunContext remains the single mutable per-run owner; all mutating methods become crate-private so M2 cannot
+  bypass the harness.
+
+  No files were edited. The repository is clean at committed tag m0-foundation.
+
+## 1. Proposed module and file changes
+
+  crates/agent-core/src/
+  └── event.rs                     # Extend metadata-only M1 event kinds
+
+  crates/agent-harness/src/
+  ├── lib.rs                       # Re-export M1 public surface
+  ├── context.rs                   # Runtime deadline/cancellation state
+  ├── execution.rs                 # ExecutionHarness orchestration
+  ├── audit.rs                     # AuditFailurePolicy and audit helper
+  ├── error.rs                     # Sanitized HarnessError model
+  ├── fakes.rs                     # Deterministic fake adapters
+  ├── policy.rs                    # Existing capability policy
+  ├── ports.rs                     # Existing ports, now called operationally
+  └── registry.rs                  # Existing registry
+
+  crates/agent-harness/tests/
+  └── execution_harness.rs         # Public-API integration tests
+
+  apps/agent-cli/src/
+  └── main.rs                      # Async fake-adapter demonstration
+
+  No new crate is justified. The fake adapters are needed both by tests and by the M1 CLI demonstration, so keeping them in agent-harness::fakes is appropriate for now.
+
+### RunContext change
+
+  The current crates/agent-harness/src/context.rs:10 should gain private process-local runtime state:
+
+  struct RunRuntime {
+      started_at: tokio::time::Instant,
+      deadline_at: tokio::time::Instant,
+      cancellation: CancellationToken,
+      audit_degraded: bool,
+  }
+
+  pub struct RunContext {
+      // Existing IDs, budget, usage, status and sequence
+      runtime: Option<RunRuntime>,
+  }
+
+  RunContext should stop implementing Clone, Serialize, and Deserialize. Cloning it would undermine single ownership, and deserializing a Running context without a valid monotonic deadline or cancellation domain
+  would be unsafe.
+
+  The component domain values remain serializable in agent-core. A persistence milestone can later define an explicit snapshot/resume contract.
+
+## 2. Proposed public API
+
+  pub struct HarnessConfig {
+      pub audit_failure_policy: AuditFailurePolicy,
+      pub audit_timeout: Duration,
+  }
+
+  pub struct ExecutionHarness {
+      // Arc<dyn ModelPort>
+      // ToolRegistry
+      // Arc<dyn CapabilityPolicy>
+      // Arc<dyn AuditSink>
+      // HarnessConfig
+  }
+
+  impl ExecutionHarness {
+      pub fn new(
+          model: Arc<dyn ModelPort>,
+          tools: ToolRegistry,
+          capability_policy: Arc<dyn CapabilityPolicy>,
+          audit: Arc<dyn AuditSink>,
+          config: HarnessConfig,
+      ) -> Result<Self, HarnessConfigError>;
+
+      pub async fn start_run(
+          &self,
+          context: &mut RunContext,
+      ) -> Result<CancellationToken, HarnessError>;
+
+      pub async fn invoke_model(
+          &self,
+          context: &mut RunContext,
+          request: ModelRequest,
+      ) -> Result<ModelResponse, HarnessError>;
+
+      pub async fn invoke_tool(
+          &self,
+          context: &mut RunContext,
+          call: ToolCall,
+      ) -> Result<ToolResult, HarnessError>;
+
+      pub async fn complete_run(
+          &self,
+          context: &mut RunContext,
+      ) -> Result<(), HarnessError>;
+
+      pub async fn fail_run(
+          &self,
+          context: &mut RunContext,
+          kind: RunFailureKind,
+      ) -> Result<(), HarnessError>;
+
+      pub async fn cancel_run(
+          &self,
+          context: &mut RunContext,
+      ) -> Result<(), HarnessError>;
+  }
+
+  start_run returns a cloned CancellationToken. This allows another task to request cancellation while an invocation owns &mut RunContext.
+
+  The existing public state-mutating methods—start, finish, budget reservation, and event allocation—should become pub(crate). Public callers retain read-only context accessors.
+
+## 3. Lifecycle sequence
+
+### Start
+
+  Require Pending
+    → calculate monotonic started_at/deadline
+    → create cancellation token
+    → allocate RunStarted event sequence
+    → record audit
+    → commit Running state and runtime data
+    → return cloned CancellationToken
+
+  Under FailClosed, start-audit failure leaves the run Pending. The attempted event sequence remains consumed.
+
+### Complete
+
+  Require Running
+    → reject/terminalize pending cancellation or expired deadline
+    → allocate Completed event
+    → record audit
+    → commit Finished(Completed)
+
+  Under FailClosed, completion-audit failure leaves the run Running.
+
+### Fail and cancel
+
+  Failure, cancellation, and deadline expiry are safety terminalizations. They should commit terminal state even if the terminal audit fails:
+
+- fail_run → Finished(Failed { kind })
+- cancel_run → Finished(Cancelled)
+- expired run deadline → Finished(BudgetExceeded { Elapsed })
+
+  An audit failure is still returned or recorded as degraded, but it must not reopen a cancelled or expired run.
+
+## 4. Model invocation sequence
+
+  Require Running
+    → check cancellation
+    → check deadline
+    → reserve model budget
+    → allocate metadata invocation event
+    → record pre-invocation audit
+    → invoke ModelPort under cancellation/deadline race
+    → allocate completion/failure event
+    → record post-invocation audit
+    → return ModelResponse or sanitized HarnessError
+
+  Important details:
+
+- Budget is reserved before audit and before ModelPort::invoke.
+- If the budget is already exhausted, the port is never called.
+- If pre-invocation audit fails under FailClosed, the port is not called.
+- The reserved budget is not refunded after pre-audit failure; reservation already occurred according to the required ordering.
+- Cancellation and deadline remain active while both audit and model futures are awaiting.
+- Simultaneous cancellation/deadline readiness should prefer cancellation, matching the required check order.
+
+  Conceptually:
+
+  tokio::select! {
+      biased;
+
+      _ = cancellation.cancelled() => Err(HarnessError::Cancelled { ... }),
+      _ = tokio::time::sleep_until(deadline) => {
+          Err(HarnessError::DeadlineExceeded { ... })
+      }
+      result = model.invoke(request) => map_model_result(result),
+  }
+
+  Dropping the port future is cooperative local cancellation. A future real remote adapter may need idempotency/request IDs because dropping a future cannot guarantee that a remote service stopped work.
+
+## 5. Tool invocation sequence
+
+  Require Running
+    → check cancellation
+    → check deadline
+    → registry lookup by ToolName
+    → read ToolDefinition capability
+    → CapabilityPolicy::authorize
+
+  Denied branch:
+
+  Allocate ToolDenied event
+    → audit denial
+    → return PolicyDenied
+
+  The denied branch:
+
+- Does not reserve tool budget.
+- Does not call ToolPort.
+- Returns PolicyDenied, unless a FailClosed denial-audit failure returns an audit error first.
+
+  Allowed branch:
+
+  Reserve tool budget
+    → allocate invocation metadata event
+    → record pre-invocation audit
+    → invoke ToolPort under cancellation/deadline race
+    → record completion/domain-failure/adapter-failure event
+    → return ToolResult or sanitized HarnessError
+
+  The semantic distinction remains:
+
+  PolicyDenied
+      Harness rejected the capability before invocation.
+
+  Ok(ToolResult::DomainFailure { ... })
+      Tool was invoked successfully and reported a normal domain failure.
+
+  Err(HarnessError::ToolPort(...))
+      Adapter/executor infrastructure failed.
+
+## 6. Cancellation and deadline strategy
+
+  Use tokio_util::sync::CancellationToken; no custom primitive is justified.
+
+  A clone participates in the same cancellation domain. cancel() wakes tasks awaiting cancelled(). Child tokens are available later for graph branches: parent cancellation propagates downward, while child
+  cancellation does not cancel the parent. M1 should use ordinary clones, not child tokens. Official CancellationToken documentation
+  (<https://docs.rs/tokio-util/0.7.19/tokio_util/sync/struct.CancellationToken.html>)
+
+### Deadline
+
+- RunBudget.max_elapsed remains in agent-core.
+- RunContext stores tokio::time::Instant values only after start.
+- start_run computes deadline_at = started_at + max_elapsed.
+- Overflow from checked_add becomes a sanitized start/configuration error.
+- Each awaited audit/model/tool operation is bounded.
+
+  No Clock trait is needed in M1. Tokio’s paused-time test support gives deterministic monotonic time:
+
+  #[tokio::test(start_paused = true)]
+  async fn expired_deadline_prevents_invocation() {
+      // start run
+      tokio::time::advance(max_elapsed).await;
+      // invocation is denied
+  }
+
+  This requires Tokio’s test-util feature. Tokio paused-time documentation (<https://docs.rs/tokio/1.53.1/tokio/time/fn.pause.html>), time advancement (<https://docs.rs/tokio/1.53.1/tokio/time/fn.advance.html>)
+
+### Audit timeout
+
+  Audit writes also require an explicit bound. HarnessConfig.audit_timeout should be finite and nonzero.
+
+  For normal operations, the effective audit deadline is the earlier of:
+
+- The run deadline.
+- now + audit_timeout.
+
+  A cancellation/deadline terminal event may use the standalone audit timeout because the run deadline has already expired. This permits bounded final audit cleanup without allowing further model/tool execution.
+
+## 7. Audit strategy
+
+  pub enum AuditFailurePolicy {
+      FailClosed,
+      FailOpen,
+  }
+
+  The CLI uses FailClosed.
+
+### FailClosed
+
+  For pre-operation audit failure:
+
+- Return HarnessError::Audit.
+- Do not invoke the model/tool.
+- Keep any budget already reserved.
+- Keep the allocated event sequence consumed.
+
+  For post-operation audit failure:
+
+- The port has already executed and cannot be rolled back.
+- Return an audit error marked AfterInvocation.
+- Include a sanitized execution-effect marker indicating that the operation ran.
+- Do not return the raw model/tool result.
+- Callers must not blindly retry.
+
+### FailOpen
+
+- Mark the context’s audit state as degraded.
+- Continue the guarded operation after pre-audit failure.
+- Return the original model/tool result or port error after post-audit failure.
+- Never include the sink error string in an AgentEvent.
+
+### Sequence allocation
+
+  RunContext remains the only sequence allocator:
+
+  Read next sequence
+    → checked increment in context
+    → construct AgentEvent
+    → await AuditSink::record
+
+  The sequence advances before the sink is called. Therefore:
+
+- Ordering is deterministic.
+- Failed writes can create gaps.
+- A sequence is never reused.
+- Concurrent operations cannot interleave because each operation holds the single &mut RunContext.
+- Wall-clock timestamps are not used for ordering.
+
+  M1 should extend crates/agent-core/src/event.rs:87 with metadata-only invocation-completed and invocation-failed events. The event schema version should advance because the serialized event vocabulary changes.
+
+  Events may include identifiers, capability class, budget counters, stable success/failure categories, and token counts. They must not contain raw prompts, responses, tool payloads, schemas, or provider error
+  strings.
+
+## 8. Error strategy
+
+  Proposed sanitized top-level error:
+
+  pub enum HarnessError {
+      InvalidLifecycle {
+          operation: HarnessOperation,
+          status: RunStatus,
+      },
+      BudgetExceeded(BudgetExceeded),
+      Cancelled {
+          stage: ExecutionStage,
+      },
+      DeadlineExceeded {
+          stage: ExecutionStage,
+      },
+      ToolNotFound {
+          name: ToolName,
+      },
+      PolicyDenied(PolicyDenial),
+      Audit {
+          phase: AuditPhase,
+          operation: HarnessOperation,
+          effect: OperationEffect,
+          kind: AuditPortError,
+      },
+      ModelPort(ModelPortError),
+      ToolPort(ToolPortError),
+      Context(RunContextError),
+  }
+
+  Supporting typed enums:
+
+  enum ExecutionStage {
+      Preflight,
+      PreAudit,
+      Invocation,
+      PostAudit,
+  }
+
+  enum AuditPhase {
+      BeforeInvocation,
+      AfterInvocation,
+      Lifecycle,
+  }
+
+  enum OperationEffect {
+      NotStarted,
+      Executed,
+      StateCommitted,
+  }
+
+  This distinguishes retry-safe failures from failures after a side effect.
+
+  Provider errors remain mapped into the existing stable ModelPortError and ToolPortError categories. Raw provider strings and SDK error types do not cross the port.
+
+  ToolResult::DomainFailure remains an ordinary successful return from the harness.
+
+## 9. Fake adapters and tests
+
+### Fakes
+
+  FakeModelPort:
+
+- Scripted queue of ModelResponse or ModelPortError.
+- Optional deterministic Tokio delay.
+- Invocation counter.
+- Optional shared trace for ordering assertions.
+
+  FakeToolPort:
+
+- Fixed validated ToolDefinition.
+- Scripted ToolResult or ToolPortError.
+- Invocation counter.
+- Optional deterministic delay.
+
+  InMemoryAuditSink:
+
+- Stores cloned metadata events in insertion order.
+- Exposes an immutable snapshot for assertions.
+- Uses a short-lived standard mutex; no guard crosses an await.
+
+  FailingAuditSink:
+
+- Fails always or on a configured attempt number.
+- Tracks attempted records.
+- Supports deterministic pre- versus post-invocation failure tests.
+
+  Required public-API integration tests:
+
+- Model budget is reserved before port invocation.
+- Zero model budget leaves model invocation count at zero.
+- Allowed ReadOnly tool executes.
+- Denied LocalWrite tool invocation count remains zero.
+- Denied tool does not consume tool budget.
+- Tool budget exhaustion prevents invocation.
+- Cancellation prevents or interrupts operations.
+- Expired deadline prevents invocation.
+- Operations before start or after finish return lifecycle errors.
+- Event sequences are deterministic.
+- Failed audit attempts consume sequences.
+- FailClosed pre-audit failure prevents invocation.
+- FailOpen pre-audit failure allows invocation.
+- Post-invocation audit failures expose OperationEffect::Executed.
+- Provider failures map to stable sanitized errors.
+- Tool domain failure remains Ok(ToolResult::DomainFailure).
+- Serialized audit events contain none of the test prompt/input/output sentinel strings.
+
+## 10. Dependency changes
+
+  Centralize versions in root [workspace.dependencies].
+
+### Tokio
+
+  Current published Tokio is 1.53.1. Proposed features:
+
+  tokio = {
+      version = "1",
+      default-features = false,
+      features = ["rt", "macros", "time"]
+  }
+
+- rt: current-thread runtime used by CLI/tests.
+- macros: #[tokio::main], #[tokio::test], and tokio::select!.
+- time: monotonic deadlines, sleep, timeout handling.
+- test-util: dev/test-only paused-time support.
+
+  Do not enable rt-multi-thread, net, fs, process, signal, io-util, or full. Official Tokio feature list (<https://docs.rs/crate/tokio/1.53.1/features>)
+
+### Tokio-util
+
+  Current published tokio-util is 0.7.19:
+
+  tokio-util = {
+      version = "0.7",
+      default-features = false,
+      features = ["rt"]
+  }
+
+  tokio-util gates its sync module containing CancellationToken behind its rt feature; that feature enables the required Tokio runtime/synchronization support. Official tokio-util feature list
+  (<https://docs.rs/crate/tokio-util/0.7.19/features>)
+
+  No async-trait, futures crate, clock crate, network library, provider SDK, or additional synchronization dependency is needed.
+
+## 11. Risks and tradeoffs
+
+- &mut RunContext serializes operations per run. This is desirable for M1/M2 determinism.
+- Future graph fan-out cannot share the context directly. The graph coordinator should reserve budgets and sequence numbers centrally, then pass owned operation tickets or immutable snapshots to branches
+    before ordered fan-in.
+
+- RunContext becoming process-local and non-serializable removes the M0 context round-trip test. This is intentional; persistence/resume requires an explicit snapshot contract.
+- Fail-closed audit after invocation cannot undo the operation. Typed OperationEffect::Executed is essential to prevent unsafe retries.
+- Pre-audit failure consumes budget because required ordering reserves first. Refunding would introduce ambiguous accounting.
+- Failed audit attempts create sequence gaps. Reuse would be worse because it would destroy ordering evidence.
+- Exposing CancellationToken couples the harness API to tokio-util, but avoids an unnecessary custom cancellation abstraction.
+- Dropping a future cancels local work, not necessarily a remote side effect. Future adapters must document cancellation safety and idempotency.
+- Fake adapters in the harness public surface are temporary milestone infrastructure; a separate test-support crate should wait until reuse justifies it.
+
+  The dependency direction remains:
+
+  agent-cli → agent-harness → agent-core
+
+  agent-core remains independent of Tokio, tokio-util, providers, Rig, graph libraries, MCP, RAG, persistence, and I/O frameworks.
+
+  This is the proposed M1 approval boundary; implementation remains paused.
+
+# review version by OpenAI web
+
+The M1 architecture proposal is approved with the following required
+adjustments.
+
+Implement M1 after incorporating these decisions.
+
+1. Do not expose tokio_util::sync::CancellationToken in the public harness API.
+
+Use CancellationToken internally, but introduce an opaque harness-owned public
+type such as:
+
+RunCancellationHandle
+
+It should expose only the application-level cancellation behavior required,
+for example request_cancel() and optionally is_cancelled().
+
+start_run returns RunCancellationHandle rather than CancellationToken.
+
+The purpose is to prevent tokio-util from becoming part of our application
+contract.
+
+1. Lifecycle state is authoritative and must not be rolled back or reopened
+because AuditSink failed.
+
+In particular, complete_run must:
+
+- require Running
+- commit Finished(Completed)
+- allocate/record the terminal event
+- if audit fails, return a typed audit error with
+  OperationEffect::StateCommitted
+- keep the context Finished(Completed)
+
+Never leave/revert the run to Running after completion has been committed.
+
+The same invariant applies to all terminal states.
+
+1. start_run has special fail-closed behavior.
+
+Recommended sequence:
+
+Pending
+→ construct runtime state
+→ commit Running
+→ allocate RunStarted event
+→ audit
+
+If RunStarted audit fails under FailClosed:
+
+- do not return a usable cancellation handle
+- terminalize the same run as Finished(Failed { audit-unavailable kind })
+- make a bounded best-effort attempt to audit that terminalization
+- return the sanitized start/audit failure
+
+Do not restore or leave the same RunId Pending for another start attempt.
+
+A retry should create a new run/RunId.
+
+If necessary, add an appropriate provider-independent RunFailureKind for audit
+infrastructure unavailability.
+
+1. Cancellation or deadline exhaustion must terminalize RunContext before an
+operation returns.
+
+If cancellation is observed before or during invoke_model/invoke_tool:
+
+context.status must become Finished(Cancelled)
+
+before returning the cancellation error.
+
+If max_elapsed/deadline is exhausted:
+
+context.status must become:
+
+Finished(
+    BudgetExceeded {
+        dimension: Elapsed
+    }
+)
+
+before returning.
+
+Subsequent operations must therefore fail due to terminal lifecycle state.
+
+Centralize this logic so preflight and in-flight cancellation/deadline paths
+cannot diverge semantically.
+
+Terminal audit failure must never undo or mask the primary safety
+terminalization.
+
+1. Clarify ToolRegistry ownership.
+
+In M1, ToolRegistry may bind:
+
+ToolName
+→ ToolDefinition
+→ Arc<dyn ToolPort>
+
+Its responsibilities are:
+
+- registration
+- name uniqueness
+- definition validation
+- lookup/binding
+
+It MUST NOT perform authorization.
+
+invoke_tool ordering remains:
+
+registry lookup
+→ capability policy
+→ budget
+→ audit
+→ ToolPort invocation
+
+Do not create separate catalog/router crates or abstractions in M1.
+
+1. Rename OperationEffect::Executed.
+
+The harness cannot prove that a remote business side effect occurred merely
+because a port future was invoked.
+
+Use semantics such as:
+
+OperationEffect:
+
+- NotInvoked
+- InvocationStarted
+- StateCommitted
+
+InvocationStarted means that the adapter invocation began and automatic retry
+must not be assumed safe.
+
+Do not claim remote execution certainty.
+
+1. Introduce ModelCallId in agent-core now that real model invocation exists.
+
+The harness generates a new ModelCallId for each model invocation.
+
+Metadata audit events for model invocation start/completion/failure should
+carry the same ModelCallId for correlation.
+
+Tool calls continue to use ToolCallId.
+
+Do not rely only on EventSequence adjacency for operation correlation.
+
+1. Keep RunContext non-Clone and non-serializable.
+
+Runtime fields such as:
+
+- tokio::time::Instant
+- deadline
+- cancellation state
+- audit degraded state
+
+remain harness-local process state.
+
+Do not introduce persistence snapshots yet.
+
+1. Keep RunContext single-owner.
+
+Guarded execution methods use &mut RunContext.
+
+Do not introduce Arc<Mutex<RunContext>>.
+
+Future graph fan-out will define its own branch/budget coordination model.
+
+1. Keep the approved cancellation/deadline race semantics.
+
+Using tokio::select! with biased ordering is acceptable.
+
+Cancellation should be checked/polled before deadline so simultaneous
+readiness deterministically prefers cancellation.
+
+Document that dropping an adapter future is local cooperative cancellation and
+does not prove that a remote side effect stopped.
+
+Do not attempt to solve remote idempotency in M1.
+
+1. Audit failure semantics:
+
+FailClosed:
+
+- pre-invocation audit failure prevents ModelPort/ToolPort invocation
+- post-invocation audit failure reports
+  OperationEffect::InvocationStarted
+- lifecycle audit after committed state reports
+  OperationEffect::StateCommitted
+
+FailOpen:
+
+- mark RunContext audit state degraded
+- continue where safe
+- preserve the original operation result/error
+
+For cancellation/deadline/failure terminalization:
+
+- the primary safety terminal outcome wins
+- terminal audit failure must not reopen state
+- mark audit degraded / bounded best-effort audit as appropriate
+
+Do not include sink raw errors in AgentEvent.
+
+1. Preserve current budget ordering for M1.
+
+Budget reservation occurs before pre-invocation audit as already proposed.
+
+Therefore a FailClosed pre-audit failure may consume the reserved invocation
+slot.
+
+Document that this is an execution reservation budget, not a provider billing
+metric.
+
+Do not implement refunds in M1.
+
+Denied capability requests still consume no tool execution budget.
+
+1. Fakes must not become unconditional production API.
+
+Prefer:
+
+agent-harness/src/testing.rs
+
+with a Cargo feature such as:
+
+test-support = []
+
+and expose the module only under test or that feature.
+
+The M1 CLI demonstration may temporarily enable test-support.
+
+Do not create agent-test-support as a separate crate yet.
+
+1. Keep the proposed fake adapters:
+
+- FakeModelPort
+- FakeToolPort
+- InMemoryAuditSink
+- FailingAuditSink
+
+They should support deterministic invocation counts, scripted results and
+ordering assertions.
+
+1. Event model remains metadata-only.
+
+Extend event kinds as necessary for:
+
+- model invocation started/completed/failed
+- tool invocation started/completed/domain-failed/adapter-failed
+- tool policy denied
+- lifecycle terminal events
+
+Use ModelCallId/ToolCallId for correlation.
+
+EventSequence remains deterministic ordering.
+
+Do not add:
+
+- raw prompts
+- model output
+- tool payloads
+- provider errors
+- credentials
+- wall-clock timestamps
+
+Advance the event schema version if required by the existing schema-version
+contract.
+
+1. Tokio dependencies remain confined outside agent-core.
+
+Use only features actually required.
+
+Tokio:
+
+- rt
+- macros
+- time
+
+test-util only where tests require paused time.
+
+tokio-util:
+
+- rt for CancellationToken support.
+
+Do not enable full, net, fs, process, signal or unrelated features.
+
+1. Keep errors sanitized.
+
+Maintain explicit separation between:
+
+- lifecycle error
+- budget exhaustion
+- cancellation
+- deadline
+- policy denial
+- audit failure
+- ModelPort failure
+- ToolPort failure
+- ToolResult domain failure
+
+Raw SDK/provider/audit error strings must not cross the harness boundary.
+
+1. Implement the deterministic CLI demonstration:
+
+- create one RunContext
+- start it
+- invoke one FakeModelPort response
+- invoke one allowed ReadOnly FakeToolPort
+- complete the run
+- report RunId, final status and budget usage
+
+Do not display raw prompt/tool payloads as part of audit logging.
+
+1. Add/maintain deterministic tests for at least:
+
+- model budget reserved before invocation
+- zero model budget never invokes ModelPort
+- ReadOnly tool executes
+- LocalWrite denied and ToolPort never called
+- denied tool consumes no tool budget
+- exhausted tool budget prevents invocation
+- cancellation before invocation terminalizes the run
+- cancellation during invocation terminalizes the run
+- deadline before invocation terminalizes the run
+- deadline during invocation terminalizes the run
+- operations before start fail
+- operations after terminal state fail
+- complete_run remains Finished(Completed) if its audit fails
+- start FailClosed audit failure leaves run terminal, not Pending/Running
+- deterministic EventSequence
+- ModelCallId correlates model start/completion events
+- ToolCallId correlates tool events
+- FailClosed pre-audit prevents adapter invocation
+- FailOpen pre-audit permits invocation and marks audit degraded
+- post-invocation audit failure reports InvocationStarted
+- lifecycle audit failure reports StateCommitted
+- terminal safety state is preserved if terminal audit fails
+- provider errors remain sanitized
+- ToolResult domain failure remains an ordinary successful port invocation
+- serialized events contain none of the sentinel prompt/input/output/error
+  strings
+
+1. After implementation run:
+
+cargo fmt --all -- --check
+
+cargo clippy \
+  --workspace \
+  --all-targets \
+  --all-features \
+  -- -D warnings
+
+cargo test --workspace --all-features
+
+cargo tree --workspace
+
+cargo tree -p agent-core
+
+Also run:
+
+git diff --check
+
+Do not commit automatically.
+
+At the end report:
+
+1. final changed tree
+2. ExecutionHarness API
+3. RunCancellationHandle API
+4. lifecycle semantics
+5. model execution sequence
+6. tool execution sequence
+7. cancellation/deadline terminalization
+8. audit failure semantics
+9. ToolRegistry binding model
+10. event correlation model
+11. dependencies/features
+12. tests and quality-gate results
+13. dependency direction
+14. deliberate deferrals
+15. any deviations and justification
+
+# M1 Patch
+
+Perform one final semantic verification of M1 before commit.
+
+Do not make broad architectural changes.
+
+Inspect the implemented budget-exhaustion behavior for model and tool calls.
+
+Hard execution-budget exhaustion must have these semantics:
+
+1. If max_model_calls is already exhausted when invoke_model is requested:
+
+   - ModelPort must not be invoked.
+   - RunContext must terminalize as:
+     Finished(BudgetExceeded { dimension: ModelCalls })
+   - The budget-exhaustion terminal state must be committed before returning.
+   - Any terminal audit failure must not reopen or mask this primary state.
+   - Subsequent guarded operations must fail because the run is terminal.
+
+2. If max_tool_calls is already exhausted when an authorized tool invocation is requested:
+
+   - ToolPort must not be invoked.
+   - RunContext must terminalize as:
+     Finished(BudgetExceeded { dimension: ToolCalls })
+   - Terminal audit failure must not reopen the run.
+   - Subsequent guarded operations must fail because the run is terminal.
+
+3. A capability-policy denial is NOT budget exhaustion:
+
+   - It consumes no tool execution budget.
+   - It does not terminalize the run solely because the capability was denied.
+
+4. A FailClosed pre-invocation audit failure after a successful budget reservation is also NOT budget exhaustion:
+
+   - The reserved slot remains consumed according to the approved M1 semantics.
+   - The run does not become BudgetExceeded unless the next attempted reservation actually encounters the configured limit.
+
+5. Verify ToolRegistry cannot create an inconsistent binding between ToolDefinition and ToolPort.
+   Prefer registration to derive the definition from ToolPort::definition(), or otherwise explicitly validate equality/invariants before accepting the binding.
+
+Add deterministic tests if these exact semantics are not already covered.
+
+At minimum verify tests for:
+
+- zero model budget terminalizes with ModelCalls and never invokes ModelPort
+- exhausted model budget terminalizes and prevents later operations
+- zero authorized-tool budget terminalizes with ToolCalls and never invokes ToolPort
+- denied tool does not terminalize as budget exhausted
+- terminal audit failure preserves ModelCalls/ToolCalls budget-exhaustion state
+- ToolRegistry cannot register inconsistent definition/port metadata
+
+Then run:
+
+cargo fmt --all -- --check
+
+cargo clippy
+--workspace
+--all-targets
+--all-features
+-- -D warnings
+
+cargo test --workspace --all-features
+
+git diff --check
+
+Report whether any patch was required.
+
+Do not commit automatically.
