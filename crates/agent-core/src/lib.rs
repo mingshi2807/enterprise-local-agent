@@ -4,6 +4,7 @@ mod budget;
 mod capability;
 mod event;
 mod ids;
+mod loop_control;
 mod model;
 mod run;
 mod tool;
@@ -14,6 +15,9 @@ pub use event::{
     AgentEvent, AgentEventKind, CURRENT_EVENT_SCHEMA_VERSION, EventSchemaVersion, EventSequence,
 };
 pub use ids::{ModelCallId, RunId, SessionId, ToolCallId};
+pub use loop_control::{
+    LoopDecisionKind, LoopEventKind, LoopFailureKind, LoopPhase, LoopProgressEvent,
+};
 pub use model::{
     ModelMessage, ModelOutputPart, ModelRequest, ModelResponse, ModelRole, TokenUsage,
 };

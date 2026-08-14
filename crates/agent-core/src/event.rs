@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityKind, ModelCallId, RunId, RunOutcome, TokenUsage, ToolCallId, ToolDomainFailureKind,
-    ToolName,
+    CapabilityKind, LoopEventKind, ModelCallId, RunId, RunOutcome, TokenUsage, ToolCallId,
+    ToolDomainFailureKind, ToolName,
 };
 
-pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(2);
+pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -128,6 +128,9 @@ pub enum AgentEventKind {
         tool_name: ToolName,
         capability: CapabilityKind,
     },
+    Loop {
+        event: LoopEventKind,
+    },
 }
 
 #[cfg(test)]
@@ -143,12 +146,41 @@ mod tests {
         );
 
         assert_eq!(event.schema_version(), CURRENT_EVENT_SCHEMA_VERSION);
-        assert_eq!(event.schema_version().get(), 2);
+        assert_eq!(event.schema_version().get(), 3);
         assert_eq!(event.sequence().get(), 7);
 
         let json = serde_json::to_string(&event).expect("event must serialize");
         assert!(!json.contains("prompt"));
         assert!(!json.contains("input_schema"));
+    }
+
+    #[test]
+    fn loop_events_are_metadata_only() {
+        let event = AgentEvent::new(
+            RunId::new(),
+            EventSequence::new(2),
+            AgentEventKind::Loop {
+                event: LoopEventKind::ReflectDecision {
+                    iteration: 1,
+                    decision: crate::LoopDecisionKind::Complete,
+                },
+            },
+        );
+
+        let json = serde_json::to_string(&event).expect("event must serialize");
+
+        assert!(json.contains("reflect_decision"));
+        assert!(json.contains("complete"));
+        for sentinel in [
+            "sentinel raw prompt",
+            "sentinel model output",
+            "sentinel tool input",
+            "sentinel tool output",
+            "provider failed noisily",
+            "input_schema",
+        ] {
+            assert!(!json.contains(sentinel));
+        }
     }
 
     #[test]

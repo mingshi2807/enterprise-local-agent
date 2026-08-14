@@ -30,7 +30,7 @@ impl RunContext {
             run_id,
             session_id,
             budget,
-            usage: BudgetUsage::new(0, 0),
+            usage: BudgetUsage::new(0, 0, 0),
             status: RunStatus::Pending,
             next_event_sequence: EventSequence::new(0),
             runtime: None,
@@ -102,7 +102,7 @@ impl RunContext {
             return Err(BudgetExceeded::new(BudgetDimension::ModelCalls));
         }
 
-        self.usage = BudgetUsage::new(usage + 1, self.usage.tool_calls());
+        self.usage = BudgetUsage::new(usage + 1, self.usage.tool_calls(), self.usage.iterations());
         Ok(())
     }
 
@@ -113,8 +113,20 @@ impl RunContext {
             return Err(BudgetExceeded::new(BudgetDimension::ToolCalls));
         }
 
-        self.usage = BudgetUsage::new(self.usage.model_calls(), usage + 1);
+        self.usage = BudgetUsage::new(self.usage.model_calls(), usage + 1, self.usage.iterations());
         Ok(())
+    }
+
+    pub(crate) fn reserve_iteration(&mut self) -> Result<u32, BudgetExceeded> {
+        let usage = self.usage.iterations();
+        let limit = self.budget.max_iterations();
+        if usage >= limit {
+            return Err(BudgetExceeded::new(BudgetDimension::Iterations));
+        }
+
+        let iteration = usage + 1;
+        self.usage = BudgetUsage::new(self.usage.model_calls(), self.usage.tool_calls(), iteration);
+        Ok(iteration)
     }
 
     pub(crate) fn cancellation(&self) -> Result<CancellationToken, RunContextError> {

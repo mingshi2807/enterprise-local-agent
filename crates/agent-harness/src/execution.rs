@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentEvent, AgentEventKind, BudgetDimension, ModelCallId, ModelRequest, ModelResponse,
-    RunFailureKind, RunOutcome, RunStatus, ToolCall, ToolResult,
+    AgentEvent, AgentEventKind, BudgetDimension, LoopEventKind, LoopProgressEvent, ModelCallId,
+    ModelRequest, ModelResponse, RunFailureKind, RunOutcome, RunStatus, ToolCall, ToolResult,
 };
 use tokio::time::{Instant, sleep_until, timeout};
 
@@ -20,9 +20,9 @@ use crate::{
 /// Cancellation is polled before the deadline so simultaneous readiness has
 /// deterministic cancellation-first semantics.
 ///
-/// Model/tool counters are execution reservations, not provider billing
-/// metrics. A reservation made before a fail-closed audit error is consumed
-/// and is not refunded in M1.
+/// Model/tool/iteration counters are execution reservations, not provider
+/// billing metrics. A reservation made before a fail-closed audit error is
+/// consumed and is never refunded.
 pub struct ExecutionHarness {
     model: Arc<dyn ModelPort>,
     tools: ToolRegistry,
@@ -133,6 +133,64 @@ impl ExecutionHarness {
             }
             Err(error) => Err(error),
         }
+    }
+
+    pub async fn checkpoint(&self, context: &mut RunContext) -> Result<(), HarnessError> {
+        self.preflight(context, HarnessOperation::Checkpoint).await
+    }
+
+    pub async fn begin_iteration(&self, context: &mut RunContext) -> Result<u32, HarnessError> {
+        self.preflight(context, HarnessOperation::BeginIteration)
+            .await?;
+
+        let iteration = match context.reserve_iteration() {
+            Ok(iteration) => iteration,
+            Err(error) => {
+                self.terminalize_safety(
+                    context,
+                    SafetyTerminalization::BudgetExceeded(error.dimension()),
+                )
+                .await;
+                return Err(error.into());
+            }
+        };
+        let event = context.next_event(AgentEventKind::Loop {
+            event: LoopEventKind::IterationStarted {
+                iteration,
+                usage: context.usage().iterations(),
+                limit: context.budget().max_iterations(),
+            },
+        })?;
+        self.audit_invocation(
+            context,
+            &event,
+            HarnessOperation::BeginIteration,
+            AuditPhase::Lifecycle,
+            OperationEffect::StateCommitted,
+        )
+        .await?;
+        Ok(iteration)
+    }
+
+    pub async fn record_loop_progress(
+        &self,
+        context: &mut RunContext,
+        progress: LoopProgressEvent,
+    ) -> Result<(), HarnessError> {
+        self.preflight(context, HarnessOperation::RecordLoopProgress)
+            .await?;
+
+        let event = context.next_event(AgentEventKind::Loop {
+            event: progress.into(),
+        })?;
+        self.audit_invocation(
+            context,
+            &event,
+            HarnessOperation::RecordLoopProgress,
+            AuditPhase::Lifecycle,
+            OperationEffect::StateCommitted,
+        )
+        .await
     }
 
     pub async fn invoke_tool(

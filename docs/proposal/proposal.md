@@ -1089,7 +1089,7 @@ M1 should introduce one executable ExecutionHarness that owns adapter access and
 
   This is the proposed M1 approval boundary; implementation remains paused.
 
-# review version by OpenAI web
+# M1 review version by OpenAI web
 
 The M1 architecture proposal is approved with the following required
 adjustments.
@@ -1540,3 +1540,962 @@ git diff --check
 Report whether any patch was required.
 
 Do not commit automatically.
+
+----
+14.08.2026
+
+## Propoal Codex
+
+# M2 Architecture Proposal — Deterministic Loop Engineering
+
+## Summary
+
+  Create a new agent-loop crate containing a pure typed loop state machine and a sequential asynchronous driver. agent-core gains only shared loop vocabulary and budget/event metadata; agent-harness remains
+  the sole lifecycle, budget, audit, cancellation, deadline, model, and tool membrane.
+
+  Key decisions:
+
+- LoopPhase lives in agent-core because it appears in shared audit events and client-visible runtime metadata.
+- Legal transitions and LoopState live in agent-loop.
+- One LoopProgram trait has six typed phase methods; this avoids six separate handler abstractions.
+- Phase methods receive a narrow LoopEffects façade, never ports or audit sinks.
+- The caller starts the run and retains RunCancellationHandle; LoopEngine owns loop-derived completion/failure.
+- Iterations are reserved through ExecutionHarness::begin_iteration.
+- Loop progression is recorded through a narrow harness-owned control-event API.
+- Non-terminal harness errors fail M2 immediately. Only Reflect::Continue starts another iteration.
+- M2 remains sequential with &mut RunContext.
+
+## 1. Proposed tree/module changes
+
+  Cargo.toml
+  apps/agent-cli/
+  └── src/main.rs                     # Replace M1 sequence with scripted M2 loop demo
+
+  crates/agent-core/src/
+  ├── budget.rs                       # max_iterations, usage, Iterations dimension
+  ├── event.rs                        # loop metadata events, schema version 3
+  ├── loop_control.rs                 # shared LoopPhase/decision/failure vocabulary
+  ├── run.rs                          # loop-specific RunFailureKind variant
+  └── lib.rs                          # exports
+
+  crates/agent-harness/src/
+  ├── context.rs                      # private iteration reservation
+  ├── execution.rs                    # begin_iteration + loop-event recording
+  ├── error.rs                        # new guarded operations/stages
+  └── lib.rs                          # exports
+
+  crates/agent-loop/
+  ├── Cargo.toml
+  └── src/
+      ├── lib.rs
+      ├── state.rs                    # pure legal-transition state machine
+      ├── program.rs                  # LoopProgram, LoopEffects, verification
+      ├── engine.rs                   # sequential asynchronous driver
+      ├── error.rs                    # loop/program/transition errors
+      └── tests.rs                    # deterministic M2 tests
+
+  This preserves the M1 rule that all RunContext mutation remains crate-private inside the harness, as currently established in crates/agent-harness/src/context.rs:9.
+
+## 2. Dependency direction
+
+  agent-cli
+     ├── agent-loop
+     ├── agent-harness
+     └── agent-core
+
+  agent-loop
+     ├── agent-harness
+     └── agent-core
+
+  agent-harness
+     └── agent-core
+
+  Forbidden directions:
+
+- agent-core must not depend on agent-harness or agent-loop.
+- agent-harness must not depend on agent-loop.
+- agent-loop production code must not import or invoke ModelPort, ToolPort, or AuditSink.
+- No provider, network, graph, retrieval, persistence, or orchestration dependency is added.
+
+## 3. Public API
+
+### Shared vocabulary in agent-core
+
+  pub enum LoopPhase {
+      Observe,
+      Retrieve,
+      Plan,
+      Act,
+      Verify,
+      Reflect,
+  }
+
+  pub enum VerificationResult {
+      Passed,
+      Failed,
+  }
+
+  pub enum LoopFailureKind {
+      Program { phase: LoopPhase },
+      VerificationFailed,
+      NoProgress,
+  }
+
+  pub enum ReflectDecision {
+      Complete,
+      Continue,
+      Fail { kind: LoopFailureKind },
+  }
+
+  RunFailureKind gains:
+
+  Loop { kind: LoopFailureKind }
+
+  Budget APIs become:
+
+  RunBudget::new(
+      max_model_calls: u32,
+      max_tool_calls: u32,
+      max_iterations: u32,
+      max_elapsed: Duration,
+  )
+
+  BudgetUsage::new(
+      model_calls: u32,
+      tool_calls: u32,
+      iterations: u32,
+  )
+
+  BudgetDimension gains Iterations.
+
+### Harness extensions
+
+  impl ExecutionHarness {
+      pub async fn begin_iteration(
+          &self,
+          context: &mut RunContext,
+      ) -> Result<u32, HarnessError>;
+
+      pub async fn record_loop_event(
+          &self,
+          context: &mut RunContext,
+          event: LoopProgressEvent,
+      ) -> Result<(), HarnessError>;
+  }
+
+  begin_iteration is the only public way to reserve an iteration. LoopProgressEvent excludes IterationStarted, preventing callers from forging reservation events.
+
+### agent-loop API
+
+  pub struct LoopEngine;
+
+  impl LoopEngine {
+      pub async fn run<P: LoopProgram>(
+          &self,
+          harness: &ExecutionHarness,
+          context: &mut RunContext,
+          program: &mut P,
+          working_state: &mut P::WorkingState,
+      ) -> Result<LoopRunSummary, LoopError>;
+  }
+
+  pub trait LoopProgram: Send {
+      type WorkingState: Send;
+
+      fn observe(... ) -> LoopFuture<'_, Result<(), LoopStepError>>;
+      fn retrieve(...) -> LoopFuture<'_, Result<(), LoopStepError>>;
+      fn plan(... ) -> LoopFuture<'_, Result<(), LoopStepError>>;
+      fn act(... ) -> LoopFuture<'_, Result<(), LoopStepError>>;
+      fn verify(...) -> LoopFuture<'_, Result<VerificationResult, LoopStepError>>;
+      fn reflect(
+          ...,
+          verification: VerificationResult,
+      ) -> LoopFuture<'_, Result<ReflectDecision, LoopStepError>>;
+  }
+
+  Each method receives:
+
+- current iteration number;
+- &mut WorkingState;
+- a LoopEffects value exposing only invoke_model and invoke_tool.
+
+  LoopFuture uses std::future::Future and Pin<Box<...>>; no async-trait or production Tokio dependency is needed.
+
+## 4. State-machine design
+
+  LoopState is a pure synchronous state machine in agent-loop:
+
+  pub struct LoopState {
+      current_iteration: Option<u32>,
+      completed_iterations: u32,
+      position: LoopPosition,
+  }
+
+  enum LoopPosition {
+      Ready,
+      PhaseReady(LoopPhase),
+      PhaseRunning(LoopPhase),
+      Finished(LoopTerminal),
+  }
+
+  Legal operations:
+
+  1. begin_iteration(n) changes Ready → PhaseReady(Observe).
+  2. enter_phase(expected) changes PhaseReady(expected) → PhaseRunning(expected).
+  3. complete_phase(expected) advances exactly:
+     Observe → Retrieve → Plan → Act → Verify → Reflect.
+
+  4. Completing Reflect requires a typed ReflectDecision:
+      - Continue completes the iteration and returns to Ready;
+      - Complete completes the iteration and terminalizes loop control;
+      - Fail completes the iteration and terminalizes with its stable kind.
+
+  No API accepts a caller-selected next phase. Any mismatched phase or transition returns LoopTransitionError.
+
+  Separating pure state from the asynchronous driver is preferred over embedding transitions directly in LoopEngine::run because it independently proves phase legality, exact ordering, and terminal behavior. A
+  generic graph/state-machine framework would add no M2 value.
+
+  LoopState may derive Serde for deterministic inspection and round-trip tests. This does not establish durable resume: it excludes RunContext, budgets’ runtime authority, audit state, cancellation, deadlines,
+  and working data.
+
+## 5. Phase execution design
+
+  Use one LoopProgram trait with six methods, not six traits.
+
+  LoopEffects contains private references to ExecutionHarness and RunContext and exposes only:
+
+  pub async fn invoke_model(
+      &mut self,
+      request: ModelRequest,
+  ) -> Result<ModelResponse, HarnessError>;
+
+  pub async fn invoke_tool(
+      &mut self,
+      call: ToolCall,
+  ) -> Result<ToolResult, HarnessError>;
+
+  It contains no policy, budget, retry, audit, timeout, or transition logic; it only forwards to the existing harness methods in crates/agent-harness/src/execution.rs:73.
+
+  Phase semantics:
+
+- Observe: scripted deterministic update of working state.
+- Retrieve: deterministic no-op or sets a typed retrieval_performed/empty-result state. No RetrievalPort.
+- Plan: invokes one scripted fake model through LoopEffects; the response is data only.
+- Act: invokes one scripted allowed ReadOnly tool through LoopEffects.
+- Verify: returns VerificationResult::Passed or Failed.
+- Reflect: returns ReflectDecision; it never accepts free-form text as a transition.
+
+  Rejected alternatives:
+
+- One execute_phase(LoopPhase) method allows phase/result mismatches that six typed methods prevent.
+- A sans-I/O effect interpreter would enforce purity more strongly but prematurely introduces command/result protocol machinery.
+- Putting all behavior directly in LoopEngine::run would make the engine both control runtime and application program.
+
+  Program futures must not perform blocking or external work independently. External effects belong behind LoopEffects.
+
+## 6. Iteration-budget design
+
+  RunBudget and BudgetUsage gain max_iterations and iterations; zero is valid.
+
+  ExecutionHarness::begin_iteration executes:
+
+  1. Require RunStatus::Running.
+  2. Run existing cancellation/deadline preflight.
+  3. Call private RunContext::reserve_iteration.
+  4. If exhausted, commit:
+     Finished(BudgetExceeded { dimension: Iterations }).
+
+  5. Emit IterationStarted { iteration, usage, limit }.
+  6. Return the one-based iteration number.
+
+  Reservation occurs immediately before LoopState enters Observe. No handler runs if reservation fails.
+
+  Once incremented, usage is never refunded for:
+
+- program failure;
+- audit failure;
+- model/tool failure;
+- cancellation;
+- elapsed deadline;
+- normal Reflect failure.
+
+  The current model/tool terminalization pattern at crates/agent-harness/src/execution.rs:81 is reused rather than reimplemented in agent-loop.
+
+## 7. Lifecycle ownership
+
+  Adopt split lifecycle ownership:
+
+- The composition layer calls ExecutionHarness::start_run and retains RunCancellationHandle.
+- LoopEngine::run requires an already Running context.
+- LoopEngine owns loop-derived complete_run and fail_run calls.
+- Fatal harness terminalization is preserved and never overwritten.
+
+  This combines the useful parts of the two proposed options:
+
+- Caller-owned start provides the cancellation handle before the loop future completes, without spawning tasks or adding Arc<Mutex<RunContext>>.
+- Engine-owned completion/failure ensures every normal Reflect terminal decision is converted into exactly one terminal RunOutcome.
+- CLI/API callers do not duplicate Reflect-to-lifecycle mapping.
+
+  Passing Pending or terminal context to run returns a typed harness lifecycle error without executing a phase.
+
+## 8. Working-state design
+
+  LoopProgram owns an associated WorkingState. LoopEngine treats it as opaque and only passes &mut references to the active phase.
+
+  The scripted M2 state may contain typed fields such as:
+
+  struct ScriptedWorkingState {
+      observed: bool,
+      retrieval: ScriptedRetrieval,
+      plan_response: Option<ModelResponse>,
+      action_result: Option<ToolResult>,
+  }
+
+  Rules:
+
+- No serde_json::Value property bag.
+- Payload-bearing state is not added to LoopState or audit events.
+- Avoid derived Debug where it could expose model/tool payloads.
+- Provider-neutral ModelResponse and ToolResult may exist in working state because they are already core boundary types.
+- Later M3/M8 programs can replace the associated state type without changing loop transitions or LoopEngine.
+
+  Working state is not automatically serializable and is not a durable checkpoint contract.
+
+## 9. Harness interaction, recovery, budgets, and cancellation
+
+  Every phase boundary is recorded through ExecutionHarness::record_loop_event, whose preflight checks cancellation and elapsed deadline. This detects cancellation between phases without exposing
+  CancellationToken.
+
+  Long-running model/tool effects remain protected by the existing biased cancellation-first tokio::select! logic at crates/agent-harness/src/execution.rs:280.
+
+  Recovery policy:
+
+- No automatic retries.
+- ToolResult::DomainFailure remains normal typed data and may lead Verify/Reflect to Continue or Fail.
+- A non-terminal HarnessError immediately fails M2; it is not silently passed to Reflect.
+- A terminal harness error stops immediately and preserves the existing RunStatus.
+- Reflect::Continue is the only normal recovery path and begins a complete new iteration.
+
+  Hard budgets:
+
+   Dimension     Reservation/check                     Terminal outcome
+  ━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   ModelCalls    invoke_model                          BudgetExceeded(ModelCalls)
+  ────────────  ────────────────────────────────────  ────────────────────────────
+   ToolCalls     authorized invoke_tool                BudgetExceeded(ToolCalls)
+  ────────────  ────────────────────────────────────  ────────────────────────────
+   Iterations    begin_iteration                       BudgetExceeded(Iterations)
+  ────────────  ────────────────────────────────────  ────────────────────────────
+   Elapsed       harness preflight/invocation/audit    BudgetExceeded(Elapsed)
+
+  No phase or iteration continues after any terminal outcome.
+
+## 10. Observability design
+
+  Add shared metadata-only loop events to AgentEventKind:
+
+  AgentEventKind::Loop(LoopEventKind)
+
+  LoopEventKind contains:
+
+- IterationStarted { iteration, usage, limit }
+- PhaseEntered { iteration, phase }
+- PhaseCompleted { iteration, phase }
+- ReflectDecision { iteration, decision }
+- IterationCompleted { iteration }
+- LoopCompleted { completed_iterations }
+- LoopFailed { iteration, kind }
+
+  Expected successful ordering:
+
+  RunStarted
+  IterationStarted(1)
+  PhaseEntered(Observe)
+  PhaseCompleted(Observe)
+  ...
+  PhaseEntered(Plan)
+  ModelInvocationStarted
+  ModelInvocationCompleted
+  PhaseCompleted(Plan)
+  PhaseEntered(Act)
+  ToolInvocationStarted
+  ToolInvocationCompleted
+  PhaseCompleted(Act)
+  ...
+  PhaseCompleted(Reflect)
+  ReflectDecision(Complete)
+  IterationCompleted(1)
+  LoopCompleted
+  RunFinished(Completed)
+
+  All loop events are created by RunContext::next_event, preserving the authoritative EventSequence allocation currently defined at crates/agent-harness/src/context.rs:137.
+
+  Event fields contain only typed phases, decisions, stable failure categories, iteration numbers, and limits. They contain no prompts, outputs, tool payloads, schemas, provider strings, credentials, or
+  timestamps.
+
+  CURRENT_EVENT_SCHEMA_VERSION advances from 2 to 3 because serialized event vocabulary changes. Existing v2 variants remain readable; all new writers emit v3. No persistence migration is introduced.
+
+  If a fatal harness operation already terminalized the run, no post-terminal loop event is attempted; the authoritative RunFinished event remains final evidence.
+
+## 11. Error semantics
+
+   Condition                    Returned error/control                    Run outcome
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Illegal transition           LoopError::Transition                     Internal if encountered during an active run
+  ───────────────────────────  ────────────────────────────────────────  ──────────────────────────────────────────────
+   Iteration exhaustion         LoopError::Harness(BudgetExceeded)        BudgetExceeded(Iterations)
+  ───────────────────────────  ────────────────────────────────────────  ──────────────────────────────────────────────
+   Program failure              LoopError::Program { phase }              Failed(Loop::Program { phase })
+  ───────────────────────────  ────────────────────────────────────────  ──────────────────────────────────────────────
+   Harness lifecycle failure    LoopError::Harness(InvalidLifecycle)      Existing status preserved
+  ───────────────────────────  ────────────────────────────────────────  ──────────────────────────────────────────────
+   Cancellation                 LoopError::Harness(Cancelled)             Cancelled
+  ───────────────────────────  ────────────────────────────────────────  ──────────────────────────────────────────────
+   Deadline                     LoopError::Harness(DeadlineExceeded)      BudgetExceeded(Elapsed)
+  ───────────────────────────  ────────────────────────────────────────  ──────────────────────────────────────────────
+   Model adapter error          typed HarnessError::ModelPort             immediate Failed(Model) if still running
+  ───────────────────────────  ────────────────────────────────────────  ──────────────────────────────────────────────
+   Tool/policy/lookup error     typed tool-related HarnessError           immediate Failed(Tool) if still running
+  ───────────────────────────  ────────────────────────────────────────  ──────────────────────────────────────────────
+   Audit error                  typed HarnessError::Audit                 Failed(AuditUnavailable) if still running
+  ───────────────────────────  ────────────────────────────────────────  ──────────────────────────────────────────────
+   Reflect Fail                 normal LoopRunSummary, not exceptional    Failed(Loop { kind })
+
+  If lifecycle finalization itself returns an audit error after committing state, return LoopError::Finalization containing the primary and finalization errors while preserving the committed terminal outcome.
+
+  Terminal loop decisions take precedence over failures encountered while auditing their final metadata; an audit error must not reopen or replace the already selected primary outcome.
+
+## 12. Deterministic test plan
+
+### Pure state tests
+
+- Exact legal Observe → Retrieve → Plan → Act → Verify → Reflect order.
+- Wrong phase entry/completion is rejected.
+- A phase cannot be entered twice or skipped.
+- Complete, Continue, and Fail are accepted only after Reflect.
+- Continue returns to iteration-ready state.
+- Serialized LoopState round-trips without runtime fields.
+
+### Loop/harness integration tests
+
+- One full iteration completes.
+- Continue produces exactly two complete traversals and two reservations.
+- Complete starts no additional iteration.
+- Reflect Fail terminalizes with its stable loop failure kind.
+- Zero iteration budget executes no handler.
+- Exhausted iteration budget terminalizes as Iterations.
+- Mid-iteration program failure leaves iteration usage consumed.
+- Cancellation/deadline mid-iteration leave usage consumed.
+- One fake model invocation occurs through harness during Plan.
+- One fake allowed ReadOnly tool invocation occurs through harness during Act.
+- ModelCalls and ToolCalls exhaustion stop immediately.
+- Elapsed deadline and cancellation stop immediately.
+- No phase runs after terminalization.
+- Tool domain failure remains typed and can drive Reflect Continue/Fail.
+- Non-terminal provider/tool/audit errors fail without retry.
+
+### Observability and boundary tests
+
+- Exact loop/model/tool/audit EventSequence ordering.
+- Failed audit attempts retain sequence-gap semantics.
+- No prompt/output/tool sentinel appears in serialized events.
+- Production agent-loop sources and public API contain no ModelPort, ToolPort, AuditSink, Tokio, provider, network, graph, or retrieval dependency.
+- cargo tree -p agent-loop confirms only approved dependencies.
+
+### Required gates
+
+  cargo fmt --all -- --check
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
+  cargo test --workspace --all-features
+  cargo tree --workspace
+  cargo tree -p agent-core
+  cargo tree -p agent-loop
+  git diff --check
+
+## 13. CLI demonstration
+
+  The CLI constructs:
+
+- budget: one model call, one tool call, one iteration, bounded elapsed time;
+- current fake model and fake ReadOnly tool;
+- current in-memory audit sink;
+- scripted working state and ScriptedLoopProgram.
+
+  Execution:
+
+  start_run
+  LoopEngine::run
+    iteration 1
+    Observe
+    Retrieve (scripted empty)
+    Plan → fake model through LoopEffects/ExecutionHarness
+    Act → fake ReadOnly tool through LoopEffects/ExecutionHarness
+    Verify(Passed)
+    Reflect(Complete)
+    complete_run
+
+- RunId
+- iteration and phase progression derived from safe loop events
+- final RunStatus
+- model/tool/iteration usage
+- audit_degraded
+
+  The cancellation handle is retained by the CLI composition layer but does not require a spawned task. No prompt, model output, tool input/output, or audit payload is printed.
+
+## 14. Dependency changes
+
+  agent-loop production dependencies:
+
+- agent-core: shared domain and loop vocabulary.
+- agent-harness: guarded execution façade.
+- serde: LoopState serialization.
+- thiserror: typed loop errors.
+- Standard library futures/pinning.
+
+  Development-only dependencies:
+
+- tokio with test-util for deterministic async cancellation/deadline tests.
+- serde_json for state/event serialization assertions.
+- agent-harness test-support feature for existing fake infrastructure.
+
+  Workspace/CLI changes:
+
+- Add agent-loop as a workspace dependency/member.
+- Add agent-loop to agent-cli.
+
+  No new third-party crate is introduced, and agent-loop has no direct production Tokio dependency.
+
+## 15. Risks and tradeoffs
+
+- Premature working-memory schema: mitigated by the associated opaque WorkingState; only loop control vocabulary is stabilized.
+- Loop becoming a second harness: mitigated by keeping LoopEffects as forwarding-only and all policy/budget/audit/cancellation logic in ExecutionHarness.
+- Handler bypass: production agent-loop exposes no ports; dependency/source checks guard the boundary.
+- Core coupling: agent-core receives only client-visible phase/decision/failure/event vocabulary. Transition rules stay in agent-loop.
+- Async handler misuse: program contract forbids blocking/external work outside LoopEffects; M2 implementations are scripted and deterministic.
+- Graph composition: future graphs may treat one complete deterministic loop as a node; M2 adds no graph edge, branch, or fan-in semantics.
+- Durable checkpoints: serializable LoopState is inspectable control metadata, not a resumable execution snapshot.
+- Parallel branches: &mut RunContext intentionally serializes M2; future graph work must design owned branch state and deterministic budget/event fan-in.
+- Rig structured outputs: future adapters may map structured responses into typed working state or Reflect decisions, but raw provider output never controls phase transitions.
+- API compatibility: adding required iteration fields changes the current pre-1.0 constructors and serialized budget shape deliberately; no persistence compatibility promise is created in M2.
+
+# M2 Web OpenAI review
+
+The M2 architecture proposal is approved with the following required
+adjustments.
+
+Implement M2 after applying these decisions.
+
+1. Keep agent-core lean.
+
+LoopPhase belongs in agent-core because it is shared client/audit/runtime
+metadata.
+
+LoopFailureKind may also live in agent-core where required by RunFailureKind
+and metadata events.
+
+However keep orchestration-only types in agent-loop where possible.
+
+In particular, VerificationResult belongs in agent-loop.
+
+ReflectDecision should also remain in agent-loop unless there is a concrete
+shared-domain requirement. If audit needs a decision representation, introduce
+a minimal metadata-facing LoopDecisionKind in agent-core rather than moving the
+entire control type into core.
+
+Do not move LoopState/LoopPosition/LoopTerminal into agent-core.
+
+1. Remove speculative NoProgress semantics.
+
+Do not add LoopFailureKind::NoProgress in M2 because no no-progress algorithm
+exists yet.
+
+Only introduce failure kinds whose semantics are exercised in M2.
+
+1. Do not serialize LoopState in M2.
+
+LoopState is pure control state but is NOT yet a persistence or checkpoint
+contract.
+
+Do not derive Serialize/Deserialize merely for inspection.
+
+Prefer Debug/Clone/PartialEq/Eq where appropriate.
+
+Therefore agent-loop should not require a production serde dependency solely
+for LoopState.
+
+A future persistence/checkpoint milestone will define an explicit versioned
+LoopSnapshot.
+
+1. Add a narrow ExecutionHarness control checkpoint API.
+
+Do not make loop cancellation/deadline detection depend solely on recording
+an audit event.
+
+Add a harness method conceptually like:
+
+ExecutionHarness::checkpoint(&mut RunContext)
+
+Its responsibility is only to:
+
+- require Running
+- check cancellation
+- check elapsed deadline
+- terminalize cancellation/deadline using existing M1 semantics
+
+It must not consume model/tool/iteration budgets.
+
+It must not invoke model/tool ports.
+
+LoopEngine should call a harness checkpoint at deterministic phase boundaries.
+
+record_loop_progress may also defensively preflight, but observability must not
+be the only safety-control mechanism.
+
+1. Every phase transition must verify the authoritative RunContext status.
+
+After each LoopProgram phase future returns and before PhaseCompleted or the
+next transition:
+
+- inspect RunContext status
+
+If the context is terminal for any reason:
+
+- stop immediately
+- preserve the existing terminal RunOutcome
+- do not emit further normal phase progression events
+- do not enter another phase
+
+This invariant applies even if a LoopProgram implementation accidentally
+ignored/swallowed a HarnessError returned by LoopEffects.
+
+The loop must never continue after RunContext is terminal.
+
+1. LoopProgram is trusted in-process application logic.
+
+Document this accurately.
+
+The M2 architectural contract requires model/tool/enterprise effects to use
+LoopEffects, and the agent-loop production crate must contain no provider,
+network, MCP, retrieval or direct port dependencies.
+
+However do not claim the Rust type system prevents arbitrary downstream trusted
+LoopProgram implementations from performing their own I/O.
+
+Untrusted plugin execution and sandbox enforcement are outside M2 and belong to
+future sandbox/plugin capability work.
+
+1. Keep LoopEffects narrow.
+
+LoopEffects may expose only guarded capabilities needed by M2, initially:
+
+invoke_model(...)
+invoke_tool(...)
+
+It must not expose:
+
+- ModelPort
+- ToolPort
+- AuditSink
+- ToolRegistry
+- budget mutation
+- capability policy
+- CancellationToken
+- runtime deadlines
+- direct RunContext mutation
+
+All effects forward through ExecutionHarness.
+
+1. Illegal loop transitions are fatal engine invariant failures.
+
+If an illegal LoopState transition occurs while RunContext is still Running:
+
+- terminalize the run using an appropriate stable internal/loop-invariant
+  RunFailureKind
+- return LoopError::Transition
+
+Never return an internal transition error while leaving the run Running.
+
+Do not panic.
+
+1. Clarify terminal decision authority.
+
+ReflectDecision::Complete or ReflectDecision::Fail is loop-control intent until
+the corresponding ExecutionHarness lifecycle operation commits RunStatus.
+
+Normal successful terminal sequence should conceptually be:
+
+Reflect returns decision
+→ pure LoopState accepts decision
+→ record ReflectDecision metadata
+→ record IterationCompleted metadata
+→ record LoopCompleted/LoopFailed metadata
+→ ExecutionHarness::complete_run/fail_run
+→ authoritative Finished(...) RunStatus
+
+Under FailClosed, if loop-metadata auditing fails while RunContext is still
+Running, apply the normal M2 non-terminal harness-error failure policy.
+
+Once ExecutionHarness has committed a terminal RunStatus, no audit/finalization
+error may reopen or replace that state.
+
+Preserve M1's rule that committed RunStatus is authoritative.
+
+1. Do not duplicate M1 terminalization rules inside agent-loop.
+
+After a HarnessError, inspect RunContext.status().
+
+If RunContext is already Finished(...):
+
+- preserve that terminal state
+- stop immediately
+
+If it is still Running:
+
+- M2 uses the simple safe policy of failing the run through
+  ExecutionHarness::fail_run with an appropriate stable failure category
+
+Do not reimplement cancellation, deadline or budget terminalization in
+agent-loop.
+
+1. Iteration budgeting remains owned by ExecutionHarness.
+
+Implement:
+
+ExecutionHarness::begin_iteration(...)
+
+The loop may not mutate BudgetUsage directly.
+
+begin_iteration must:
+
+- require Running
+- check cancellation/deadline
+- reserve iteration
+- terminalize BudgetExceeded { Iterations } when exhausted
+- emit metadata IterationStarted on successful reservation
+- return the one-based iteration number
+
+A started/reserved iteration is never refunded.
+
+Zero max_iterations means no phase runs.
+
+1. Add explicit iteration/audit tests.
+
+FailClosed IterationStarted audit failure:
+
+- iteration slot remains consumed
+- Observe never runs
+- LoopEngine sees a non-terminal audit error
+- active run is terminalized according to M2 audit failure policy
+
+FailOpen IterationStarted audit failure:
+
+- iteration remains consumed
+- audit_degraded is true
+- Observe and the normal loop may continue
+
+1. Preserve the pure synchronous LoopState design.
+
+Use an explicit typed transition state machine.
+
+No caller-selectable next phase.
+
+Legal normal ordering is exactly:
+
+Observe
+→ Retrieve
+→ Plan
+→ Act
+→ Verify
+→ Reflect
+
+Only Reflect may normally produce:
+
+- Continue
+- Complete
+- Fail
+
+Continue returns the pure loop state to iteration-ready.
+
+Complete and Fail terminalize the pure loop-control state.
+
+1. Keep one LoopProgram trait rather than six phase traits.
+
+Use six typed methods on the one program abstraction.
+
+Do not introduce a generic graph/state-machine framework.
+
+Do not add a sans-I/O command protocol in M2 unless implementation reveals a
+concrete blocker that cannot be solved cleanly with the approved LoopProgram /
+LoopEffects design.
+
+1. Keep working state opaque and program-owned.
+
+LoopProgram::WorkingState remains an associated type.
+
+LoopEngine does not inspect model/tool payload content.
+
+Do not introduce:
+
+- serde_json property bags
+- persistence snapshots
+- provider objects
+- graph state
+- retrieval objects
+
+The scripted M2 WorkingState may use typed provider-neutral ModelResponse and
+ToolResult values internally.
+
+Avoid Debug on payload-bearing state where it could leak model/tool contents.
+
+1. Retrieve remains deterministic/no-op in M2.
+
+Do not add RetrievalPort, RAG, embeddings, vector DB or OVH Knowledge.
+
+1. Recovery remains simple.
+
+No automatic retries.
+
+Reflect::Continue is the only normal loop recovery/repetition path.
+
+ToolResult domain failures may be represented in WorkingState and influence
+Verify/Reflect.
+
+Non-terminal HarnessError causes the M2 run to fail.
+
+Terminal HarnessError preserves the existing terminal RunStatus.
+
+1. Loop observability remains metadata-only.
+
+Add:
+
+- IterationStarted
+- PhaseEntered
+- PhaseCompleted
+- ReflectDecision metadata
+- IterationCompleted
+- LoopCompleted
+- LoopFailed
+
+Do not include:
+
+- prompts
+- model output
+- tool input/output
+- schemas
+- provider/audit raw error strings
+- credentials
+- wall-clock ordering
+
+EventSequence remains authoritative.
+
+Use ModelCallId and ToolCallId for effect correlation as already established.
+
+Advance CURRENT_EVENT_SCHEMA_VERSION to 3 if required by the event vocabulary
+change, but do not introduce persistence migration or make backward-
+compatibility guarantees yet.
+
+1. LoopRunSummary must be metadata-only.
+
+It may contain information such as:
+
+- completed/reserved iteration counts
+- terminal loop decision/category
+- final status snapshot if appropriate
+
+It must not expose raw working-state payloads.
+
+1. M2 remains sequential.
+
+Use &mut RunContext.
+
+Do not introduce Arc<Mutex<RunContext>>, spawning, fan-out, child contexts or
+parallel phases.
+
+1. Agent-loop should have minimal production dependencies.
+
+Expected production dependencies should preferably be only:
+
+- agent-core
+- agent-harness
+- thiserror if required
+
+No production Tokio dependency is expected.
+
+Tokio/test-util may be dev-only for deterministic async tests.
+
+Do not add serde to agent-loop solely to serialize LoopState.
+
+1. Required deterministic tests include all tests from the proposal plus:
+
+- LoopProgram swallowing a terminal HarnessError cannot make the loop advance
+  after RunContext becomes Finished
+- FailClosed IterationStarted audit failure consumes iteration but executes no
+  Observe
+- FailOpen IterationStarted audit failure marks degraded and permits Observe
+- internal transition failure terminalizes an active run
+- no loop metadata is emitted after an externally terminalized RunContext
+- LoopState itself has no persistence/serialization contract in M2
+
+1. CLI demonstration:
+
+start_run
+→ LoopEngine::run
+→ one reserved iteration
+→ Observe
+→ Retrieve
+→ Plan with one fake model call through LoopEffects/ExecutionHarness
+→ Act with one allowed fake ReadOnly tool through LoopEffects/ExecutionHarness
+→ Verify(Passed)
+→ Reflect(Complete)
+→ complete_run
+
+Print only safe metadata:
+
+- RunId
+- loop phase/iteration progression derived from metadata events
+- final RunStatus
+- ModelCalls usage
+- ToolCalls usage
+- Iterations usage
+- audit_degraded
+
+Do not print raw prompt, model response, tool input/output or fake payloads.
+
+1. After implementation run:
+
+cargo fmt --all -- --check
+
+cargo clippy \
+  --workspace \
+  --all-targets \
+  --all-features \
+  -- -D warnings
+
+cargo test --workspace --all-features
+
+cargo tree --workspace
+cargo tree -p agent-core
+cargo tree -p agent-harness
+cargo tree -p agent-loop
+
+git diff --check
+
+Do not commit automatically.
+
+At the end report:
+
+1. final changed tree
+2. agent-loop public API
+3. LoopState transition model
+4. LoopProgram and LoopEffects design
+5. iteration-budget implementation
+6. lifecycle ownership
+7. checkpoint/cancellation/deadline behavior
+8. harness-error handling
+9. observability/event ordering
+10. terminal decision semantics
+11. WorkingState design
+12. dependency tree
+13. test and quality-gate results
+14. deliberate deferrals
+15. deviations and justification

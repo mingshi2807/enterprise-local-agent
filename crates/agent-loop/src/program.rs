@@ -1,0 +1,96 @@
+use std::{future::Future, pin::Pin};
+
+use agent_core::{LoopFailureKind, ModelRequest, ModelResponse, ToolCall, ToolResult};
+use agent_harness::{ExecutionHarness, HarnessError, RunContext};
+
+use crate::LoopStepError;
+
+pub type LoopFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerificationResult {
+    Passed,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReflectDecision {
+    Complete,
+    Continue,
+    Fail { kind: LoopFailureKind },
+}
+
+pub trait LoopProgram: Send {
+    type WorkingState: Send;
+
+    fn observe<'a>(
+        &'a mut self,
+        iteration: u32,
+        working_state: &'a mut Self::WorkingState,
+        effects: LoopEffects<'a>,
+    ) -> LoopFuture<'a, Result<(), LoopStepError>>;
+
+    fn retrieve<'a>(
+        &'a mut self,
+        iteration: u32,
+        working_state: &'a mut Self::WorkingState,
+        effects: LoopEffects<'a>,
+    ) -> LoopFuture<'a, Result<(), LoopStepError>>;
+
+    fn plan<'a>(
+        &'a mut self,
+        iteration: u32,
+        working_state: &'a mut Self::WorkingState,
+        effects: LoopEffects<'a>,
+    ) -> LoopFuture<'a, Result<(), LoopStepError>>;
+
+    fn act<'a>(
+        &'a mut self,
+        iteration: u32,
+        working_state: &'a mut Self::WorkingState,
+        effects: LoopEffects<'a>,
+    ) -> LoopFuture<'a, Result<(), LoopStepError>>;
+
+    fn verify<'a>(
+        &'a mut self,
+        iteration: u32,
+        working_state: &'a mut Self::WorkingState,
+        effects: LoopEffects<'a>,
+    ) -> LoopFuture<'a, Result<VerificationResult, LoopStepError>>;
+
+    fn reflect<'a>(
+        &'a mut self,
+        iteration: u32,
+        working_state: &'a mut Self::WorkingState,
+        verification: VerificationResult,
+        effects: LoopEffects<'a>,
+    ) -> LoopFuture<'a, Result<ReflectDecision, LoopStepError>>;
+}
+
+/// The only enterprise effect surface supplied to an M2 loop program.
+///
+/// `LoopProgram` is trusted in-process application logic. This type preserves
+/// the project boundary for model and tool operations, but it is not a sandbox
+/// and cannot prevent a downstream implementation from performing unrelated
+/// I/O through other APIs it chooses to depend on.
+pub struct LoopEffects<'a> {
+    pub(crate) harness: &'a ExecutionHarness,
+    pub(crate) context: &'a mut RunContext,
+}
+
+impl<'a> LoopEffects<'a> {
+    pub(crate) fn new(harness: &'a ExecutionHarness, context: &'a mut RunContext) -> Self {
+        Self { harness, context }
+    }
+
+    pub async fn invoke_model(
+        &mut self,
+        request: ModelRequest,
+    ) -> Result<ModelResponse, HarnessError> {
+        self.harness.invoke_model(self.context, request).await
+    }
+
+    pub async fn invoke_tool(&mut self, call: ToolCall) -> Result<ToolResult, HarnessError> {
+        self.harness.invoke_tool(self.context, call).await
+    }
+}

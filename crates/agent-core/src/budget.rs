@@ -7,6 +7,7 @@ use thiserror::Error;
 pub struct RunBudget {
     max_model_calls: u32,
     max_tool_calls: u32,
+    max_iterations: u32,
     max_elapsed: Duration,
 }
 
@@ -14,6 +15,7 @@ impl RunBudget {
     pub fn new(
         max_model_calls: u32,
         max_tool_calls: u32,
+        max_iterations: u32,
         max_elapsed: Duration,
     ) -> Result<Self, BudgetError> {
         if max_elapsed.is_zero() {
@@ -23,6 +25,7 @@ impl RunBudget {
         Ok(Self {
             max_model_calls,
             max_tool_calls,
+            max_iterations,
             max_elapsed,
         })
     }
@@ -35,6 +38,11 @@ impl RunBudget {
     #[must_use]
     pub const fn max_tool_calls(&self) -> u32 {
         self.max_tool_calls
+    }
+
+    #[must_use]
+    pub const fn max_iterations(&self) -> u32 {
+        self.max_iterations
     }
 
     #[must_use]
@@ -52,6 +60,7 @@ impl<'de> Deserialize<'de> for RunBudget {
         struct Representation {
             max_model_calls: u32,
             max_tool_calls: u32,
+            max_iterations: u32,
             max_elapsed: Duration,
         }
 
@@ -59,6 +68,7 @@ impl<'de> Deserialize<'de> for RunBudget {
         Self::new(
             representation.max_model_calls,
             representation.max_tool_calls,
+            representation.max_iterations,
             representation.max_elapsed,
         )
         .map_err(de::Error::custom)
@@ -69,14 +79,16 @@ impl<'de> Deserialize<'de> for RunBudget {
 pub struct BudgetUsage {
     model_calls: u32,
     tool_calls: u32,
+    iterations: u32,
 }
 
 impl BudgetUsage {
     #[must_use]
-    pub const fn new(model_calls: u32, tool_calls: u32) -> Self {
+    pub const fn new(model_calls: u32, tool_calls: u32, iterations: u32) -> Self {
         Self {
             model_calls,
             tool_calls,
+            iterations,
         }
     }
 
@@ -89,6 +101,11 @@ impl BudgetUsage {
     pub const fn tool_calls(&self) -> u32 {
         self.tool_calls
     }
+
+    #[must_use]
+    pub const fn iterations(&self) -> u32 {
+        self.iterations
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +113,7 @@ impl BudgetUsage {
 pub enum BudgetDimension {
     ModelCalls,
     ToolCalls,
+    Iterations,
     Elapsed,
 }
 
@@ -104,6 +122,7 @@ impl std::fmt::Display for BudgetDimension {
         let name = match self {
             Self::ModelCalls => "model_calls",
             Self::ToolCalls => "tool_calls",
+            Self::Iterations => "iterations",
             Self::Elapsed => "elapsed",
         };
         formatter.write_str(name)
@@ -122,23 +141,31 @@ mod tests {
 
     #[test]
     fn zero_call_limits_are_valid() {
-        let budget = RunBudget::new(0, 0, Duration::from_secs(1)).expect("budget must be valid");
+        let budget = RunBudget::new(0, 0, 1, Duration::from_secs(1)).expect("budget must be valid");
 
         assert_eq!(budget.max_model_calls(), 0);
         assert_eq!(budget.max_tool_calls(), 0);
+        assert_eq!(budget.max_iterations(), 1);
+    }
+
+    #[test]
+    fn zero_iteration_limit_is_valid() {
+        let budget = RunBudget::new(1, 1, 0, Duration::from_secs(1)).expect("budget must be valid");
+
+        assert_eq!(budget.max_iterations(), 0);
     }
 
     #[test]
     fn zero_elapsed_limit_is_rejected() {
         assert_eq!(
-            RunBudget::new(0, 0, Duration::ZERO),
+            RunBudget::new(0, 0, 0, Duration::ZERO),
             Err(BudgetError::ZeroMaxElapsed)
         );
     }
 
     #[test]
     fn invalid_serialized_budget_is_rejected() {
-        let json = r#"{"max_model_calls":1,"max_tool_calls":1,"max_elapsed":{"secs":0,"nanos":0}}"#;
+        let json = r#"{"max_model_calls":1,"max_tool_calls":1,"max_iterations":1,"max_elapsed":{"secs":0,"nanos":0}}"#;
 
         let error = serde_json::from_str::<RunBudget>(json).expect_err("zero duration must fail");
 
@@ -148,11 +175,25 @@ mod tests {
     #[test]
     fn budget_round_trips_through_json() {
         let budget =
-            RunBudget::new(2, 3, Duration::from_millis(750)).expect("budget must be valid");
+            RunBudget::new(2, 3, 4, Duration::from_millis(750)).expect("budget must be valid");
 
         let json = serde_json::to_string(&budget).expect("budget must serialize");
         let restored: RunBudget = serde_json::from_str(&json).expect("budget must deserialize");
 
         assert_eq!(restored, budget);
+    }
+
+    #[test]
+    fn budget_usage_tracks_iterations() {
+        let usage = BudgetUsage::new(1, 2, 3);
+
+        assert_eq!(usage.model_calls(), 1);
+        assert_eq!(usage.tool_calls(), 2);
+        assert_eq!(usage.iterations(), 3);
+    }
+
+    #[test]
+    fn iteration_dimension_display_is_stable() {
+        assert_eq!(BudgetDimension::Iterations.to_string(), "iterations");
     }
 }

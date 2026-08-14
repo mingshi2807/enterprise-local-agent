@@ -8,6 +8,9 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HarnessOperation {
     StartRun,
+    Checkpoint,
+    BeginIteration,
+    RecordLoopProgress,
     InvokeModel,
     InvokeTool,
     CompleteRun,

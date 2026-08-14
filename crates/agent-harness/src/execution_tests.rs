@@ -1,10 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
 use agent_core::{
-    AgentEventKind, BudgetDimension, CapabilityKind, ModelMessage, ModelOutputPart, ModelRequest,
-    ModelResponse, ModelRole, RunBudget, RunFailureKind, RunId, RunOutcome, RunStatus, SessionId,
-    ToolCall, ToolCallId, ToolDefinition, ToolDomainFailure, ToolDomainFailureKind, ToolInput,
-    ToolName, ToolOutput, ToolResult, ToolSchema,
+    AgentEventKind, BudgetDimension, CapabilityKind, LoopEventKind, LoopPhase, LoopProgressEvent,
+    ModelMessage, ModelOutputPart, ModelRequest, ModelResponse, ModelRole, RunBudget,
+    RunFailureKind, RunId, RunOutcome, RunStatus, SessionId, ToolCall, ToolCallId, ToolDefinition,
+    ToolDomainFailure, ToolDomainFailureKind, ToolInput, ToolName, ToolOutput, ToolResult,
+    ToolSchema,
 };
 
 use crate::{
@@ -18,7 +19,16 @@ use crate::{
 };
 
 fn budget(model_calls: u32, tool_calls: u32, elapsed: Duration) -> RunBudget {
-    RunBudget::new(model_calls, tool_calls, elapsed).expect("test budget must be valid")
+    RunBudget::new(model_calls, tool_calls, 1, elapsed).expect("test budget must be valid")
+}
+
+fn budget_with_iterations(
+    model_calls: u32,
+    tool_calls: u32,
+    iterations: u32,
+    elapsed: Duration,
+) -> RunBudget {
+    RunBudget::new(model_calls, tool_calls, iterations, elapsed).expect("test budget must be valid")
 }
 
 fn context(model_calls: u32, tool_calls: u32, elapsed: Duration) -> RunContext {
@@ -26,6 +36,19 @@ fn context(model_calls: u32, tool_calls: u32, elapsed: Duration) -> RunContext {
         RunId::new(),
         SessionId::new(),
         budget(model_calls, tool_calls, elapsed),
+    )
+}
+
+fn context_with_iterations(
+    model_calls: u32,
+    tool_calls: u32,
+    iterations: u32,
+    elapsed: Duration,
+) -> RunContext {
+    RunContext::new(
+        RunId::new(),
+        SessionId::new(),
+        budget_with_iterations(model_calls, tool_calls, iterations, elapsed),
     )
 }
 
@@ -861,4 +884,234 @@ async fn serialized_events_never_contain_raw_payload_or_error_sentinels() {
     ] {
         assert!(!serialized.contains(sentinel));
     }
+}
+
+#[tokio::test]
+async fn begin_iteration_reserves_one_based_usage_and_audits_metadata() {
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let runtime = harness(
+        Arc::new(FakeModelPort::scripted(vec![])),
+        vec![],
+        audit.clone(),
+        AuditFailurePolicy::FailClosed,
+    );
+    let mut run = context_with_iterations(0, 0, 2, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+
+    let iteration = runtime
+        .begin_iteration(&mut run)
+        .await
+        .expect("iteration reservation must succeed");
+
+    assert_eq!(iteration, 1);
+    assert_eq!(run.usage().iterations(), 1);
+    assert!(matches!(
+        audit.events()[1].kind(),
+        AgentEventKind::Loop {
+            event: LoopEventKind::IterationStarted {
+                iteration: 1,
+                usage: 1,
+                limit: 2,
+            }
+        }
+    ));
+}
+
+#[tokio::test]
+async fn zero_iteration_budget_terminalizes_before_any_iteration_event() {
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let runtime = harness(
+        Arc::new(FakeModelPort::scripted(vec![])),
+        vec![],
+        audit.clone(),
+        AuditFailurePolicy::FailClosed,
+    );
+    let mut run = context_with_iterations(0, 0, 0, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+
+    let error = runtime
+        .begin_iteration(&mut run)
+        .await
+        .expect_err("zero iteration budget must reject the reservation");
+
+    assert_eq!(error.budget_dimension(), Some(BudgetDimension::Iterations));
+    assert_eq!(run.usage().iterations(), 0);
+    assert_eq!(
+        run.status(),
+        &RunStatus::Finished(RunOutcome::BudgetExceeded {
+            dimension: BudgetDimension::Iterations,
+        })
+    );
+    assert!(audit.events().iter().all(|event| !matches!(
+        event.kind(),
+        AgentEventKind::Loop {
+            event: LoopEventKind::IterationStarted { .. }
+        }
+    )));
+}
+
+#[tokio::test]
+async fn exhausted_iteration_budget_preserves_started_iteration_usage() {
+    let runtime = harness(
+        Arc::new(FakeModelPort::scripted(vec![])),
+        vec![],
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+    );
+    let mut run = context_with_iterations(0, 0, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+    assert_eq!(runtime.begin_iteration(&mut run).await, Ok(1));
+
+    let error = runtime
+        .begin_iteration(&mut run)
+        .await
+        .expect_err("second iteration must exceed the configured limit");
+
+    assert_eq!(error.budget_dimension(), Some(BudgetDimension::Iterations));
+    assert_eq!(run.usage().iterations(), 1);
+    assert_eq!(
+        run.status(),
+        &RunStatus::Finished(RunOutcome::BudgetExceeded {
+            dimension: BudgetDimension::Iterations,
+        })
+    );
+}
+
+#[tokio::test]
+async fn fail_closed_iteration_started_audit_keeps_reservation_non_terminal() {
+    let runtime = harness(
+        Arc::new(FakeModelPort::scripted(vec![])),
+        vec![],
+        Arc::new(FailingAuditSink::on_attempt(2)),
+        AuditFailurePolicy::FailClosed,
+    );
+    let mut run = context_with_iterations(0, 0, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+
+    let error = runtime
+        .begin_iteration(&mut run)
+        .await
+        .expect_err("iteration-start audit must fail closed");
+
+    assert!(matches!(
+        error,
+        HarnessError::Audit {
+            operation: crate::HarnessOperation::BeginIteration,
+            phase: AuditPhase::Lifecycle,
+            effect: OperationEffect::StateCommitted,
+            ..
+        }
+    ));
+    assert_eq!(run.usage().iterations(), 1);
+    assert_eq!(run.status(), &RunStatus::Running);
+}
+
+#[tokio::test]
+async fn fail_open_iteration_started_audit_marks_degraded_and_continues() {
+    let runtime = harness(
+        Arc::new(FakeModelPort::scripted(vec![])),
+        vec![],
+        Arc::new(FailingAuditSink::on_attempt(2)),
+        AuditFailurePolicy::FailOpen,
+    );
+    let mut run = context_with_iterations(0, 0, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+
+    assert_eq!(runtime.begin_iteration(&mut run).await, Ok(1));
+    assert_eq!(run.usage().iterations(), 1);
+    assert!(run.audit_degraded());
+    assert_eq!(run.status(), &RunStatus::Running);
+}
+
+#[tokio::test]
+async fn loop_progress_is_metadata_only_and_sequence_ordered() {
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let runtime = harness(
+        Arc::new(FakeModelPort::scripted(vec![])),
+        vec![],
+        audit.clone(),
+        AuditFailurePolicy::FailClosed,
+    );
+    let mut run = context_with_iterations(0, 0, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+    runtime
+        .begin_iteration(&mut run)
+        .await
+        .expect("iteration must begin");
+    runtime
+        .record_loop_progress(
+            &mut run,
+            LoopProgressEvent::PhaseEntered {
+                iteration: 1,
+                phase: LoopPhase::Observe,
+            },
+        )
+        .await
+        .expect("progress must be recorded");
+
+    let events = audit.events();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.sequence().get())
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    let serialized = serde_json::to_string(&events).expect("events must serialize");
+    for sentinel in ["raw prompt", "model output", "tool input", "provider error"] {
+        assert!(!serialized.contains(sentinel));
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_terminalizes_requested_cancellation_without_consuming_budget() {
+    let runtime = harness(
+        Arc::new(FakeModelPort::scripted(vec![])),
+        vec![],
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+    );
+    let mut run = context_with_iterations(1, 1, 1, Duration::from_secs(30));
+    let cancellation = runtime.start_run(&mut run).await.expect("run must start");
+    cancellation.request_cancel();
+
+    let error = runtime
+        .checkpoint(&mut run)
+        .await
+        .expect_err("checkpoint must observe cancellation");
+
+    assert!(matches!(error, HarnessError::Cancelled { .. }));
+    assert_eq!(run.status(), &RunStatus::Finished(RunOutcome::Cancelled));
+    assert_eq!(run.usage().model_calls(), 0);
+    assert_eq!(run.usage().tool_calls(), 0);
+    assert_eq!(run.usage().iterations(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn checkpoint_terminalizes_elapsed_deadline_without_consuming_budget() {
+    let runtime = harness(
+        Arc::new(FakeModelPort::scripted(vec![])),
+        vec![],
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+    );
+    let mut run = context_with_iterations(1, 1, 1, Duration::from_secs(1));
+    runtime.start_run(&mut run).await.expect("run must start");
+    tokio::time::advance(Duration::from_secs(1)).await;
+
+    let error = runtime
+        .checkpoint(&mut run)
+        .await
+        .expect_err("checkpoint must observe elapsed deadline");
+
+    assert!(matches!(error, HarnessError::DeadlineExceeded { .. }));
+    assert_eq!(
+        run.status(),
+        &RunStatus::Finished(RunOutcome::BudgetExceeded {
+            dimension: BudgetDimension::Elapsed,
+        })
+    );
+    assert_eq!(run.usage().model_calls(), 0);
+    assert_eq!(run.usage().tool_calls(), 0);
+    assert_eq!(run.usage().iterations(), 0);
 }

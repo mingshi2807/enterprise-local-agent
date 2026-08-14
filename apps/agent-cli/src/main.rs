@@ -1,16 +1,112 @@
 use std::{sync::Arc, time::Duration};
 
 use agent_core::{
-    CapabilityKind, ModelMessage, ModelOutputPart, ModelRequest, ModelResponse, ModelRole,
-    RunBudget, RunId, SessionId, ToolCall, ToolCallId, ToolDefinition, ToolInput, ToolName,
-    ToolOutput, ToolResult, ToolSchema,
+    AgentEventKind, CapabilityKind, LoopEventKind, LoopFailureKind, ModelMessage, ModelOutputPart,
+    ModelRequest, ModelResponse, ModelRole, RunBudget, RunId, SessionId, ToolCall, ToolCallId,
+    ToolDefinition, ToolInput, ToolName, ToolOutput, ToolResult, ToolSchema,
 };
 use agent_harness::{
     AuditFailurePolicy, AuditSink, ExecutionHarness, HarnessConfig, M0ReadOnlyPolicy, ModelPort,
     RunContext, ToolPort, ToolRegistry,
     testing::{FakeModelPort, FakeToolPort, InMemoryAuditSink},
 };
+use agent_loop::{
+    LoopEffects, LoopEngine, LoopFuture, LoopProgram, LoopStepError, ReflectDecision,
+    VerificationResult,
+};
 use anyhow::Context;
+
+struct DemoWorkingState {
+    model_response: Option<ModelResponse>,
+    tool_result: Option<ToolResult>,
+}
+
+struct DemoProgram {
+    model_request: ModelRequest,
+    tool_call: ToolCall,
+}
+
+impl LoopProgram for DemoProgram {
+    type WorkingState = DemoWorkingState;
+
+    fn observe<'a>(
+        &'a mut self,
+        _iteration: u32,
+        _working_state: &'a mut Self::WorkingState,
+        _effects: LoopEffects<'a>,
+    ) -> LoopFuture<'a, Result<(), LoopStepError>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn retrieve<'a>(
+        &'a mut self,
+        _iteration: u32,
+        _working_state: &'a mut Self::WorkingState,
+        _effects: LoopEffects<'a>,
+    ) -> LoopFuture<'a, Result<(), LoopStepError>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn plan<'a>(
+        &'a mut self,
+        _iteration: u32,
+        working_state: &'a mut Self::WorkingState,
+        mut effects: LoopEffects<'a>,
+    ) -> LoopFuture<'a, Result<(), LoopStepError>> {
+        let request = self.model_request.clone();
+        Box::pin(async move {
+            working_state.model_response = Some(effects.invoke_model(request).await?);
+            Ok(())
+        })
+    }
+
+    fn act<'a>(
+        &'a mut self,
+        _iteration: u32,
+        working_state: &'a mut Self::WorkingState,
+        mut effects: LoopEffects<'a>,
+    ) -> LoopFuture<'a, Result<(), LoopStepError>> {
+        let call = self.tool_call.clone();
+        Box::pin(async move {
+            working_state.tool_result = Some(effects.invoke_tool(call).await?);
+            Ok(())
+        })
+    }
+
+    fn verify<'a>(
+        &'a mut self,
+        _iteration: u32,
+        working_state: &'a mut Self::WorkingState,
+        _effects: LoopEffects<'a>,
+    ) -> LoopFuture<'a, Result<VerificationResult, LoopStepError>> {
+        let result = if working_state.model_response.is_some()
+            && matches!(
+                working_state.tool_result,
+                Some(ToolResult::Succeeded { .. })
+            ) {
+            VerificationResult::Passed
+        } else {
+            VerificationResult::Failed
+        };
+        Box::pin(std::future::ready(Ok(result)))
+    }
+
+    fn reflect<'a>(
+        &'a mut self,
+        _iteration: u32,
+        _working_state: &'a mut Self::WorkingState,
+        verification: VerificationResult,
+        _effects: LoopEffects<'a>,
+    ) -> LoopFuture<'a, Result<ReflectDecision, LoopStepError>> {
+        let decision = match verification {
+            VerificationResult::Passed => ReflectDecision::Complete,
+            VerificationResult::Failed => ReflectDecision::Fail {
+                kind: LoopFailureKind::VerificationFailed,
+            },
+        };
+        Box::pin(std::future::ready(Ok(decision)))
+    }
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -20,8 +116,8 @@ async fn main() -> anyhow::Result<()> {
         .try_init()
         .map_err(|error| anyhow::anyhow!("failed to initialize tracing: {error}"))?;
 
-    let budget = RunBudget::new(1, 1, Duration::from_secs(5))
-        .context("failed to construct the M1 run budget")?;
+    let budget = RunBudget::new(1, 1, 1, Duration::from_secs(5))
+        .context("failed to construct the M2 run budget")?;
     let mut context = RunContext::new(RunId::new(), SessionId::new(), budget);
 
     let model = Arc::new(FakeModelPort::scripted(vec![Ok(ModelResponse::new(
@@ -32,8 +128,8 @@ async fn main() -> anyhow::Result<()> {
     ))]));
     let model_port: Arc<dyn ModelPort> = model;
 
-    let tool_name = ToolName::new("local_lookup")?;
     let tool_call_id = ToolCallId::new();
+    let tool_name = ToolName::new("local_lookup")?;
     let definition = ToolDefinition::new(
         tool_name.clone(),
         "deterministic read-only lookup",
@@ -52,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     tools.register(tool_port)?;
 
     let audit = Arc::new(InMemoryAuditSink::new());
-    let audit_sink: Arc<dyn AuditSink> = audit;
+    let audit_sink: Arc<dyn AuditSink> = audit.clone();
     let config = HarnessConfig::new(AuditFailurePolicy::FailClosed, Duration::from_secs(1))?;
     let harness = ExecutionHarness::new(
         model_port,
@@ -62,35 +158,63 @@ async fn main() -> anyhow::Result<()> {
         config,
     );
 
+    let mut program = DemoProgram {
+        model_request: ModelRequest::new(vec![ModelMessage::new(
+            ModelRole::User,
+            "sentinel prompt stays outside audit events",
+        )]),
+        tool_call: ToolCall::new(
+            tool_call_id,
+            tool_name,
+            ToolInput::new(serde_json::json!({"sentinel": "tool input"})),
+        ),
+    };
+    let mut working_state = DemoWorkingState {
+        model_response: None,
+        tool_result: None,
+    };
+
     let _cancellation = harness.start_run(&mut context).await?;
-    harness
-        .invoke_model(
-            &mut context,
-            ModelRequest::new(vec![ModelMessage::new(
-                ModelRole::User,
-                "sentinel prompt stays outside audit events",
-            )]),
-        )
+    LoopEngine::new()
+        .run(&harness, &mut context, &mut program, &mut working_state)
         .await?;
-    harness
-        .invoke_tool(
-            &mut context,
-            ToolCall::new(
-                tool_call_id,
-                tool_name,
-                ToolInput::new(serde_json::json!({"sentinel": "tool input"})),
-            ),
-        )
-        .await?;
-    harness.complete_run(&mut context).await?;
 
     println!("RunId: {}", context.run_id());
+    println!("Run start");
+    for event in audit.events() {
+        let AgentEventKind::Loop { event } = event.kind() else {
+            continue;
+        };
+        match event {
+            LoopEventKind::IterationStarted { iteration, .. } => {
+                println!("Iteration {iteration} started");
+            }
+            LoopEventKind::PhaseEntered { iteration, phase } => {
+                println!("Iteration {iteration}: {phase:?} entered");
+            }
+            LoopEventKind::PhaseCompleted { iteration, phase } => {
+                println!("Iteration {iteration}: {phase:?} completed");
+            }
+            LoopEventKind::ReflectDecision {
+                iteration,
+                decision,
+            } => println!("Iteration {iteration}: Reflect decision {decision:?}"),
+            LoopEventKind::IterationCompleted { iteration } => {
+                println!("Iteration {iteration} completed");
+            }
+            LoopEventKind::LoopCompleted {
+                completed_iterations,
+            } => println!("Loop completed after {completed_iterations} iteration(s)"),
+            LoopEventKind::LoopFailed { iteration, kind } => {
+                println!("Loop failed in iteration {iteration}: {kind:?}");
+            }
+        }
+    }
     println!("Final status: {:?}", context.status());
-    println!(
-        "Budget usage: model_calls={}, tool_calls={}",
-        context.usage().model_calls(),
-        context.usage().tool_calls()
-    );
+    println!("ModelCalls usage: {}", context.usage().model_calls());
+    println!("ToolCalls usage: {}", context.usage().tool_calls());
+    println!("Iterations usage: {}", context.usage().iterations());
+    println!("Audit degraded: {}", context.audit_degraded());
 
     Ok(())
 }

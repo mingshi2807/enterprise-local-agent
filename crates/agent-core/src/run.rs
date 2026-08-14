@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::BudgetDimension;
+use crate::{BudgetDimension, LoopFailureKind};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +42,7 @@ pub enum RunFailureKind {
     Model,
     Tool,
     AuditUnavailable,
+    Loop { kind: LoopFailureKind },
     Internal,
 }
 

@@ -309,3 +309,95 @@
 - git diff --check: passed.
 
   No commit was created. Existing unrelated modifications under docs/ were untouched.
+
+# M2 report
+
+M2 is implemented and fully verified. No files were committed.
+
+  1. Final changed tree
+      - Workspace: Cargo.toml, Cargo.lock
+      - CLI: apps/agent-cli/Cargo.toml, apps/agent-cli/src/main.rs
+      - Core: crates/agent-core/src/budget.rs, crates/agent-core/src/event.rs, crates/agent-core/src/loop_control.rs, crates/agent-core/src/run.rs, crates/agent-core/src/lib.rs
+      - Harness: crates/agent-harness/src/context.rs, crates/agent-harness/src/error.rs, crates/agent-harness/src/execution.rs, crates/agent-harness/src/execution_tests.rs
+      - New agent-loop: crates/agent-loop/Cargo.toml, crates/agent-loop/src/lib.rs, crates/agent-loop/src/state.rs, crates/agent-loop/src/program.rs, crates/agent-loop/src/engine.rs, crates/agent-loop/src/
+        error.rs, crates/agent-loop/src/engine_tests.rs
+
+  2. agent-loop public API
+
+     Exposes LoopEngine, LoopRunSummary, TerminalLoopDecision, LoopProgram, LoopEffects, LoopFuture, VerificationResult, ReflectDecision, LoopState, typed positions/terminals, and sanitized loop errors.
+
+  3. LoopState transition model
+
+     Pure synchronous state enforces:
+
+     Ready → Observe → Retrieve → Plan → Act → Verify → Reflect
+
+     Only Reflect accepts Continue, Complete, or Fail. Illegal transitions return LoopTransitionError; the engine terminalizes active runs with InvariantViolation.
+
+  4. LoopProgram and LoopEffects
+
+     One LoopProgram trait contains six typed phase methods and an opaque associated WorkingState. LoopEffects exposes only invoke_model and invoke_tool, both forwarding through ExecutionHarness.
+
+     Trusted in-process programs are documented accurately: this is an architectural contract, not an I/O sandbox.
+
+  5. Iteration budget
+
+     RunBudget, BudgetUsage, and BudgetDimension now include iterations. ExecutionHarness::begin_iteration preflights, reserves permanently, emits IterationStarted, returns a one-based number, and terminalizes
+     exhausted budgets as BudgetExceeded { Iterations }.
+
+  6. Lifecycle ownership
+
+     The caller starts the run and retains RunCancellationHandle. LoopEngine requires Running and owns normal complete/fail finalization.
+
+  7. Checkpoint behavior
+
+     ExecutionHarness::checkpoint checks lifecycle, cancellation, and elapsed deadline without consuming budgets or invoking ports. The engine calls it at deterministic phase boundaries.
+
+  8. Harness-error handling
+
+     After every phase future, RunContext.status() is checked before completion metadata or transitions. Existing terminal outcomes always win. Non-terminal harness errors are mapped to stable run failure
+     categories and committed through fail_run; no provider retry was added.
+
+  9. Observability and ordering
+
+     Schema version is now 3. Metadata events cover iteration start, phase enter/complete, Reflect decision, iteration completion, and loop completion/failure. EventSequence remains authoritative; model/tool
+     correlation IDs remain unchanged.
+
+  10. Terminal decisions
+  Reflect decisions remain intent until accepted by LoopState, audited, and committed by the harness. Normal Complete/Fail ordering precedes authoritative RunFinished. Committed terminal status is never reopened or replaced.
+
+  11. WorkingState
+
+     State remains program-owned and opaque. The engine never inspects payloads. The deterministic implementation stores provider-neutral ModelResponse and ToolResult without exposing or debugging their
+     contents.
+
+  12. Dependencies
+
+     Direct production dependencies of agent-loop are exactly:
+      - agent-core
+      - agent-harness
+      - thiserror
+
+     Tokio and serde_json are dev-only. No direct serde production dependency exists.
+
+  13. Tests and quality gates
+
+     Passed:
+      - cargo fmt --all -- --check
+      - strict workspace Clippy with -D warnings
+      - workspace tests: 76 unit tests passed
+      - LoopState non-serialization compile-fail doctest passed
+      - all four requested cargo tree commands
+      - git diff --check
+      - deterministic CLI smoke test: Finished(Completed), model/tool/iteration usage 1/1/1, audit not degraded
+      - independent read-only review: no blocking, high, medium, or low findings
+
+  14. Deliberate deferrals
+
+     No Rig/providers, network, RAG/retrieval port, MCP, graph framework, persistence/checkpoints, approvals, sandboxing, identity, Tauri, retries, parallel phases, fan-out, or multi-agent behavior was
+     introduced.
+
+  15. Deviations
+
+     No architectural deviations. LoopFailed metadata uses shared RunFailureKind, allowing stable model/tool/audit/internal and loop-specific categories without moving ReflectDecision or VerificationResult into
+     core.
