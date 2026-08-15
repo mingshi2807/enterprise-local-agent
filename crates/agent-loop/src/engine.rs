@@ -624,6 +624,15 @@ fn failure_kind_for_harness_error(error: &HarnessError) -> RunFailureKind {
         HarnessError::ToolPort(_)
         | HarnessError::ToolNotFound { .. }
         | HarnessError::PolicyDenied(_) => RunFailureKind::Tool,
+        HarnessError::ApprovalRequired
+        | HarnessError::ApprovalPortMissing
+        | HarnessError::ApprovalPort(_)
+        | HarnessError::ApprovalDecisionMismatch
+        | HarnessError::ApprovalDenied => RunFailureKind::Approval,
+        HarnessError::AuditDegraded
+        | HarnessError::CapabilityNotExecutable { .. }
+        | HarnessError::ContainmentUnavailable { .. }
+        | HarnessError::ContainmentPort(_) => RunFailureKind::Containment,
         HarnessError::InvalidLifecycle { .. }
         | HarnessError::BudgetExceeded(_)
         | HarnessError::Cancelled { .. }

@@ -10,13 +10,14 @@ mod model;
 mod run;
 mod tool;
 
-pub use action::{ActionProposal, ActionRejectionReason};
+pub use action::{ActionDigest, ActionProposal, ActionRejectionReason};
 pub use budget::{BudgetDimension, BudgetError, BudgetUsage, RunBudget};
 pub use capability::CapabilityKind;
 pub use event::{
-    AgentEvent, AgentEventKind, CURRENT_EVENT_SCHEMA_VERSION, EventSchemaVersion, EventSequence,
+    AgentEvent, AgentEventKind, ApprovalFailureKind, CURRENT_EVENT_SCHEMA_VERSION,
+    ContainmentFailureKind, EventSchemaVersion, EventSequence,
 };
-pub use ids::{ActionProposalId, ModelCallId, RunId, SessionId, ToolCallId};
+pub use ids::{ActionProposalId, ApprovalRequestId, ModelCallId, RunId, SessionId, ToolCallId};
 pub use loop_control::{
     LoopDecisionKind, LoopEventKind, LoopFailureKind, LoopPhase, LoopProgressEvent,
 };

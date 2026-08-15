@@ -4,7 +4,7 @@ tags: ["m5", "typed-actions", "json-schema", "action-proposal", "tool-policy"]
 created: 2026-08-15T13:34:13.554Z
 updated: 2026-08-15T13:34:13.554Z
 sources: ["docs/proposal/proposal.md:4303-5291", "docs/reports/reports_impl.md:752-865", "git tag m5-typed-action-planning"]
-links: ["enterprise-local-agent-milestone-index.md", "m4-openai-compatible-gateway.md"]
+links: ["enterprise-local-agent-milestone-index.md", "m4-openai-compatible-gateway.md", "m6-approval-and-containment-boundary.md"]
 category: architecture
 confidence: high
 schemaVersion: 1
@@ -55,4 +55,4 @@ Native provider tool calls, Rig tool execution, structured output, approvals, wr
 - Proposal and approval: `docs/proposal/proposal.md`, lines 4303–5291.
 - Implementation report: `docs/reports/reports_impl.md`, lines 752–865.
 - Index: [[enterprise-local-agent-milestone-index]].
-- Previous: [[m4-openai-compatible-gateway]].
+- Previous: [[m4-openai-compatible-gateway]]. Next: [[m6-approval-and-containment-boundary]].

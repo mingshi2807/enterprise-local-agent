@@ -1,8 +1,9 @@
-use agent_core::{BudgetDimension, RunStatus, ToolName};
+use agent_core::{BudgetDimension, CapabilityKind, RunStatus, ToolName};
 use thiserror::Error;
 
 use crate::{
-    AuditPortError, BudgetExceeded, ModelPortError, PolicyDenial, RunContextError, ToolPortError,
+    ApprovalPortError, AuditPortError, BudgetExceeded, ContainmentPortError, ModelPortError,
+    PolicyDenial, RunContextError, ToolPortError,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,6 +16,7 @@ pub enum HarnessOperation {
     PrepareAction,
     InvokeValidatedAction,
     InvokeTool,
+    RequestApproval,
     CompleteRun,
     FailRun,
     CancelRun,
@@ -60,6 +62,24 @@ pub enum HarnessError {
     ToolNotFound { name: ToolName },
     #[error(transparent)]
     PolicyDenied(#[from] PolicyDenial),
+    #[error("audit is already degraded and cannot authorize non-read-only execution")]
+    AuditDegraded,
+    #[error("approval is required but unavailable on this execution path")]
+    ApprovalRequired,
+    #[error("capability {capability:?} is not executable in M6")]
+    CapabilityNotExecutable { capability: CapabilityKind },
+    #[error("contained execution is unavailable for tool '{name}'")]
+    ContainmentUnavailable { name: ToolName },
+    #[error("approval port is not configured")]
+    ApprovalPortMissing,
+    #[error("approval port failed")]
+    ApprovalPort(ApprovalPortError),
+    #[error("approval decision did not match the requested action")]
+    ApprovalDecisionMismatch,
+    #[error("approval decision denied the action")]
+    ApprovalDenied,
+    #[error("contained executor failed")]
+    ContainmentPort(ContainmentPortError),
     #[error("audit infrastructure failed during {phase:?} for {operation:?}")]
     Audit {
         phase: AuditPhase,

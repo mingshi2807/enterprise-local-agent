@@ -7,9 +7,9 @@ use agent_core::{
     RunBudget, RunId, SessionId, ToolDefinition, ToolName, ToolOutput, ToolSchema,
 };
 use agent_harness::{
-    AuditFailurePolicy, AuditSink, ExecutionHarness, HarnessConfig, M0ReadOnlyPolicy, ModelPort,
-    RunContext, ToolPort, ToolRegistry,
-    testing::{FakeToolPort, InMemoryAuditSink},
+    AuditFailurePolicy, AuditSink, ContainedToolPort, ExecutionHarness, HarnessConfig,
+    M0ReadOnlyPolicy, M6ApprovalPolicy, ModelPort, RunContext, ToolPort, ToolRegistry,
+    testing::{FakeContainedToolPort, FakeToolPort, InMemoryAuditSink, ScriptedApprovalPort},
 };
 use agent_loop::LoopEngine;
 use agent_provider_rig::{
@@ -21,14 +21,17 @@ use anyhow::{Context, bail};
 use crate::action_program::{ActionProgram, ActionWorkingState};
 
 const LIVE_MODE_FLAG: &str = "--live-openai-compatible";
+const LOCAL_WRITE_DEMO_FLAG: &str = "--demo-local-write-fake-containment";
 const LIVE_BASE_URL_ENV: &str = "ELA_OPENAI_COMPAT_BASE_URL";
 const LIVE_MODEL_ENV: &str = "ELA_OPENAI_COMPAT_MODEL";
 const LIVE_API_KEY_ENV: &str = "ELA_OPENAI_COMPAT_API_KEY";
 const LIVE_LABEL_ENV: &str = "ELA_OPENAI_COMPAT_LABEL";
 
+#[derive(Clone, Copy)]
 enum CliMode {
     Deterministic,
     LiveOpenAiCompatible,
+    LocalWriteFakeContainment,
 }
 
 struct ModelComposition {
@@ -46,30 +49,59 @@ async fn main() -> anyhow::Result<()> {
         .try_init()
         .map_err(|error| anyhow::anyhow!("failed to initialize tracing: {error}"))?;
 
-    let budget = RunBudget::new(1, 1, 1, Duration::from_secs(5))
-        .context("failed to construct the M4 run budget")?;
+    let budget = match mode {
+        CliMode::LocalWriteFakeContainment => RunBudget::new(1, 1, 1, Duration::from_secs(5))
+            .context("failed to construct the M6 run budget")?
+            .with_max_approval_requests(1),
+        CliMode::Deterministic | CliMode::LiveOpenAiCompatible => {
+            RunBudget::new(1, 1, 1, Duration::from_secs(5))
+                .context("failed to construct the M4 run budget")?
+        }
+    };
     let mut context = RunContext::new(RunId::new(), SessionId::new(), budget);
 
     let model = compose_model(mode)?;
 
-    let tool_name = ToolName::new("get_agent_capabilities")?;
+    let local_write_demo = matches!(mode, CliMode::LocalWriteFakeContainment);
+    let tool_name = ToolName::new(if local_write_demo {
+        "write_demo_note"
+    } else {
+        "get_agent_capabilities"
+    })?;
     let definition = ToolDefinition::new(
         tool_name.clone(),
-        "report the agent's deterministic capabilities",
-        CapabilityKind::ReadOnly,
+        if local_write_demo {
+            "fake contained local-write demo tool"
+        } else {
+            "report the agent's deterministic capabilities"
+        },
+        if local_write_demo {
+            CapabilityKind::LocalWrite
+        } else {
+            CapabilityKind::ReadOnly
+        },
         ToolSchema::new(serde_json::json!({
             "type": "object",
             "properties": {},
             "additionalProperties": false
         }))?,
     )?;
-    let tool = Arc::new(FakeToolPort::succeeding(
-        definition,
-        ToolOutput::new(serde_json::json!({"status": "available"})),
-    ));
-    let tool_port: Arc<dyn ToolPort> = tool;
     let mut tools = ToolRegistry::new();
-    tools.register(tool_port)?;
+    if local_write_demo {
+        let tool = Arc::new(FakeContainedToolPort::succeeding(
+            definition,
+            ToolOutput::new(serde_json::json!({"status": "fake-contained"})),
+        ));
+        let tool_port: Arc<dyn ContainedToolPort> = tool;
+        tools.register_contained(tool_port)?;
+    } else {
+        let tool = Arc::new(FakeToolPort::succeeding(
+            definition,
+            ToolOutput::new(serde_json::json!({"status": "available"})),
+        ));
+        let tool_port: Arc<dyn ToolPort> = tool;
+        tools.register(tool_port)?;
+    }
 
     let audit = Arc::new(InMemoryAuditSink::new());
     let audit_sink: Arc<dyn AuditSink> = audit.clone();
@@ -77,14 +109,28 @@ async fn main() -> anyhow::Result<()> {
     let harness = ExecutionHarness::new(
         model.port,
         tools,
-        Arc::new(M0ReadOnlyPolicy),
+        if local_write_demo {
+            Arc::new(M6ApprovalPolicy)
+        } else {
+            Arc::new(M0ReadOnlyPolicy)
+        },
         audit_sink,
         config,
     );
+    let harness = if local_write_demo {
+        harness.with_approval_port(Arc::new(ScriptedApprovalPort::approve_all()))
+    } else {
+        harness
+    };
 
+    let prompt = if local_write_demo {
+        "Return only the exact JSON action envelope for write_demo_note with an empty arguments object."
+    } else {
+        "Return only the exact JSON action envelope for get_agent_capabilities with an empty arguments object."
+    };
     let mut program = ActionProgram::new(ModelRequest::new(vec![ModelMessage::new(
         ModelRole::User,
-        "Return only the exact JSON action envelope for get_agent_capabilities with an empty arguments object.",
+        prompt,
     )]));
     let mut working_state = ActionWorkingState::new();
 
@@ -95,6 +141,10 @@ async fn main() -> anyhow::Result<()> {
 
     println!("RunId: {}", context.run_id());
     println!("Provider: {}", model.provider_label);
+    if local_write_demo {
+        println!("Approval: scripted fake");
+        println!("Containment: test fake — NO OS isolation");
+    }
     println!("Run start");
     for event in audit.events() {
         match event.kind() {
@@ -112,6 +162,28 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 println!("ActionProposalId: {action_proposal_id}; ToolCallId: {tool_call_id} bound")
             }
+            AgentEventKind::ApprovalRequested {
+                approval_request_id,
+                tool_call_id,
+                tool_name,
+                capability,
+                ..
+            } => println!(
+                "ApprovalRequestId: {approval_request_id}; ToolCallId: {tool_call_id}; tool: {tool_name}; capability: {capability:?}"
+            ),
+            AgentEventKind::ApprovalGranted {
+                approval_request_id,
+            } => println!("ApprovalRequestId: {approval_request_id} granted"),
+            AgentEventKind::ApprovalDenied {
+                approval_request_id,
+            } => println!("ApprovalRequestId: {approval_request_id} denied"),
+            AgentEventKind::ApprovalFailed {
+                approval_request_id,
+                kind,
+            } => println!("ApprovalRequestId: {approval_request_id} failed: {kind:?}"),
+            AgentEventKind::ContainmentFailed {
+                tool_call_id, kind, ..
+            } => println!("ToolCallId: {tool_call_id}; containment failed: {kind:?}"),
             AgentEventKind::Loop { event } => match event {
                 LoopEventKind::IterationStarted { iteration, .. } => {
                     println!("Iteration {iteration} started");
@@ -153,6 +225,10 @@ async fn main() -> anyhow::Result<()> {
     println!("ModelCalls usage: {}", context.usage().model_calls());
     println!("ToolCalls usage: {}", context.usage().tool_calls());
     println!("Iterations usage: {}", context.usage().iterations());
+    println!(
+        "ApprovalRequests usage: {}",
+        context.usage().approval_requests()
+    );
     println!("Audit degraded: {}", context.audit_degraded());
 
     Ok(())
@@ -163,7 +239,10 @@ fn parse_mode() -> anyhow::Result<CliMode> {
     match (arguments.next(), arguments.next()) {
         (None, None) => Ok(CliMode::Deterministic),
         (Some(flag), None) if flag == LIVE_MODE_FLAG => Ok(CliMode::LiveOpenAiCompatible),
-        _ => bail!("usage: agent-cli [{LIVE_MODE_FLAG}]"),
+        (Some(flag), None) if flag == LOCAL_WRITE_DEMO_FLAG => {
+            Ok(CliMode::LocalWriteFakeContainment)
+        }
+        _ => bail!("usage: agent-cli [{LIVE_MODE_FLAG}|{LOCAL_WRITE_DEMO_FLAG}]"),
     }
 }
 
@@ -173,6 +252,16 @@ fn compose_model(mode: CliMode) -> anyhow::Result<ModelComposition> {
             let port: Arc<dyn ModelPort> =
                 Arc::new(RigModelAdapter::new(FakeRigModel::scripted_text(
                     r#"{"action":{"tool":"get_agent_capabilities","arguments":{}}}"#,
+                )));
+            Ok(ModelComposition {
+                port,
+                provider_label: "deterministic-rig-fake".to_owned(),
+            })
+        }
+        CliMode::LocalWriteFakeContainment => {
+            let port: Arc<dyn ModelPort> =
+                Arc::new(RigModelAdapter::new(FakeRigModel::scripted_text(
+                    r#"{"action":{"tool":"write_demo_note","arguments":{}}}"#,
                 )));
             Ok(ModelComposition {
                 port,

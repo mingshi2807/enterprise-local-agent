@@ -58,6 +58,7 @@ define_id!(SessionId);
 define_id!(ModelCallId);
 define_id!(ActionProposalId);
 define_id!(ToolCallId);
+define_id!(ApprovalRequestId);
 
 #[cfg(test)]
 mod tests {
@@ -88,6 +89,7 @@ mod tests {
         let model_call_id = ModelCallId::from_uuid(uuid);
         let action_proposal_id = ActionProposalId::from_uuid(uuid);
         let tool_call_id = ToolCallId::from_uuid(uuid);
+        let approval_request_id = ApprovalRequestId::from_uuid(uuid);
 
         assert_eq!(
             serde_json::from_str::<RunId>(
@@ -124,6 +126,14 @@ mod tests {
             )
             .expect("ToolCallId must deserialize"),
             tool_call_id
+        );
+        assert_eq!(
+            serde_json::from_str::<ApprovalRequestId>(
+                &serde_json::to_string(&approval_request_id)
+                    .expect("ApprovalRequestId must serialize")
+            )
+            .expect("ApprovalRequestId must deserialize"),
+            approval_request_id
         );
     }
 }

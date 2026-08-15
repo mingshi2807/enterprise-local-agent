@@ -1,12 +1,14 @@
 use std::{collections::HashSet, fmt, sync::Arc};
 
 use agent_core::{
-    ActionProposal, ActionProposalId, ActionRejectionReason, ModelCallId, ModelOutputPart,
-    ModelResponse, ToolCall, ToolCallId, ToolInput, ToolName, ToolSchema,
+    ActionDigest, ActionProposal, ActionProposalId, ActionRejectionReason, CapabilityKind,
+    ModelCallId, ModelOutputPart, ModelResponse, ToolCall, ToolCallId, ToolInput, ToolName,
+    ToolSchema,
 };
 use jsonschema::Validator;
 use serde::{Deserialize, Deserializer, de};
-use serde_json::{Map, Value};
+use serde_json::{Map, Number, Value};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{HarnessError, ToolRegistry};
@@ -50,6 +52,89 @@ impl CompletedModelInvocation {
     }
 }
 
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn expected(hex: &str) -> ActionDigest {
+        let mut bytes = [0_u8; 32];
+        for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+            let text = std::str::from_utf8(chunk).expect("hex fixture must be utf8");
+            bytes[index] = u8::from_str_radix(text, 16).expect("hex fixture must be valid");
+        }
+        ActionDigest::from_bytes(bytes)
+    }
+
+    fn digest(arguments: Value) -> ActionDigest {
+        compute_action_digest(
+            &ToolName::new("tool").expect("tool name must be valid"),
+            CapabilityKind::LocalWrite,
+            &arguments,
+        )
+    }
+
+    #[test]
+    fn action_digest_has_fixed_vectors_for_number_encoding() {
+        assert_eq!(
+            digest(json!({"n": 1})),
+            expected("bb6357a8c78af1d4602f189e358e1bf8294e54eeb8f9f6ab5b94b83d24955bd8")
+        );
+        assert_eq!(
+            digest(json!({"n": 9_223_372_036_854_775_808_u64})),
+            expected("20b771b571e31a0a2075caeee6e2ba8e063700270ffc27190376dff3aeb37b7c")
+        );
+        assert_eq!(
+            digest(json!({"n": 1.25})),
+            expected("788741aaedb866c0d0c0ccbc4a7bc4f71aa5d1ac8f94e59cb56584e0a499cd0c")
+        );
+        assert_eq!(
+            digest(json!({"n": -2})),
+            expected("3f2ffc05a9a7ff18a73e9362a7caaa1749f7b81d177c865bd7782fe5d8dc6e79")
+        );
+    }
+
+    #[test]
+    fn action_digest_sorts_object_keys_but_preserves_array_order() {
+        assert_eq!(
+            digest(json!({"b": 2, "a": 1})),
+            digest(json!({"a": 1, "b": 2}))
+        );
+        assert_ne!(digest(json!({"a": [1, 2]})), digest(json!({"a": [2, 1]})));
+    }
+
+    #[test]
+    fn action_digest_changes_when_tool_or_capability_changes() {
+        let arguments = json!({});
+        let tool = ToolName::new("tool").expect("tool name must be valid");
+        let other_tool = ToolName::new("other_tool").expect("tool name must be valid");
+
+        assert_ne!(
+            compute_action_digest(&tool, CapabilityKind::ReadOnly, &arguments),
+            compute_action_digest(&tool, CapabilityKind::LocalWrite, &arguments)
+        );
+        assert_ne!(
+            compute_action_digest(&tool, CapabilityKind::LocalWrite, &arguments),
+            compute_action_digest(&other_tool, CapabilityKind::LocalWrite, &arguments)
+        );
+    }
+
+    #[test]
+    fn action_digest_debug_is_redacted() {
+        let rendered = format!(
+            "{:?}",
+            compute_action_digest(
+                &ToolName::new("tool").expect("tool name must be valid"),
+                CapabilityKind::LocalWrite,
+                &json!({"secret": "sentinel"})
+            )
+        );
+
+        assert_eq!(rendered, "ActionDigest([REDACTED])");
+        assert!(!rendered.contains("sentinel"));
+    }
+}
+
 /// In-process proof that an action proposal passed structural and schema
 /// validation. Policy authorization still occurs afterwards.
 ///
@@ -66,6 +151,8 @@ impl CompletedModelInvocation {
 /// ```
 pub struct ValidatedAction {
     proposal: ActionProposal,
+    capability: CapabilityKind,
+    digest: ActionDigest,
 }
 
 impl ValidatedAction {
@@ -77,6 +164,16 @@ impl ValidatedAction {
     #[must_use]
     pub const fn tool_name(&self) -> &ToolName {
         self.proposal.tool_name()
+    }
+
+    #[must_use]
+    pub const fn capability(&self) -> CapabilityKind {
+        self.capability
+    }
+
+    #[must_use]
+    pub const fn digest(&self) -> ActionDigest {
+        self.digest
     }
 
     pub(crate) fn into_tool_call(self, tool_call_id: ToolCallId) -> ToolCall {
@@ -91,6 +188,8 @@ impl fmt::Debug for ValidatedAction {
             .debug_struct("ValidatedAction")
             .field("proposal_id", &self.proposal.id())
             .field("tool_name", self.proposal.tool_name())
+            .field("capability", &self.capability)
+            .field("digest", &"[REDACTED]")
             .field("arguments", &"[REDACTED]")
             .finish()
     }
@@ -260,8 +359,96 @@ impl ActionValidator {
             ));
         }
 
-        Ok(ValidatedAction { proposal })
+        let capability = binding.definition().capability();
+        let digest = compute_action_digest(
+            proposal.tool_name(),
+            capability,
+            proposal.arguments().as_value(),
+        );
+
+        Ok(ValidatedAction {
+            proposal,
+            capability,
+            digest,
+        })
     }
+}
+
+pub(crate) fn compute_action_digest(
+    tool_name: &ToolName,
+    capability: CapabilityKind,
+    arguments: &Value,
+) -> ActionDigest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"enterprise-local-agent/action-digest/v1\0");
+    encode_string(&mut hasher, tool_name.as_str());
+    encode_capability(&mut hasher, capability);
+    encode_json(&mut hasher, arguments);
+    let bytes: [u8; 32] = hasher.finalize().into();
+    ActionDigest::from_bytes(bytes)
+}
+
+fn encode_capability(hasher: &mut Sha256, capability: CapabilityKind) {
+    let tag = match capability {
+        CapabilityKind::ReadOnly => 0_u8,
+        CapabilityKind::LocalWrite => 1,
+        CapabilityKind::ExternalWrite => 2,
+        CapabilityKind::Privileged => 3,
+    };
+    hasher.update([b'C', tag]);
+}
+
+fn encode_json(hasher: &mut Sha256, value: &Value) {
+    match value {
+        Value::Null => hasher.update(*b"N"),
+        Value::Bool(false) => hasher.update([b'B', 0]),
+        Value::Bool(true) => hasher.update([b'B', 1]),
+        Value::Number(number) => encode_number(hasher, number),
+        Value::String(text) => {
+            hasher.update(*b"S");
+            encode_string(hasher, text);
+        }
+        Value::Array(values) => {
+            hasher.update(*b"A");
+            encode_len(hasher, values.len());
+            for value in values {
+                encode_json(hasher, value);
+            }
+        }
+        Value::Object(object) => {
+            hasher.update(*b"O");
+            encode_len(hasher, object.len());
+            let mut entries: Vec<_> = object.iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
+            for (key, value) in entries {
+                encode_string(hasher, key);
+                encode_json(hasher, value);
+            }
+        }
+    }
+}
+
+fn encode_number(hasher: &mut Sha256, number: &Number) {
+    if let Some(value) = number.as_i64() {
+        hasher.update(*b"I");
+        hasher.update(value.to_be_bytes());
+    } else if let Some(value) = number.as_u64() {
+        hasher.update(*b"U");
+        hasher.update(value.to_be_bytes());
+    } else if let Some(value) = number.as_f64() {
+        hasher.update(*b"F");
+        hasher.update(value.to_bits().to_be_bytes());
+    }
+}
+
+fn encode_string(hasher: &mut Sha256, value: &str) {
+    encode_len(hasher, value.len());
+    hasher.update(value.as_bytes());
+}
+
+fn encode_len(hasher: &mut Sha256, value: usize) {
+    let value = u64::try_from(value).unwrap_or(u64::MAX);
+    hasher.update(value.to_be_bytes());
 }
 
 pub(crate) fn compile_tool_schema(

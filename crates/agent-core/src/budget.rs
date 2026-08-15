@@ -8,6 +8,7 @@ pub struct RunBudget {
     max_model_calls: u32,
     max_tool_calls: u32,
     max_iterations: u32,
+    max_approval_requests: u32,
     max_elapsed: Duration,
 }
 
@@ -26,8 +27,15 @@ impl RunBudget {
             max_model_calls,
             max_tool_calls,
             max_iterations,
+            max_approval_requests: 0,
             max_elapsed,
         })
+    }
+
+    #[must_use]
+    pub const fn with_max_approval_requests(mut self, max_approval_requests: u32) -> Self {
+        self.max_approval_requests = max_approval_requests;
+        self
     }
 
     #[must_use]
@@ -46,6 +54,11 @@ impl RunBudget {
     }
 
     #[must_use]
+    pub const fn max_approval_requests(&self) -> u32 {
+        self.max_approval_requests
+    }
+
+    #[must_use]
     pub const fn max_elapsed(&self) -> Duration {
         self.max_elapsed
     }
@@ -61,6 +74,8 @@ impl<'de> Deserialize<'de> for RunBudget {
             max_model_calls: u32,
             max_tool_calls: u32,
             max_iterations: u32,
+            #[serde(default)]
+            max_approval_requests: u32,
             max_elapsed: Duration,
         }
 
@@ -71,6 +86,7 @@ impl<'de> Deserialize<'de> for RunBudget {
             representation.max_iterations,
             representation.max_elapsed,
         )
+        .map(|budget| budget.with_max_approval_requests(representation.max_approval_requests))
         .map_err(de::Error::custom)
     }
 }
@@ -80,6 +96,7 @@ pub struct BudgetUsage {
     model_calls: u32,
     tool_calls: u32,
     iterations: u32,
+    approval_requests: u32,
 }
 
 impl BudgetUsage {
@@ -89,6 +106,22 @@ impl BudgetUsage {
             model_calls,
             tool_calls,
             iterations,
+            approval_requests: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_approval_requests(
+        model_calls: u32,
+        tool_calls: u32,
+        iterations: u32,
+        approval_requests: u32,
+    ) -> Self {
+        Self {
+            model_calls,
+            tool_calls,
+            iterations,
+            approval_requests,
         }
     }
 
@@ -106,6 +139,11 @@ impl BudgetUsage {
     pub const fn iterations(&self) -> u32 {
         self.iterations
     }
+
+    #[must_use]
+    pub const fn approval_requests(&self) -> u32 {
+        self.approval_requests
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +152,7 @@ pub enum BudgetDimension {
     ModelCalls,
     ToolCalls,
     Iterations,
+    ApprovalRequests,
     Elapsed,
 }
 
@@ -123,6 +162,7 @@ impl std::fmt::Display for BudgetDimension {
             Self::ModelCalls => "model_calls",
             Self::ToolCalls => "tool_calls",
             Self::Iterations => "iterations",
+            Self::ApprovalRequests => "approval_requests",
             Self::Elapsed => "elapsed",
         };
         formatter.write_str(name)
@@ -146,6 +186,7 @@ mod tests {
         assert_eq!(budget.max_model_calls(), 0);
         assert_eq!(budget.max_tool_calls(), 0);
         assert_eq!(budget.max_iterations(), 1);
+        assert_eq!(budget.max_approval_requests(), 0);
     }
 
     #[test]
@@ -185,15 +226,35 @@ mod tests {
 
     #[test]
     fn budget_usage_tracks_iterations() {
-        let usage = BudgetUsage::new(1, 2, 3);
+        let usage = BudgetUsage::with_approval_requests(1, 2, 3, 4);
 
         assert_eq!(usage.model_calls(), 1);
         assert_eq!(usage.tool_calls(), 2);
         assert_eq!(usage.iterations(), 3);
+        assert_eq!(usage.approval_requests(), 4);
     }
 
     #[test]
     fn iteration_dimension_display_is_stable() {
         assert_eq!(BudgetDimension::Iterations.to_string(), "iterations");
+    }
+
+    #[test]
+    fn approval_budget_defaults_to_zero_and_uses_named_builder() {
+        let budget = RunBudget::new(1, 1, 1, Duration::from_secs(1)).expect("budget must be valid");
+
+        assert_eq!(budget.max_approval_requests(), 0);
+        assert_eq!(
+            budget.with_max_approval_requests(2).max_approval_requests(),
+            2
+        );
+    }
+
+    #[test]
+    fn approval_dimension_display_is_stable() {
+        assert_eq!(
+            BudgetDimension::ApprovalRequests.to_string(),
+            "approval_requests"
+        );
     }
 }

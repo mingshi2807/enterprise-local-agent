@@ -878,3 +878,49 @@ M5 is fully implemented and verified. No commit was created, and the external li
 - No commit was created; Git currently shows only the new omx_wiki/ directory.
 
   For M6 onward, we can maintain one compact milestone dossier containing proposal, approval refinements, implementation report, evidence, and deferrals instead of extending both large tracking logs.
+
+# M6 implementation report
+
+  agent-harness/src/containment.rs:1, and the omx_wiki/m6-approval-and-containment-boundary.md:1.
+
+  1. Policy/safety ceiling: crates/agent-harness/src/policy.rs:27 allows ReadOnly, requires approval for LocalWrite, and denies ExternalWrite/Privileged. The harness independently prevents faulty policies from
+     bypassing the M6 ceiling. M0ReadOnlyPolicy remains unchanged.
+
+  2. Approval domain and port: Added nominal ApprovalRequestId, bounded/redacted ApprovalPreview, ApprovalRequest, matching ApprovalDecision, and object-safe ApprovalPort. No identity claims, context,
+     cancellation token, policy, registry, or executor leaks into the port.
+
+  3. Approval budget: crates/agent-core/src/budget.rs:7 keeps its existing constructor. Approval defaults to zero and uses with_max_approval_requests. Exhaustion terminalizes as BudgetExceeded(ApprovalRequests).
+  4. Digest/canonical encoding: Added redacted ActionDigest; the harness computes SHA-256 over the versioned domain separator, exact tool name, trusted capability, and validated arguments. Objects are key-
+     sorted, arrays remain ordered, and signed, unsigned, decimal, and negative numbers have fixed vectors.
+
+  5. Preview handling: Preview fields are bounded to 256 bytes, non-empty, control-character-free, non-serializable, and redacted. Preview failures retain stable unavailable/rejected/infrastructure categories
+     and consume no approval or tool budget.
+
+  6. Binding model: crates/agent-harness/src/registry.rs:64 creates a distinct contained binding. Arbitrary ToolPort instances cannot be promoted to containment.
+  7. Required audit: LocalWrite progression uses centralized crates/agent-harness/src/execution.rs:1173, regardless of general FailOpen configuration. Degraded audit state blocks LocalWrite.
+  8. LocalWrite sequence: crates/agent-harness/src/execution.rs:218 enforces binding, policy, containment, preview, approval budget, required approval events, exact decision matching, tool reservation, required
+     invocation-start audit, and single contained execution.
+
+  9. Containment contract: crates/agent-harness/src/containment.rs:11 is explicitly a trusted adapter contract—not proof of OS isolation. No production containment adapter ships in M6.
+  10. Tool lifecycle: Success, domain failure, call-ID mismatch, containment failure, cancellation, and deadline all terminate through normal tool observability. The independent review’s lifecycle finding was
+     fixed and re-reviewed with an approve verdict.
+
+  11. Denial/failure semantics: Approval denial consumes one approval request, zero ToolCalls, invokes no executor, and causes the loop to fail before Verify/Reflect. Infrastructure errors remain sanitized.
+  12. Cancellation/deadline: Harness-biased ordering remains cancellation → deadline → awaited operation. Pending approval and pending contained execution tests prove authoritative terminalization and terminal
+     tool-event correlation.
+
+  13. Deterministic fakes/demo: Test-support provides scripted/pending approval and fake containment without filesystem, process, or network effects. The explicit apps/agent-cli/src/main.rs:24 prints
+     Containment: test fake — NO OS isolation.
+
+  14. Dependencies: Added exactly sha2 = 0.11.0, default features disabled. Its sole direct workspace consumer is agent-harness.
+  15. Architecture boundaries: Core/harness/loop production sources remain Rig/OpenAI/provider/network-free. Provider-rig gained no approval or containment authority; its tool references remain test-only
+     integration coverage.
+
+  16. Quality gates: Formatting and strict Clippy passed. Workspace tests passed: CLI 1, core 25, harness 85, loop 23, provider 24, HTTP integration 5, plus four doctests. All requested dependency trees,
+     architecture scans, git diff --check, default CLI, and fake-containment CLI passed. Wiki lint reports zero issues.
+
+  17. M6.1 deferrals: Real Linux isolation, filesystem containment, enterprise identity/RBAC, durable HITL, interactive approval, ExternalWrite/Privileged execution, rollback, native provider tools, retries,
+     MCP, RAG, and graphs.
+
+  18. Deviations: No scope deviations. Constructor compatibility was preserved with additive builders. The existing metadata-only ToolInvocationAdapterFailed event is reused for runtime interruption after a
+     contained invocation starts rather than introducing another lifecycle vocabulary.

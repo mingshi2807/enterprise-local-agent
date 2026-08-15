@@ -4,7 +4,9 @@ use agent_core::{ToolDefinition, ToolName};
 use jsonschema::Validator;
 use thiserror::Error;
 
-use crate::{ToolPort, ToolSchemaRegistrationError, action::compile_tool_schema};
+use crate::{
+    ContainedToolPort, ToolPort, ToolSchemaRegistrationError, action::compile_tool_schema,
+};
 
 #[derive(Default)]
 pub struct ToolRegistry {
@@ -14,8 +16,14 @@ pub struct ToolRegistry {
 #[derive(Clone)]
 pub struct ToolBinding {
     definition: ToolDefinition,
-    port: Arc<dyn ToolPort>,
+    execution: ExecutionBinding,
     validator: Arc<Validator>,
+}
+
+#[derive(Clone)]
+pub(crate) enum ExecutionBinding {
+    Direct(Arc<dyn ToolPort>),
+    Contained(Arc<dyn ContainedToolPort>),
 }
 
 impl ToolBinding {
@@ -25,8 +33,16 @@ impl ToolBinding {
     }
 
     #[must_use]
-    pub fn port(&self) -> Arc<dyn ToolPort> {
-        Arc::clone(&self.port)
+    pub fn direct_port(&self) -> Option<Arc<dyn ToolPort>> {
+        match &self.execution {
+            ExecutionBinding::Direct(port) => Some(Arc::clone(port)),
+            ExecutionBinding::Contained(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn execution(&self) -> &ExecutionBinding {
+        &self.execution
     }
 
     pub(crate) fn validator(&self) -> &Validator {
@@ -42,6 +58,22 @@ impl ToolRegistry {
 
     pub fn register(&mut self, tool: Arc<dyn ToolPort>) -> Result<(), ToolRegistryError> {
         let definition = tool.definition().clone();
+        self.register_binding(definition, ExecutionBinding::Direct(tool))
+    }
+
+    pub fn register_contained(
+        &mut self,
+        tool: Arc<dyn ContainedToolPort>,
+    ) -> Result<(), ToolRegistryError> {
+        let definition = tool.definition().clone();
+        self.register_binding(definition, ExecutionBinding::Contained(tool))
+    }
+
+    fn register_binding(
+        &mut self,
+        definition: ToolDefinition,
+        execution: ExecutionBinding,
+    ) -> Result<(), ToolRegistryError> {
         let name = definition.name().clone();
         if self.tools.contains_key(&name) {
             return Err(ToolRegistryError::DuplicateName { name });
@@ -56,7 +88,7 @@ impl ToolRegistry {
             name,
             ToolBinding {
                 definition,
-                port: tool,
+                execution,
                 validator,
             },
         );
@@ -169,7 +201,9 @@ mod tests {
         let binding = registry
             .get(expected_definition.name())
             .expect("registered binding must be present");
-        let bound_port = binding.port();
+        let bound_port = binding
+            .direct_port()
+            .expect("direct registration must expose direct port internally");
 
         assert_eq!(binding.definition(), &expected_definition);
         assert_eq!(bound_port.definition(), binding.definition());

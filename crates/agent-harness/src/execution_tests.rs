@@ -9,12 +9,14 @@ use agent_core::{
 };
 
 use crate::{
-    AuditFailurePolicy, AuditPhase, AuditSink, ExecutionHarness, ExecutionStage, HarnessConfig,
-    HarnessError, M0ReadOnlyPolicy, ModelPort, ModelPortError, OperationEffect, RunContext,
-    ToolPort, ToolPortError, ToolRegistry,
+    ApprovalDecision, ApprovalPort, ApprovalPortError, AuditFailurePolicy, AuditPhase, AuditSink,
+    AuthorizationDecision, CapabilityPolicy, ContainedToolPort, ContainmentPortError,
+    ExecutionHarness, ExecutionStage, HarnessConfig, HarnessError, M0ReadOnlyPolicy,
+    M6ApprovalPolicy, ModelPort, ModelPortError, OperationEffect, PolicyDenial, PolicyDenialReason,
+    PortFuture, RunContext, ToolPort, ToolPortError, ToolRegistry,
     testing::{
-        FailingAuditSink, FakeInvocation, FakeModelPort, FakeToolPort, InMemoryAuditSink,
-        InvocationLog,
+        FailingAuditSink, FakeContainedToolPort, FakeInvocation, FakeModelPort, FakeToolPort,
+        InMemoryAuditSink, InvocationLog, PendingApprovalPort, ScriptedApprovalPort,
     },
 };
 
@@ -49,6 +51,21 @@ fn context_with_iterations(
         RunId::new(),
         SessionId::new(),
         budget_with_iterations(model_calls, tool_calls, iterations, elapsed),
+    )
+}
+
+fn context_with_approval_budget(
+    model_calls: u32,
+    tool_calls: u32,
+    approval_requests: u32,
+    elapsed: Duration,
+) -> RunContext {
+    RunContext::new(
+        RunId::new(),
+        SessionId::new(),
+        RunBudget::new(model_calls, tool_calls, 1, elapsed)
+            .expect("test budget must be valid")
+            .with_max_approval_requests(approval_requests),
     )
 }
 
@@ -108,6 +125,36 @@ fn harness(
         audit,
         config(policy),
     )
+}
+
+fn harness_with_registry(
+    model: Arc<FakeModelPort>,
+    registry: ToolRegistry,
+    audit: Arc<dyn AuditSink>,
+    policy: AuditFailurePolicy,
+    capability_policy: Arc<dyn CapabilityPolicy>,
+    approval: Option<Arc<dyn ApprovalPort>>,
+) -> ExecutionHarness {
+    let model: Arc<dyn ModelPort> = model;
+    let harness = ExecutionHarness::new(model, registry, capability_policy, audit, config(policy));
+    match approval {
+        Some(approval) => harness.with_approval_port(approval),
+        None => harness,
+    }
+}
+
+async fn prepare_single_action(
+    runtime: &ExecutionHarness,
+    run: &mut RunContext,
+) -> crate::ValidatedAction {
+    let invocation = runtime
+        .invoke_model_tracked(run, request("plan"))
+        .await
+        .expect("model invocation must succeed");
+    runtime
+        .prepare_action(run, invocation)
+        .await
+        .expect("action must prepare")
 }
 
 #[tokio::test]
@@ -282,6 +329,835 @@ async fn denied_local_write_is_not_invoked_and_consumes_no_tool_budget() {
     assert_eq!(tool.invocation_count(), 0);
     assert_eq!(run.usage().tool_calls(), 0);
     assert_eq!(run.status(), &RunStatus::Running);
+}
+
+#[tokio::test]
+async fn contained_read_only_executes_without_approval_or_approval_budget() {
+    let contained = Arc::new(FakeContainedToolPort::succeeding(
+        definition("lookup", CapabilityKind::ReadOnly),
+        ToolOutput::new(serde_json::json!({"ok": true})),
+    ));
+    let contained_port: Arc<dyn ContainedToolPort> = contained.clone();
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_contained(contained_port)
+        .expect("contained read-only must register");
+    let runtime = harness_with_registry(
+        Arc::new(FakeModelPort::scripted(vec![])),
+        registry,
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+        Arc::new(M6ApprovalPolicy),
+        None,
+    );
+    let mut run = context_with_approval_budget(0, 1, 0, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+
+    runtime
+        .invoke_tool(&mut run, call("lookup", ToolCallId::new(), "input"))
+        .await
+        .expect("contained read-only must execute without approval");
+
+    assert_eq!(contained.invocation_count(), 1);
+    assert_eq!(contained.preview_count(), 0);
+    assert_eq!(run.usage().tool_calls(), 1);
+    assert_eq!(run.usage().approval_requests(), 0);
+}
+
+#[tokio::test]
+async fn direct_local_write_cannot_request_approval_or_execute() {
+    let model = Arc::new(FakeModelPort::scripted(vec![Ok(response(
+        r#"{"action":{"tool":"write_note","arguments":{}}}"#,
+    ))]));
+    let approval = Arc::new(ScriptedApprovalPort::approve_all());
+    let tool = Arc::new(FakeToolPort::succeeding(
+        definition("write_note", CapabilityKind::LocalWrite),
+        ToolOutput::new(serde_json::json!({})),
+    ));
+    let mut registry = ToolRegistry::new();
+    let tool_port: Arc<dyn ToolPort> = tool.clone();
+    registry.register(tool_port).expect("tool must register");
+    let runtime = harness_with_registry(
+        model,
+        registry,
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+        Arc::new(M6ApprovalPolicy),
+        Some(approval.clone()),
+    );
+    let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("direct local write must fail before approval");
+
+    assert!(matches!(error, HarnessError::ContainmentUnavailable { .. }));
+    assert_eq!(approval.invocation_count(), 0);
+    assert_eq!(tool.invocation_count(), 0);
+    assert_eq!(run.usage().approval_requests(), 0);
+    assert_eq!(run.usage().tool_calls(), 0);
+}
+
+#[tokio::test]
+async fn contained_local_write_approval_grant_executes_once() {
+    let model = Arc::new(FakeModelPort::scripted(vec![Ok(response(
+        r#"{"action":{"tool":"write_note","arguments":{}}}"#,
+    ))]));
+    let approval = Arc::new(ScriptedApprovalPort::approve_all());
+    let contained = Arc::new(FakeContainedToolPort::succeeding(
+        definition("write_note", CapabilityKind::LocalWrite),
+        ToolOutput::new(serde_json::json!({"ok": true})),
+    ));
+    let contained_port: Arc<dyn ContainedToolPort> = contained.clone();
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_contained(contained_port)
+        .expect("contained local write must register");
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let runtime = harness_with_registry(
+        model,
+        registry,
+        audit.clone(),
+        AuditFailurePolicy::FailClosed,
+        Arc::new(M6ApprovalPolicy),
+        Some(approval.clone()),
+    );
+    let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+
+    runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect("approved contained local write must execute");
+
+    assert_eq!(approval.invocation_count(), 1);
+    assert_eq!(contained.preview_count(), 1);
+    assert_eq!(contained.invocation_count(), 1);
+    assert_eq!(run.usage().approval_requests(), 1);
+    assert_eq!(run.usage().tool_calls(), 1);
+    let event_kinds: Vec<_> = audit
+        .events()
+        .into_iter()
+        .filter_map(|event| match event.kind() {
+            AgentEventKind::ApprovalRequested { .. } => Some("approval_requested"),
+            AgentEventKind::ApprovalGranted { .. } => Some("approval_granted"),
+            AgentEventKind::ToolInvocationStarted { .. } => Some("tool_started"),
+            AgentEventKind::ToolInvocationCompleted { .. } => Some("tool_completed"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        event_kinds,
+        vec![
+            "approval_requested",
+            "approval_granted",
+            "tool_started",
+            "tool_completed"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn approval_denial_consumes_approval_budget_but_zero_tool_calls() {
+    let model = Arc::new(FakeModelPort::scripted(vec![Ok(response(
+        r#"{"action":{"tool":"write_note","arguments":{}}}"#,
+    ))]));
+    let approval = Arc::new(ScriptedApprovalPort::deny_all());
+    let contained = Arc::new(FakeContainedToolPort::succeeding(
+        definition("write_note", CapabilityKind::LocalWrite),
+        ToolOutput::new(serde_json::json!({})),
+    ));
+    let contained_port: Arc<dyn ContainedToolPort> = contained.clone();
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_contained(contained_port)
+        .expect("contained local write must register");
+    let runtime = harness_with_registry(
+        model,
+        registry,
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+        Arc::new(M6ApprovalPolicy),
+        Some(approval.clone()),
+    );
+    let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("approval denial must fail closed");
+
+    assert!(matches!(error, HarnessError::ApprovalDenied));
+    assert_eq!(approval.invocation_count(), 1);
+    assert_eq!(contained.invocation_count(), 0);
+    assert_eq!(run.usage().approval_requests(), 1);
+    assert_eq!(run.usage().tool_calls(), 0);
+}
+
+#[tokio::test]
+async fn zero_approval_budget_terminalizes_before_approval_port() {
+    let model = Arc::new(FakeModelPort::scripted(vec![Ok(response(
+        r#"{"action":{"tool":"write_note","arguments":{}}}"#,
+    ))]));
+    let approval = Arc::new(ScriptedApprovalPort::approve_all());
+    let contained = Arc::new(FakeContainedToolPort::succeeding(
+        definition("write_note", CapabilityKind::LocalWrite),
+        ToolOutput::new(serde_json::json!({})),
+    ));
+    let contained_port: Arc<dyn ContainedToolPort> = contained.clone();
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_contained(contained_port)
+        .expect("contained local write must register");
+    let runtime = harness_with_registry(
+        model,
+        registry,
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+        Arc::new(M6ApprovalPolicy),
+        Some(approval.clone()),
+    );
+    let mut run = context_with_approval_budget(1, 1, 0, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("approval budget must be hard");
+
+    assert_eq!(
+        error.budget_dimension(),
+        Some(BudgetDimension::ApprovalRequests)
+    );
+    assert_eq!(approval.invocation_count(), 0);
+    assert_eq!(contained.invocation_count(), 0);
+    assert_eq!(
+        run.status(),
+        &RunStatus::Finished(RunOutcome::BudgetExceeded {
+            dimension: BudgetDimension::ApprovalRequests,
+        })
+    );
+}
+
+#[derive(Clone, Copy)]
+struct AlwaysAllowPolicy;
+
+impl CapabilityPolicy for AlwaysAllowPolicy {
+    fn authorize(&self, _capability: CapabilityKind) -> AuthorizationDecision {
+        AuthorizationDecision::Allowed
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AlwaysDenyPolicy;
+
+impl CapabilityPolicy for AlwaysDenyPolicy {
+    fn authorize(&self, capability: CapabilityKind) -> AuthorizationDecision {
+        AuthorizationDecision::Denied(PolicyDenial::new(
+            capability,
+            PolicyDenialReason::CapabilityNotExecutableInM6,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn validated_read_only_action_still_obeys_capability_policy() {
+    let model = Arc::new(FakeModelPort::scripted(vec![Ok(response(
+        r#"{"action":{"tool":"lookup","arguments":{}}}"#,
+    ))]));
+    let tool = Arc::new(FakeToolPort::succeeding(
+        definition("lookup", CapabilityKind::ReadOnly),
+        ToolOutput::new(serde_json::json!({})),
+    ));
+    let mut registry = ToolRegistry::new();
+    let tool_port: Arc<dyn ToolPort> = tool.clone();
+    registry.register(tool_port).expect("tool must register");
+    let runtime = harness_with_registry(
+        model,
+        registry,
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+        Arc::new(AlwaysDenyPolicy),
+        None,
+    );
+    let mut run = context_with_approval_budget(1, 1, 0, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("policy denial must remain authoritative for read-only actions");
+
+    assert!(matches!(error, HarnessError::PolicyDenied(_)));
+    assert_eq!(tool.invocation_count(), 0);
+    assert_eq!(run.usage().tool_calls(), 0);
+    assert_eq!(run.usage().approval_requests(), 0);
+}
+
+#[tokio::test]
+async fn faulty_allowed_local_write_cannot_bypass_approval_requirement() {
+    let model = Arc::new(FakeModelPort::scripted(vec![Ok(response(
+        r#"{"action":{"tool":"write_note","arguments":{}}}"#,
+    ))]));
+    let approval = Arc::new(ScriptedApprovalPort::approve_all());
+    let contained = Arc::new(FakeContainedToolPort::succeeding(
+        definition("write_note", CapabilityKind::LocalWrite),
+        ToolOutput::new(serde_json::json!({})),
+    ));
+    let contained_port: Arc<dyn ContainedToolPort> = contained.clone();
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_contained(contained_port)
+        .expect("contained local write must register");
+    let runtime = harness_with_registry(
+        model,
+        registry,
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+        Arc::new(AlwaysAllowPolicy),
+        Some(approval.clone()),
+    );
+    let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("faulty allowed local write must still fail");
+
+    assert!(matches!(error, HarnessError::ApprovalRequired));
+    assert_eq!(approval.invocation_count(), 0);
+    assert_eq!(contained.invocation_count(), 0);
+    assert_eq!(run.usage().approval_requests(), 0);
+    assert_eq!(run.usage().tool_calls(), 0);
+}
+
+#[tokio::test]
+async fn faulty_allowed_external_write_and_privileged_cannot_execute() {
+    for capability in [CapabilityKind::ExternalWrite, CapabilityKind::Privileged] {
+        let model = Arc::new(FakeModelPort::scripted(vec![Ok(response(
+            r#"{"action":{"tool":"danger","arguments":{}}}"#,
+        ))]));
+        let tool = Arc::new(FakeToolPort::succeeding(
+            definition("danger", capability),
+            ToolOutput::new(serde_json::json!({})),
+        ));
+        let tool_port: Arc<dyn ToolPort> = tool.clone();
+        let mut registry = ToolRegistry::new();
+        registry.register(tool_port).expect("tool must register");
+        let runtime = harness_with_registry(
+            model,
+            registry,
+            Arc::new(InMemoryAuditSink::new()),
+            AuditFailurePolicy::FailClosed,
+            Arc::new(AlwaysAllowPolicy),
+            None,
+        );
+        let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+        runtime.start_run(&mut run).await.expect("run must start");
+        let action = prepare_single_action(&runtime, &mut run).await;
+
+        let error = runtime
+            .invoke_validated_action(&mut run, action)
+            .await
+            .expect_err("unsupported capability must never execute");
+
+        assert!(matches!(
+            error,
+            HarnessError::CapabilityNotExecutable { capability: denied } if denied == capability
+        ));
+        assert_eq!(tool.invocation_count(), 0);
+        assert_eq!(run.usage().approval_requests(), 0);
+        assert_eq!(run.usage().tool_calls(), 0);
+    }
+}
+
+fn local_write_runtime_with_audit(
+    audit: Arc<dyn AuditSink>,
+    audit_policy: AuditFailurePolicy,
+    approval: Arc<dyn ApprovalPort>,
+) -> (ExecutionHarness, Arc<FakeContainedToolPort>) {
+    let model = Arc::new(FakeModelPort::scripted(vec![Ok(response(
+        r#"{"action":{"tool":"write_note","arguments":{}}}"#,
+    ))]));
+    let contained = Arc::new(FakeContainedToolPort::succeeding(
+        definition("write_note", CapabilityKind::LocalWrite),
+        ToolOutput::new(serde_json::json!({})),
+    ));
+    let contained_port: Arc<dyn ContainedToolPort> = contained.clone();
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_contained(contained_port)
+        .expect("contained local write must register");
+    (
+        harness_with_registry(
+            model,
+            registry,
+            audit,
+            audit_policy,
+            Arc::new(M6ApprovalPolicy),
+            Some(approval),
+        ),
+        contained,
+    )
+}
+
+fn local_write_runtime_with_contained(
+    contained: Arc<FakeContainedToolPort>,
+    audit: Arc<dyn AuditSink>,
+    approval: Option<Arc<dyn ApprovalPort>>,
+) -> ExecutionHarness {
+    let model = Arc::new(FakeModelPort::scripted(vec![Ok(response(
+        r#"{"action":{"tool":"write_note","arguments":{}}}"#,
+    ))]));
+    let contained_port: Arc<dyn ContainedToolPort> = contained;
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_contained(contained_port)
+        .expect("contained local write must register");
+    harness_with_registry(
+        model,
+        registry,
+        audit,
+        AuditFailurePolicy::FailClosed,
+        Arc::new(M6ApprovalPolicy),
+        approval,
+    )
+}
+
+#[tokio::test]
+async fn degraded_audit_from_action_preparation_blocks_local_write() {
+    let approval = Arc::new(ScriptedApprovalPort::approve_all());
+    let audit = Arc::new(FailingAuditSink::on_attempt(4));
+    let (runtime, contained) =
+        local_write_runtime_with_audit(audit, AuditFailurePolicy::FailOpen, approval.clone());
+    let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+    assert!(run.audit_degraded());
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("an already-degraded audit state must block local write");
+
+    assert!(matches!(error, HarnessError::AuditDegraded));
+    assert_eq!(approval.invocation_count(), 0);
+    assert_eq!(contained.preview_count(), 0);
+    assert_eq!(contained.invocation_count(), 0);
+    assert_eq!(run.usage().approval_requests(), 0);
+    assert_eq!(run.usage().tool_calls(), 0);
+}
+
+#[tokio::test]
+async fn missing_or_failing_approval_port_never_starts_tool_execution() {
+    for approval_error in [None, Some(ApprovalPortError::Failed)] {
+        let contained = Arc::new(FakeContainedToolPort::succeeding(
+            definition("write_note", CapabilityKind::LocalWrite),
+            ToolOutput::new(serde_json::json!({})),
+        ));
+        let approval = approval_error.map(|error| {
+            Arc::new(ScriptedApprovalPort::scripted(vec![Err(error)])) as Arc<dyn ApprovalPort>
+        });
+        let runtime = local_write_runtime_with_contained(
+            contained.clone(),
+            Arc::new(InMemoryAuditSink::new()),
+            approval,
+        );
+        let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+        runtime.start_run(&mut run).await.expect("run must start");
+        let action = prepare_single_action(&runtime, &mut run).await;
+
+        let error = runtime
+            .invoke_validated_action(&mut run, action)
+            .await
+            .expect_err("missing or failing approval infrastructure must fail closed");
+
+        match approval_error {
+            None => {
+                assert!(matches!(error, HarnessError::ApprovalPortMissing));
+                assert_eq!(run.usage().approval_requests(), 0);
+            }
+            Some(expected) => {
+                assert!(matches!(error, HarnessError::ApprovalPort(actual) if actual == expected));
+                assert_eq!(run.usage().approval_requests(), 1);
+            }
+        }
+        assert_eq!(contained.invocation_count(), 0);
+        assert_eq!(run.usage().tool_calls(), 0);
+    }
+}
+
+#[tokio::test]
+async fn preview_failures_preserve_category_and_consume_no_execution_budget() {
+    for (error, expected_kind) in [
+        (
+            ContainmentPortError::Unavailable,
+            agent_core::ContainmentFailureKind::Unavailable,
+        ),
+        (
+            ContainmentPortError::PreviewRejected,
+            agent_core::ContainmentFailureKind::PreviewRejected,
+        ),
+        (
+            ContainmentPortError::Infrastructure,
+            agent_core::ContainmentFailureKind::Infrastructure,
+        ),
+    ] {
+        let contained = Arc::new(FakeContainedToolPort::preview_failing(
+            definition("write_note", CapabilityKind::LocalWrite),
+            error,
+        ));
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let approval = Arc::new(ScriptedApprovalPort::approve_all());
+        let runtime = local_write_runtime_with_contained(
+            contained.clone(),
+            audit.clone(),
+            Some(approval.clone()),
+        );
+        let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+        runtime.start_run(&mut run).await.expect("run must start");
+        let action = prepare_single_action(&runtime, &mut run).await;
+
+        let actual = runtime
+            .invoke_validated_action(&mut run, action)
+            .await
+            .expect_err("preview failure must fail before approval");
+
+        assert!(matches!(actual, HarnessError::ContainmentPort(actual) if actual == error));
+        assert_eq!(approval.invocation_count(), 0);
+        assert_eq!(contained.invocation_count(), 0);
+        assert_eq!(run.usage().approval_requests(), 0);
+        assert_eq!(run.usage().tool_calls(), 0);
+        assert!(audit.events().iter().any(|event| matches!(
+            event.kind(),
+            AgentEventKind::ContainmentFailed { kind, .. } if *kind == expected_kind
+        )));
+    }
+}
+
+#[tokio::test]
+async fn approval_requested_audit_failure_consumes_approval_slot_but_invokes_no_port() {
+    let approval = Arc::new(ScriptedApprovalPort::approve_all());
+    let audit = Arc::new(FailingAuditSink::on_attempt(7));
+    let (runtime, contained) =
+        local_write_runtime_with_audit(audit, AuditFailurePolicy::FailOpen, approval.clone());
+    let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("required ApprovalRequested audit must fail closed");
+
+    assert!(matches!(error, HarnessError::Audit { .. }));
+    assert_eq!(run.usage().approval_requests(), 1);
+    assert_eq!(approval.invocation_count(), 0);
+    assert_eq!(contained.invocation_count(), 0);
+    assert_eq!(run.usage().tool_calls(), 0);
+}
+
+#[tokio::test]
+async fn approval_granted_audit_failure_prevents_tool_reservation() {
+    let approval = Arc::new(ScriptedApprovalPort::approve_all());
+    let audit = Arc::new(FailingAuditSink::on_attempt(8));
+    let (runtime, contained) =
+        local_write_runtime_with_audit(audit, AuditFailurePolicy::FailOpen, approval.clone());
+    let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("required ApprovalGranted audit must fail closed");
+
+    assert!(matches!(error, HarnessError::Audit { .. }));
+    assert_eq!(approval.invocation_count(), 1);
+    assert_eq!(run.usage().approval_requests(), 1);
+    assert_eq!(run.usage().tool_calls(), 0);
+    assert_eq!(contained.invocation_count(), 0);
+}
+
+#[tokio::test]
+async fn tool_invocation_started_audit_failure_reserves_tool_but_never_invokes_executor() {
+    let approval = Arc::new(ScriptedApprovalPort::approve_all());
+    let audit = Arc::new(FailingAuditSink::on_attempt(9));
+    let (runtime, contained) =
+        local_write_runtime_with_audit(audit, AuditFailurePolicy::FailOpen, approval);
+    let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("required ToolInvocationStarted audit must fail closed");
+
+    assert!(matches!(error, HarnessError::Audit { .. }));
+    assert_eq!(run.usage().approval_requests(), 1);
+    assert_eq!(run.usage().tool_calls(), 1);
+    assert_eq!(contained.invocation_count(), 0);
+}
+
+struct MismatchedApprovalPort {
+    mismatch: ApprovalMismatch,
+}
+
+#[derive(Clone, Copy)]
+enum ApprovalMismatch {
+    RequestId,
+    Digest,
+}
+
+impl ApprovalPort for MismatchedApprovalPort {
+    fn decide<'a>(
+        &'a self,
+        request: &'a crate::ApprovalRequest,
+    ) -> PortFuture<'a, Result<ApprovalDecision, ApprovalPortError>> {
+        Box::pin(std::future::ready(match self.mismatch {
+            ApprovalMismatch::RequestId => Ok(ApprovalDecision::approved(
+                agent_core::ApprovalRequestId::new(),
+                request.action_digest(),
+            )),
+            ApprovalMismatch::Digest => Ok(ApprovalDecision::approved(
+                request.id(),
+                agent_core::ActionDigest::from_bytes([7; 32]),
+            )),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn approval_decision_must_match_request_id_and_digest() {
+    for mismatch in [ApprovalMismatch::RequestId, ApprovalMismatch::Digest] {
+        let approval = Arc::new(MismatchedApprovalPort { mismatch });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let (runtime, contained) =
+            local_write_runtime_with_audit(audit, AuditFailurePolicy::FailClosed, approval);
+        let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+        runtime.start_run(&mut run).await.expect("run must start");
+        let action = prepare_single_action(&runtime, &mut run).await;
+
+        let error = runtime
+            .invoke_validated_action(&mut run, action)
+            .await
+            .expect_err("mismatched approval decision must fail closed");
+
+        assert!(matches!(error, HarnessError::ApprovalDecisionMismatch));
+        assert_eq!(run.usage().approval_requests(), 1);
+        assert_eq!(run.usage().tool_calls(), 0);
+        assert_eq!(contained.invocation_count(), 0);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_approval_observes_cancellation_before_execution() {
+    let approval = Arc::new(PendingApprovalPort::new());
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let (runtime, contained) =
+        local_write_runtime_with_audit(audit, AuditFailurePolicy::FailClosed, approval.clone());
+    let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+    let cancellation = runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        cancellation.request_cancel();
+    });
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("pending approval must observe cancellation");
+
+    assert!(matches!(
+        error,
+        HarnessError::Cancelled {
+            stage: ExecutionStage::Invocation
+        }
+    ));
+    assert_eq!(run.status(), &RunStatus::Finished(RunOutcome::Cancelled));
+    assert_eq!(approval.invocation_count(), 1);
+    assert_eq!(contained.invocation_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_approval_observes_deadline_before_execution() {
+    let approval = Arc::new(PendingApprovalPort::new());
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let (runtime, contained) =
+        local_write_runtime_with_audit(audit, AuditFailurePolicy::FailClosed, approval.clone());
+    let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(1));
+    runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("pending approval must observe deadline");
+
+    assert!(matches!(
+        error,
+        HarnessError::DeadlineExceeded {
+            stage: ExecutionStage::Invocation
+        }
+    ));
+    assert_eq!(
+        run.status(),
+        &RunStatus::Finished(RunOutcome::BudgetExceeded {
+            dimension: BudgetDimension::Elapsed,
+        })
+    );
+    assert_eq!(approval.invocation_count(), 1);
+    assert_eq!(contained.invocation_count(), 0);
+}
+
+fn assert_started_tool_has_terminal_event(events: &[agent_core::AgentEvent]) {
+    let started = events.iter().find_map(|event| match event.kind() {
+        AgentEventKind::ToolInvocationStarted { tool_call_id, .. } => Some(*tool_call_id),
+        _ => None,
+    });
+    let started = started.expect("contained execution must emit ToolInvocationStarted");
+    assert!(events.iter().any(|event| matches!(
+        event.kind(),
+        AgentEventKind::ToolInvocationCompleted { tool_call_id }
+            | AgentEventKind::ToolInvocationDomainFailed { tool_call_id, .. }
+            | AgentEventKind::ToolInvocationAdapterFailed { tool_call_id }
+            if *tool_call_id == started
+    )));
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_contained_execution_cancellation_emits_terminal_tool_event() {
+    let contained = Arc::new(FakeContainedToolPort::pending(definition(
+        "write_note",
+        CapabilityKind::LocalWrite,
+    )));
+    let approval = Arc::new(ScriptedApprovalPort::approve_all());
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let runtime = local_write_runtime_with_contained(
+        contained.clone(),
+        audit.clone(),
+        Some(approval.clone()),
+    );
+    let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+    let cancellation = runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        cancellation.request_cancel();
+    });
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("pending contained execution must observe cancellation");
+
+    assert!(matches!(
+        error,
+        HarnessError::Cancelled {
+            stage: ExecutionStage::Invocation
+        }
+    ));
+    assert_eq!(run.status(), &RunStatus::Finished(RunOutcome::Cancelled));
+    assert_eq!(approval.invocation_count(), 1);
+    assert_eq!(contained.invocation_count(), 1);
+    assert_eq!(run.usage().approval_requests(), 1);
+    assert_eq!(run.usage().tool_calls(), 1);
+    assert_started_tool_has_terminal_event(&audit.events());
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_contained_execution_deadline_emits_terminal_tool_event() {
+    let contained = Arc::new(FakeContainedToolPort::pending(definition(
+        "write_note",
+        CapabilityKind::LocalWrite,
+    )));
+    let approval = Arc::new(ScriptedApprovalPort::approve_all());
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let runtime = local_write_runtime_with_contained(
+        contained.clone(),
+        audit.clone(),
+        Some(approval.clone()),
+    );
+    let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(1));
+    runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("pending contained execution must observe deadline");
+
+    assert!(matches!(
+        error,
+        HarnessError::DeadlineExceeded {
+            stage: ExecutionStage::Invocation
+        }
+    ));
+    assert_eq!(
+        run.status(),
+        &RunStatus::Finished(RunOutcome::BudgetExceeded {
+            dimension: BudgetDimension::Elapsed,
+        })
+    );
+    assert_eq!(approval.invocation_count(), 1);
+    assert_eq!(contained.invocation_count(), 1);
+    assert_eq!(run.usage().approval_requests(), 1);
+    assert_eq!(run.usage().tool_calls(), 1);
+    assert_started_tool_has_terminal_event(&audit.events());
+}
+
+#[tokio::test]
+async fn contained_tool_result_call_id_mismatch_is_adapter_failure() {
+    let model = Arc::new(FakeModelPort::scripted(vec![Ok(response(
+        r#"{"action":{"tool":"write_note","arguments":{}}}"#,
+    ))]));
+    let contained = Arc::new(FakeContainedToolPort::scripted(
+        definition("write_note", CapabilityKind::LocalWrite),
+        vec![Ok(ToolResult::Succeeded {
+            call_id: ToolCallId::new(),
+            output: ToolOutput::new(serde_json::json!({})),
+        })],
+    ));
+    let contained_port: Arc<dyn ContainedToolPort> = contained.clone();
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_contained(contained_port)
+        .expect("contained local write must register");
+    let runtime = harness_with_registry(
+        model,
+        registry,
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+        Arc::new(M6ApprovalPolicy),
+        Some(Arc::new(ScriptedApprovalPort::approve_all())),
+    );
+    let mut run = context_with_approval_budget(1, 1, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+    let action = prepare_single_action(&runtime, &mut run).await;
+
+    let error = runtime
+        .invoke_validated_action(&mut run, action)
+        .await
+        .expect_err("call-id mismatch must become adapter failure");
+
+    assert!(matches!(
+        error,
+        HarnessError::ToolPort(ToolPortError::AdapterFailure)
+    ));
+    assert_eq!(run.usage().tool_calls(), 1);
+    assert_eq!(contained.invocation_count(), 1);
 }
 
 #[tokio::test]

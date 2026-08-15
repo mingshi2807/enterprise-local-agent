@@ -41,6 +41,8 @@ pub enum RunOutcome {
 pub enum RunFailureKind {
     Model,
     Tool,
+    Approval,
+    Containment,
     AuditUnavailable,
     Loop { kind: LoopFailureKind },
     Internal,

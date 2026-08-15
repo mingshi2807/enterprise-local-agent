@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActionProposalId, ActionRejectionReason, CapabilityKind, LoopEventKind, ModelCallId, RunId,
-    RunOutcome, TokenUsage, ToolCallId, ToolDomainFailureKind, ToolName,
+    ActionProposalId, ActionRejectionReason, ApprovalRequestId, CapabilityKind, LoopEventKind,
+    ModelCallId, RunId, RunOutcome, TokenUsage, ToolCallId, ToolDomainFailureKind, ToolName,
 };
 
-pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(4);
+pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -149,9 +149,50 @@ pub enum AgentEventKind {
         tool_name: ToolName,
         capability: CapabilityKind,
     },
+    ApprovalRequested {
+        approval_request_id: ApprovalRequestId,
+        action_proposal_id: ActionProposalId,
+        tool_call_id: ToolCallId,
+        tool_name: ToolName,
+        capability: CapabilityKind,
+        usage: u32,
+        limit: u32,
+    },
+    ApprovalGranted {
+        approval_request_id: ApprovalRequestId,
+    },
+    ApprovalDenied {
+        approval_request_id: ApprovalRequestId,
+    },
+    ApprovalFailed {
+        approval_request_id: ApprovalRequestId,
+        kind: ApprovalFailureKind,
+    },
+    ContainmentFailed {
+        tool_call_id: ToolCallId,
+        tool_name: ToolName,
+        capability: CapabilityKind,
+        kind: ContainmentFailureKind,
+    },
     Loop {
         event: LoopEventKind,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalFailureKind {
+    PortUnavailable,
+    PortFailed,
+    DecisionMismatch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainmentFailureKind {
+    Unavailable,
+    PreviewRejected,
+    Infrastructure,
 }
 
 #[cfg(test)]
@@ -167,7 +208,7 @@ mod tests {
         );
 
         assert_eq!(event.schema_version(), CURRENT_EVENT_SCHEMA_VERSION);
-        assert_eq!(event.schema_version().get(), 4);
+        assert_eq!(event.schema_version().get(), 5);
         assert_eq!(event.sequence().get(), 7);
 
         let json = serde_json::to_string(&event).expect("event must serialize");
@@ -296,6 +337,62 @@ mod tests {
             "sentinel tool result",
             "sentinel provider",
             "sentinel credential",
+        ] {
+            assert!(!json.contains(sentinel));
+        }
+    }
+
+    #[test]
+    fn approval_and_containment_events_are_metadata_only() {
+        let approval_request_id = ApprovalRequestId::new();
+        let action_proposal_id = ActionProposalId::new();
+        let tool_call_id = ToolCallId::new();
+        let tool_name = ToolName::new("write_note").expect("tool name must be valid");
+        let events = [
+            AgentEvent::new(
+                RunId::new(),
+                EventSequence::new(0),
+                AgentEventKind::ApprovalRequested {
+                    approval_request_id,
+                    action_proposal_id,
+                    tool_call_id,
+                    tool_name: tool_name.clone(),
+                    capability: CapabilityKind::LocalWrite,
+                    usage: 1,
+                    limit: 1,
+                },
+            ),
+            AgentEvent::new(
+                RunId::new(),
+                EventSequence::new(1),
+                AgentEventKind::ApprovalGranted {
+                    approval_request_id,
+                },
+            ),
+            AgentEvent::new(
+                RunId::new(),
+                EventSequence::new(2),
+                AgentEventKind::ContainmentFailed {
+                    tool_call_id,
+                    tool_name,
+                    capability: CapabilityKind::LocalWrite,
+                    kind: ContainmentFailureKind::Unavailable,
+                },
+            ),
+        ];
+
+        let json = serde_json::to_string(&events).expect("events must serialize");
+
+        assert!(json.contains(&approval_request_id.to_string()));
+        assert!(json.contains(&action_proposal_id.to_string()));
+        assert!(json.contains(&tool_call_id.to_string()));
+        for sentinel in [
+            "sentinel model output",
+            "sentinel action argument",
+            "sentinel approval preview",
+            "ActionDigest",
+            "validator diagnostics",
+            "raw approval error",
         ] {
             assert!(!json.contains(sentinel));
         }

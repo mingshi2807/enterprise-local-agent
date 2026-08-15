@@ -4,6 +4,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ActionProposalId, ModelCallId, ToolInput, ToolName};
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ActionDigest([u8; 32]);
+
+impl ActionDigest {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl fmt::Debug for ActionDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ActionDigest([REDACTED])")
+    }
+}
+
 /// An untrusted model-proposed action.
 ///
 /// A proposal is neither executable nor authorized. The enterprise harness must

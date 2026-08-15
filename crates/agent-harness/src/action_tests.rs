@@ -10,11 +10,15 @@ use agent_core::{
 use serde_json::json;
 
 use crate::{
-    ActionPreparationError, AuditFailurePolicy, AuditSink, ExecutionHarness, HarnessConfig,
-    HarnessError, M0ReadOnlyPolicy, ModelPort, PortFuture, RunContext, ToolPort, ToolPortError,
-    ToolRegistry, ToolRegistryError, ToolSchemaRegistrationError,
+    ActionPreparationError, ApprovalPort, AuditFailurePolicy, AuditSink, AuthorizationDecision,
+    CapabilityPolicy, ExecutionHarness, HarnessConfig, HarnessError, M0ReadOnlyPolicy,
+    M6ApprovalPolicy, ModelPort, PortFuture, RunContext, ToolPort, ToolPortError, ToolRegistry,
+    ToolRegistryError, ToolSchemaRegistrationError,
     action::{ActionValidator, TextActionDecoder},
-    testing::{FailingAuditSink, FakeModelPort, FakeToolPort, InMemoryAuditSink},
+    testing::{
+        FailingAuditSink, FakeContainedToolPort, FakeModelPort, FakeToolPort, InMemoryAuditSink,
+        ScriptedApprovalPort,
+    },
 };
 
 struct DefinitionOnlyTool {
@@ -699,7 +703,16 @@ async fn policy_denied_action_is_bound_but_uninvoked_and_unbudgeted() {
             .await
             .expect_err("non-read-only action must be denied");
 
-        assert!(matches!(error, HarnessError::PolicyDenied(_)));
+        match capability {
+            CapabilityKind::LocalWrite => assert!(matches!(error, HarnessError::PolicyDenied(_))),
+            CapabilityKind::ExternalWrite | CapabilityKind::Privileged => {
+                assert!(matches!(
+                    error,
+                    HarnessError::CapabilityNotExecutable { .. }
+                ))
+            }
+            CapabilityKind::ReadOnly => unreachable!("read-only is not part of this test"),
+        }
         assert_eq!(context.usage().tool_calls(), 0);
         assert_eq!(fixture.tool.invocation_count(), 0);
         let events = fixture.audit.events();
@@ -724,6 +737,259 @@ async fn policy_denied_action_is_bound_but_uninvoked_and_unbudgeted() {
                 .any(|event| matches!(event.kind(), AgentEventKind::ToolInvocationStarted { .. }))
         );
     }
+}
+
+struct AlwaysAllowPolicy;
+
+impl CapabilityPolicy for AlwaysAllowPolicy {
+    fn authorize(&self, _capability: CapabilityKind) -> AuthorizationDecision {
+        AuthorizationDecision::Allowed
+    }
+}
+
+fn local_write_harness(
+    contained: Option<Arc<FakeContainedToolPort>>,
+    approval: Option<Arc<dyn ApprovalPort>>,
+    max_approval_requests: u32,
+    policy: Arc<dyn CapabilityPolicy>,
+) -> (ExecutionHarness, Arc<InMemoryAuditSink>) {
+    let model: Arc<dyn ModelPort> = Arc::new(FakeModelPort::scripted(vec![Ok(response(
+        r#"{"action":{"tool":"lookup","arguments":{}}}"#,
+    ))]));
+    let definition = definition_with_capability(
+        "lookup",
+        CapabilityKind::LocalWrite,
+        json!({"type": "object", "additionalProperties": false}),
+    );
+    let mut registry = ToolRegistry::new();
+    if let Some(tool) = contained {
+        registry
+            .register_contained(tool)
+            .expect("contained local-write tool must register");
+    } else {
+        let direct: Arc<dyn ToolPort> = Arc::new(FakeToolPort::succeeding(
+            definition,
+            ToolOutput::new(json!({"unused": true})),
+        ));
+        registry
+            .register(direct)
+            .expect("direct local-write tool must register");
+    }
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let audit_sink: Arc<dyn AuditSink> = audit.clone();
+    let harness = ExecutionHarness::new(
+        model,
+        registry,
+        policy,
+        audit_sink,
+        HarnessConfig::new(AuditFailurePolicy::FailClosed, Duration::from_secs(1))
+            .expect("harness config must be valid"),
+    );
+    let harness = match approval {
+        Some(port) => harness.with_approval_port(port),
+        None => harness,
+    };
+    let _ = max_approval_requests;
+    (harness, audit)
+}
+
+fn run_context_with_approval(tool_calls: u32, approval_requests: u32) -> RunContext {
+    let budget = RunBudget::new(1, tool_calls, 1, Duration::from_secs(30))
+        .expect("budget must be valid")
+        .with_max_approval_requests(approval_requests);
+    RunContext::new(RunId::new(), SessionId::new(), budget)
+}
+
+#[tokio::test]
+async fn direct_local_write_cannot_request_approval_or_execute() {
+    let (harness, audit) = local_write_harness(
+        None,
+        Some(Arc::new(ScriptedApprovalPort::approve_all())),
+        1,
+        Arc::new(M6ApprovalPolicy),
+    );
+    let mut context = run_context_with_approval(1, 1);
+    harness.start_run(&mut context).await.expect("run starts");
+    let action = prepare(&harness, &mut context)
+        .await
+        .expect("action validates");
+
+    let error = harness
+        .invoke_validated_action(&mut context, action)
+        .await
+        .expect_err("direct local-write cannot execute");
+
+    assert!(matches!(error, HarnessError::ContainmentUnavailable { .. }));
+    assert_eq!(context.usage().approval_requests(), 0);
+    assert_eq!(context.usage().tool_calls(), 0);
+    assert!(
+        audit
+            .events()
+            .iter()
+            .any(|event| matches!(event.kind(), AgentEventKind::ContainmentFailed { .. }))
+    );
+}
+
+#[tokio::test]
+async fn contained_local_write_granted_approval_executes_once() {
+    let contained = Arc::new(FakeContainedToolPort::succeeding(
+        definition_with_capability(
+            "lookup",
+            CapabilityKind::LocalWrite,
+            json!({"type": "object", "additionalProperties": false}),
+        ),
+        ToolOutput::new(json!({"ok": true})),
+    ));
+    let approval = Arc::new(ScriptedApprovalPort::approve_all());
+    let (harness, audit) = local_write_harness(
+        Some(Arc::clone(&contained)),
+        Some(approval.clone()),
+        1,
+        Arc::new(M6ApprovalPolicy),
+    );
+    let mut context = run_context_with_approval(1, 1);
+    harness.start_run(&mut context).await.expect("run starts");
+    let action = prepare(&harness, &mut context)
+        .await
+        .expect("action validates");
+
+    let result = harness
+        .invoke_validated_action(&mut context, action)
+        .await
+        .expect("approved contained local-write executes");
+
+    assert!(matches!(result, ToolResult::Succeeded { .. }));
+    assert_eq!(context.usage().approval_requests(), 1);
+    assert_eq!(context.usage().tool_calls(), 1);
+    assert_eq!(approval.invocation_count(), 1);
+    assert_eq!(contained.invocation_count(), 1);
+    let events = audit.events();
+    let approval_granted = events
+        .iter()
+        .position(|event| matches!(event.kind(), AgentEventKind::ApprovalGranted { .. }))
+        .expect("grant must be audited");
+    let tool_started = events
+        .iter()
+        .position(|event| matches!(event.kind(), AgentEventKind::ToolInvocationStarted { .. }))
+        .expect("tool start must be audited");
+    assert!(approval_granted < tool_started);
+}
+
+#[tokio::test]
+async fn approval_denial_consumes_approval_budget_but_zero_tool_calls() {
+    let contained = Arc::new(FakeContainedToolPort::succeeding(
+        definition_with_capability(
+            "lookup",
+            CapabilityKind::LocalWrite,
+            json!({"type": "object", "additionalProperties": false}),
+        ),
+        ToolOutput::new(json!({"unused": true})),
+    ));
+    let approval = Arc::new(ScriptedApprovalPort::deny_all());
+    let (harness, audit) = local_write_harness(
+        Some(Arc::clone(&contained)),
+        Some(approval.clone()),
+        1,
+        Arc::new(M6ApprovalPolicy),
+    );
+    let mut context = run_context_with_approval(1, 1);
+    harness.start_run(&mut context).await.expect("run starts");
+    let action = prepare(&harness, &mut context)
+        .await
+        .expect("action validates");
+
+    let error = harness
+        .invoke_validated_action(&mut context, action)
+        .await
+        .expect_err("denial fails closed");
+
+    assert!(matches!(error, HarnessError::ApprovalDenied));
+    assert_eq!(context.usage().approval_requests(), 1);
+    assert_eq!(context.usage().tool_calls(), 0);
+    assert_eq!(approval.invocation_count(), 1);
+    assert_eq!(contained.invocation_count(), 0);
+    assert!(
+        audit
+            .events()
+            .iter()
+            .any(|event| matches!(event.kind(), AgentEventKind::ApprovalDenied { .. }))
+    );
+}
+
+#[tokio::test]
+async fn zero_approval_budget_terminalizes_before_approval_port() {
+    let contained = Arc::new(FakeContainedToolPort::succeeding(
+        definition_with_capability(
+            "lookup",
+            CapabilityKind::LocalWrite,
+            json!({"type": "object", "additionalProperties": false}),
+        ),
+        ToolOutput::new(json!({"unused": true})),
+    ));
+    let approval = Arc::new(ScriptedApprovalPort::approve_all());
+    let (harness, _audit) = local_write_harness(
+        Some(Arc::clone(&contained)),
+        Some(approval.clone()),
+        0,
+        Arc::new(M6ApprovalPolicy),
+    );
+    let mut context = run_context_with_approval(1, 0);
+    harness.start_run(&mut context).await.expect("run starts");
+    let action = prepare(&harness, &mut context)
+        .await
+        .expect("action validates");
+
+    let error = harness
+        .invoke_validated_action(&mut context, action)
+        .await
+        .expect_err("approval budget is zero");
+
+    assert_eq!(
+        error.budget_dimension(),
+        Some(BudgetDimension::ApprovalRequests)
+    );
+    assert_eq!(approval.invocation_count(), 0);
+    assert_eq!(contained.invocation_count(), 0);
+    assert_eq!(context.usage().approval_requests(), 0);
+    assert!(matches!(
+        context.status(),
+        RunStatus::Finished(RunOutcome::BudgetExceeded {
+            dimension: BudgetDimension::ApprovalRequests
+        })
+    ));
+}
+
+#[tokio::test]
+async fn faulty_allowed_local_write_policy_cannot_bypass_approval_requirement() {
+    let contained = Arc::new(FakeContainedToolPort::succeeding(
+        definition_with_capability(
+            "lookup",
+            CapabilityKind::LocalWrite,
+            json!({"type": "object", "additionalProperties": false}),
+        ),
+        ToolOutput::new(json!({"unused": true})),
+    ));
+    let (harness, _audit) = local_write_harness(
+        Some(Arc::clone(&contained)),
+        Some(Arc::new(ScriptedApprovalPort::approve_all())),
+        1,
+        Arc::new(AlwaysAllowPolicy),
+    );
+    let mut context = run_context_with_approval(1, 1);
+    harness.start_run(&mut context).await.expect("run starts");
+    let action = prepare(&harness, &mut context)
+        .await
+        .expect("action validates");
+
+    let error = harness
+        .invoke_validated_action(&mut context, action)
+        .await
+        .expect_err("faulty allowed local-write cannot execute");
+
+    assert!(matches!(error, HarnessError::ApprovalRequired));
+    assert_eq!(context.usage().approval_requests(), 0);
+    assert_eq!(context.usage().tool_calls(), 0);
+    assert_eq!(contained.invocation_count(), 0);
 }
 
 #[tokio::test]

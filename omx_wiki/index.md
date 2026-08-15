@@ -1,6 +1,6 @@
 # Wiki Index
 
-> 7 pages | Last updated: 2026-08-15T13:42:22.040Z
+> 8 pages | Last updated: 2026-08-15T15:04:21.299Z
 
 ## architecture
 
@@ -10,6 +10,7 @@
 - [M3 Rig Model Adapter](m3-rig-model-adapter.md) — # M3 Rig Model Adapter
 - [M4 OpenAI Compatible Gateway](m4-openai-compatible-gateway.md) — # M4 OpenAI-Compatible Gateway
 - [M5 Typed Action Planning](m5-typed-action-planning.md) — # M5 Typed Action Planning
+- [M6 Approval and Containment Boundary](m6-approval-and-containment-boundary.md) — # M6 Approval and Containment Boundary
 
 ## reference
 

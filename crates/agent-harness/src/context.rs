@@ -30,7 +30,7 @@ impl RunContext {
             run_id,
             session_id,
             budget,
-            usage: BudgetUsage::new(0, 0, 0),
+            usage: BudgetUsage::with_approval_requests(0, 0, 0, 0),
             status: RunStatus::Pending,
             next_event_sequence: EventSequence::new(0),
             runtime: None,
@@ -102,7 +102,12 @@ impl RunContext {
             return Err(BudgetExceeded::new(BudgetDimension::ModelCalls));
         }
 
-        self.usage = BudgetUsage::new(usage + 1, self.usage.tool_calls(), self.usage.iterations());
+        self.usage = BudgetUsage::with_approval_requests(
+            usage + 1,
+            self.usage.tool_calls(),
+            self.usage.iterations(),
+            self.usage.approval_requests(),
+        );
         Ok(())
     }
 
@@ -113,7 +118,12 @@ impl RunContext {
             return Err(BudgetExceeded::new(BudgetDimension::ToolCalls));
         }
 
-        self.usage = BudgetUsage::new(self.usage.model_calls(), usage + 1, self.usage.iterations());
+        self.usage = BudgetUsage::with_approval_requests(
+            self.usage.model_calls(),
+            usage + 1,
+            self.usage.iterations(),
+            self.usage.approval_requests(),
+        );
         Ok(())
     }
 
@@ -125,8 +135,29 @@ impl RunContext {
         }
 
         let iteration = usage + 1;
-        self.usage = BudgetUsage::new(self.usage.model_calls(), self.usage.tool_calls(), iteration);
+        self.usage = BudgetUsage::with_approval_requests(
+            self.usage.model_calls(),
+            self.usage.tool_calls(),
+            iteration,
+            self.usage.approval_requests(),
+        );
         Ok(iteration)
+    }
+
+    pub(crate) fn reserve_approval_request(&mut self) -> Result<(), BudgetExceeded> {
+        let usage = self.usage.approval_requests();
+        let limit = self.budget.max_approval_requests();
+        if usage >= limit {
+            return Err(BudgetExceeded::new(BudgetDimension::ApprovalRequests));
+        }
+
+        self.usage = BudgetUsage::with_approval_requests(
+            self.usage.model_calls(),
+            self.usage.tool_calls(),
+            self.usage.iterations(),
+            usage + 1,
+        );
+        Ok(())
     }
 
     pub(crate) fn cancellation(&self) -> Result<CancellationToken, RunContextError> {

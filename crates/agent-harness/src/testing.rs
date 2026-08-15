@@ -15,17 +15,20 @@ use std::{
 
 use agent_core::{
     AgentEvent, ModelRequest, ModelResponse, ToolCall, ToolDefinition, ToolDomainFailure,
-    ToolOutput, ToolResult,
+    ToolInput, ToolOutput, ToolResult,
 };
 
 use crate::{
-    AuditPortError, AuditSink, ModelPort, ModelPortError, PortFuture, ToolPort, ToolPortError,
+    ApprovalDecision, ApprovalPort, ApprovalPortError, ApprovalPreview, AuditPortError, AuditSink,
+    ContainedToolPort, ContainmentPortError, ModelPort, ModelPortError, PortFuture, ToolPort,
+    ToolPortError,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FakeInvocation {
     Model,
     Tool,
+    Approval,
     Audit,
 }
 
@@ -270,6 +273,243 @@ impl ToolPort for FakeToolPort {
                 ToolBehavior::Pending => pending().await,
             }
         })
+    }
+}
+
+#[derive(Clone)]
+enum ContainedBehavior {
+    Immediate(Result<ToolResult, ContainmentPortError>),
+    EchoSuccess(ToolOutput),
+    EchoDomainFailure(ToolDomainFailure),
+    Pending,
+}
+
+pub struct FakeContainedToolPort {
+    definition: ToolDefinition,
+    preview: ApprovalPreview,
+    preview_error: Option<ContainmentPortError>,
+    behaviors: Mutex<VecDeque<ContainedBehavior>>,
+    invocations: AtomicUsize,
+    previews: AtomicUsize,
+}
+
+impl FakeContainedToolPort {
+    #[must_use]
+    pub fn succeeding(definition: ToolDefinition, output: ToolOutput) -> Self {
+        Self::with_behaviors(
+            definition,
+            VecDeque::from([ContainedBehavior::EchoSuccess(output)]),
+        )
+    }
+
+    #[must_use]
+    pub fn domain_failing(definition: ToolDefinition, failure: ToolDomainFailure) -> Self {
+        Self::with_behaviors(
+            definition,
+            VecDeque::from([ContainedBehavior::EchoDomainFailure(failure)]),
+        )
+    }
+
+    #[must_use]
+    pub fn scripted(
+        definition: ToolDefinition,
+        results: Vec<Result<ToolResult, ContainmentPortError>>,
+    ) -> Self {
+        Self::with_behaviors(
+            definition,
+            results
+                .into_iter()
+                .map(ContainedBehavior::Immediate)
+                .collect(),
+        )
+    }
+
+    #[must_use]
+    pub fn pending(definition: ToolDefinition) -> Self {
+        Self::with_behaviors(definition, VecDeque::from([ContainedBehavior::Pending]))
+    }
+
+    #[must_use]
+    pub fn preview_failing(definition: ToolDefinition, error: ContainmentPortError) -> Self {
+        let mut port = Self::with_behaviors(definition, VecDeque::new());
+        port.preview_error = Some(error);
+        port
+    }
+
+    fn with_behaviors(definition: ToolDefinition, behaviors: VecDeque<ContainedBehavior>) -> Self {
+        Self {
+            definition,
+            preview: ApprovalPreview::new("trusted preview", "test target")
+                .expect("static preview must be valid"),
+            preview_error: None,
+            behaviors: Mutex::new(behaviors),
+            invocations: AtomicUsize::new(0),
+            previews: AtomicUsize::new(0),
+        }
+    }
+
+    #[must_use]
+    pub fn invocation_count(&self) -> usize {
+        self.invocations.load(Ordering::SeqCst)
+    }
+
+    #[must_use]
+    pub fn preview_count(&self) -> usize {
+        self.previews.load(Ordering::SeqCst)
+    }
+}
+
+impl ContainedToolPort for FakeContainedToolPort {
+    fn definition(&self) -> &ToolDefinition {
+        &self.definition
+    }
+
+    fn approval_preview(
+        &self,
+        _input: &ToolInput,
+    ) -> Result<ApprovalPreview, ContainmentPortError> {
+        self.previews.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = self.preview_error {
+            return Err(error);
+        }
+        ApprovalPreview::new(self.preview.summary(), self.preview.target_label())
+            .map_err(ContainmentPortError::from)
+    }
+
+    fn invoke_contained<'a>(
+        &'a self,
+        call: ToolCall,
+    ) -> PortFuture<'a, Result<ToolResult, ContainmentPortError>> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        let behavior =
+            lock_recover(&self.behaviors)
+                .pop_front()
+                .unwrap_or(ContainedBehavior::Immediate(Err(
+                    ContainmentPortError::Unavailable,
+                )));
+        Box::pin(async move {
+            match behavior {
+                ContainedBehavior::Immediate(result) => result,
+                ContainedBehavior::EchoSuccess(output) => Ok(ToolResult::Succeeded {
+                    call_id: call.id(),
+                    output,
+                }),
+                ContainedBehavior::EchoDomainFailure(failure) => Ok(ToolResult::DomainFailure {
+                    call_id: call.id(),
+                    failure,
+                }),
+                ContainedBehavior::Pending => pending().await,
+            }
+        })
+    }
+}
+
+#[derive(Clone)]
+enum ApprovalBehavior {
+    Approve,
+    Deny,
+    Error(ApprovalPortError),
+}
+
+pub struct ScriptedApprovalPort {
+    behaviors: Mutex<VecDeque<ApprovalBehavior>>,
+    invocations: AtomicUsize,
+    log: InvocationLog,
+}
+
+impl ScriptedApprovalPort {
+    #[must_use]
+    pub fn approve_all() -> Self {
+        Self::scripted(vec![Ok(true)])
+    }
+
+    #[must_use]
+    pub fn deny_all() -> Self {
+        Self::scripted(vec![Ok(false)])
+    }
+
+    #[must_use]
+    pub fn scripted(decisions: Vec<Result<bool, ApprovalPortError>>) -> Self {
+        Self {
+            behaviors: Mutex::new(
+                decisions
+                    .into_iter()
+                    .map(|decision| match decision {
+                        Ok(true) => ApprovalBehavior::Approve,
+                        Ok(false) => ApprovalBehavior::Deny,
+                        Err(error) => ApprovalBehavior::Error(error),
+                    })
+                    .collect(),
+            ),
+            invocations: AtomicUsize::new(0),
+            log: InvocationLog::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_log(decisions: Vec<Result<bool, ApprovalPortError>>, log: InvocationLog) -> Self {
+        let mut port = Self::scripted(decisions);
+        port.log = log;
+        port
+    }
+
+    #[must_use]
+    pub fn invocation_count(&self) -> usize {
+        self.invocations.load(Ordering::SeqCst)
+    }
+}
+
+impl ApprovalPort for ScriptedApprovalPort {
+    fn decide<'a>(
+        &'a self,
+        request: &'a crate::ApprovalRequest,
+    ) -> PortFuture<'a, Result<ApprovalDecision, ApprovalPortError>> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        self.log.push(FakeInvocation::Approval);
+        let behavior = lock_recover(&self.behaviors)
+            .pop_front()
+            .unwrap_or(ApprovalBehavior::Error(ApprovalPortError::Unavailable));
+        Box::pin(async move {
+            match behavior {
+                ApprovalBehavior::Approve => Ok(request.approve()),
+                ApprovalBehavior::Deny => Ok(request.deny()),
+                ApprovalBehavior::Error(error) => Err(error),
+            }
+        })
+    }
+}
+
+pub struct PendingApprovalPort {
+    invocations: AtomicUsize,
+}
+
+impl PendingApprovalPort {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            invocations: AtomicUsize::new(0),
+        }
+    }
+
+    #[must_use]
+    pub fn invocation_count(&self) -> usize {
+        self.invocations.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for PendingApprovalPort {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ApprovalPort for PendingApprovalPort {
+    fn decide<'a>(
+        &'a self,
+        _request: &'a crate::ApprovalRequest,
+    ) -> PortFuture<'a, Result<ApprovalDecision, ApprovalPortError>> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        Box::pin(pending())
     }
 }
 

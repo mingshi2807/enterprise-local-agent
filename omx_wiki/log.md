@@ -72,3 +72,71 @@
 - **Pages:** none
 - **Summary:** Lint: 0 issues (0 orphan, 0 stale, 0 broken, 0 contradictions)
 
+## [2026-08-15T14:24:55.310Z] ingest
+- **Pages:** m6-approval-and-containment-boundary.md
+- **Summary:** Created new page "M6 Approval and Containment Boundary"
+
+## [2026-08-15T14:25:30.337Z] add
+- **Pages:** enterprise-local-agent-milestone-index.md, m0-foundation.md, m1-enterprise-harness.md, m2-deterministic-loop.md, m3-rig-model-adapter.md, m4-openai-compatible-gateway.md, m5-typed-action-planning.md, m6-approval-and-containment-boundary.md
+- **Summary:** Refreshed wiki index and derived metadata surfaces
+
+## [2026-08-15T14:25:31.060Z] query
+- **Pages:** m6-approval-and-containment-boundary.md, m5-typed-action-planning.md, enterprise-local-agent-milestone-index.md
+- **Summary:** Query "M6 Approval LocalWrite containment ApprovalPort ActionDigest" → 3 results (of 8 total)
+
+## [2026-08-15T14:25:31.070Z] lint
+- **Pages:** m6-approval-and-containment-boundary.md
+- **Summary:** Lint: 1 issues (0 orphan, 0 stale, 0 broken, 0 contradictions)
+
+## [2026-08-15T14:26:19.513Z] add
+- **Pages:** enterprise-local-agent-milestone-index.md, m0-foundation.md, m1-enterprise-harness.md, m2-deterministic-loop.md, m3-rig-model-adapter.md, m4-openai-compatible-gateway.md, m5-typed-action-planning.md, m6-approval-and-containment-boundary.md
+- **Summary:** Refreshed wiki index and derived metadata surfaces
+
+## [2026-08-15T14:26:20.218Z] lint
+- **Pages:** none
+- **Summary:** Lint: 0 issues (0 orphan, 0 stale, 0 broken, 0 contradictions)
+
+## [2026-08-15T14:26:20.264Z] query
+- **Pages:** m6-approval-and-containment-boundary.md
+- **Summary:** Query "M6 ApprovalPort ActionDigest ContainedToolPort approval budget" → 1 results (of 8 total)
+
+## [2026-08-15T14:50:17.985Z] add
+- **Pages:** enterprise-local-agent-milestone-index.md, m0-foundation.md, m1-enterprise-harness.md, m2-deterministic-loop.md, m3-rig-model-adapter.md, m4-openai-compatible-gateway.md, m5-typed-action-planning.md, m6-approval-and-containment-boundary.md
+- **Summary:** Refreshed wiki index and derived metadata surfaces
+
+## [2026-08-15T14:50:17.984Z] lint
+- **Pages:** m6-approval-and-containment-boundary.md
+- **Summary:** Lint: 1 issues (0 orphan, 0 stale, 0 broken, 0 contradictions)
+
+## [2026-08-15T14:51:23.286Z] lint
+- **Pages:** m6-approval-and-containment-boundary.md
+- **Summary:** Lint: 1 issues (0 orphan, 0 stale, 0 broken, 0 contradictions)
+
+## [2026-08-15T14:51:23.367Z] add
+- **Pages:** enterprise-local-agent-milestone-index.md, m0-foundation.md, m1-enterprise-harness.md, m2-deterministic-loop.md, m3-rig-model-adapter.md, m4-openai-compatible-gateway.md, m5-typed-action-planning.md, m6-approval-and-containment-boundary.md
+- **Summary:** Refreshed wiki index and derived metadata surfaces
+
+## [2026-08-15T14:54:00.504Z] lint
+- **Pages:** none
+- **Summary:** Lint: 0 issues (0 orphan, 0 stale, 0 broken, 0 contradictions)
+
+## [2026-08-15T14:54:11.286Z] add
+- **Pages:** enterprise-local-agent-milestone-index.md, m0-foundation.md, m1-enterprise-harness.md, m2-deterministic-loop.md, m3-rig-model-adapter.md, m4-openai-compatible-gateway.md, m5-typed-action-planning.md, m6-approval-and-containment-boundary.md
+- **Summary:** Refreshed wiki index and derived metadata surfaces
+
+## [2026-08-15T15:03:46.117Z] add
+- **Pages:** enterprise-local-agent-milestone-index.md, m0-foundation.md, m1-enterprise-harness.md, m2-deterministic-loop.md, m3-rig-model-adapter.md, m4-openai-compatible-gateway.md, m5-typed-action-planning.md, m6-approval-and-containment-boundary.md
+- **Summary:** Refreshed wiki index and derived metadata surfaces
+
+## [2026-08-15T15:03:46.373Z] lint
+- **Pages:** m6-approval-and-containment-boundary.md
+- **Summary:** Lint: 1 issues (0 orphan, 0 stale, 0 broken, 0 contradictions)
+
+## [2026-08-15T15:04:21.300Z] add
+- **Pages:** enterprise-local-agent-milestone-index.md, m0-foundation.md, m1-enterprise-harness.md, m2-deterministic-loop.md, m3-rig-model-adapter.md, m4-openai-compatible-gateway.md, m5-typed-action-planning.md, m6-approval-and-containment-boundary.md
+- **Summary:** Refreshed wiki index and derived metadata surfaces
+
+## [2026-08-15T15:04:21.563Z] lint
+- **Pages:** none
+- **Summary:** Lint: 0 issues (0 orphan, 0 stale, 0 broken, 0 contradictions)
+

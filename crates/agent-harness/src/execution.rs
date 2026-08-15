@@ -1,18 +1,22 @@
 use std::sync::Arc;
 
 use agent_core::{
-    ActionProposalId, AgentEvent, AgentEventKind, BudgetDimension, LoopEventKind,
+    ActionDigest, ActionProposalId, AgentEvent, AgentEventKind, ApprovalFailureKind,
+    ApprovalRequestId, BudgetDimension, CapabilityKind, ContainmentFailureKind, LoopEventKind,
     LoopProgressEvent, ModelCallId, ModelRequest, ModelResponse, RunFailureKind, RunOutcome,
-    RunStatus, ToolCall, ToolCallId, ToolResult,
+    RunStatus, ToolCall, ToolCallId, ToolName, ToolResult,
 };
 use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::{
-    ActionPreparationError, ActionValidationError, AuditFailurePolicy, AuditPhase, AuditPortError,
-    AuditSink, AuthorizationDecision, CapabilityPolicy, CompletedModelInvocation, ExecutionStage,
-    HarnessConfig, HarnessError, HarnessOperation, ModelPort, OperationEffect,
-    RunCancellationHandle, RunContext, ToolRegistry, ValidatedAction,
+    ActionPreparationError, ActionValidationError, ApprovalOutcome, ApprovalPort,
+    ApprovalPortError, ApprovalRequest, AuditFailurePolicy, AuditPhase, AuditPortError, AuditSink,
+    AuthorizationDecision, CapabilityPolicy, CompletedModelInvocation, ContainedToolPort,
+    ExecutionStage, HarnessConfig, HarnessError, HarnessOperation, ModelPort, OperationEffect,
+    PolicyDenial, PolicyDenialReason, RunCancellationHandle, RunContext, ToolPort, ToolRegistry,
+    ValidatedAction,
     action::{ActionValidator, TextActionDecoder},
+    registry::ExecutionBinding,
 };
 
 /// Guarded execution boundary for lifecycle, budget, policy, audit,
@@ -30,6 +34,7 @@ pub struct ExecutionHarness {
     model: Arc<dyn ModelPort>,
     tools: ToolRegistry,
     capability_policy: Arc<dyn CapabilityPolicy>,
+    approval: Option<Arc<dyn ApprovalPort>>,
     audit: Arc<dyn AuditSink>,
     config: HarnessConfig,
 }
@@ -46,9 +51,16 @@ impl ExecutionHarness {
             model,
             tools,
             capability_policy,
+            approval: None,
             audit,
             config,
         }
+    }
+
+    #[must_use]
+    pub fn with_approval_port(mut self, approval: Arc<dyn ApprovalPort>) -> Self {
+        self.approval = Some(approval);
+        self
     }
 
     pub async fn start_run(
@@ -212,21 +224,159 @@ impl ExecutionHarness {
             .await?;
         let action_proposal_id = action.proposal_id();
         let tool_call_id = ToolCallId::new();
+        let tool_name = action.tool_name().clone();
+        let capability = action.capability();
+        let action_digest = action.digest();
+        let binding =
+            self.tools
+                .get(action.tool_name())
+                .ok_or_else(|| HarnessError::ToolNotFound {
+                    name: action.tool_name().clone(),
+                })?;
+        if binding.definition().capability() != capability {
+            return Err(HarnessError::ToolPort(crate::ToolPortError::AdapterFailure));
+        }
         let event = context.next_event(AgentEventKind::ActionExecutionBound {
             action_proposal_id,
             tool_call_id,
         })?;
-        self.audit_invocation(
-            context,
-            &event,
-            HarnessOperation::InvokeValidatedAction,
-            AuditPhase::BeforeInvocation,
-            OperationEffect::NotInvoked,
-        )
-        .await?;
+        if capability == CapabilityKind::LocalWrite {
+            self.audit_required(
+                context,
+                &event,
+                HarnessOperation::InvokeValidatedAction,
+                AuditPhase::BeforeInvocation,
+                OperationEffect::NotInvoked,
+            )
+            .await?;
+        } else {
+            self.audit_invocation(
+                context,
+                &event,
+                HarnessOperation::InvokeValidatedAction,
+                AuditPhase::BeforeInvocation,
+                OperationEffect::NotInvoked,
+            )
+            .await?;
+        }
 
-        self.invoke_tool(context, action.into_tool_call(tool_call_id))
-            .await
+        let decision = self.capability_policy.authorize(capability);
+        match capability {
+            CapabilityKind::ReadOnly => match decision {
+                AuthorizationDecision::Allowed => match binding.execution().clone() {
+                    ExecutionBinding::Direct(port) => {
+                        self.invoke_direct_tool(
+                            context,
+                            port,
+                            action.into_tool_call(tool_call_id),
+                            tool_name,
+                            capability,
+                        )
+                        .await
+                    }
+                    ExecutionBinding::Contained(port) => {
+                        self.invoke_contained_read_only(
+                            context,
+                            port,
+                            action.into_tool_call(tool_call_id),
+                            tool_name,
+                            capability,
+                        )
+                        .await
+                    }
+                },
+                AuthorizationDecision::RequiresApproval => {
+                    self.record_policy_denied(
+                        context,
+                        tool_call_id,
+                        tool_name,
+                        capability,
+                        HarnessOperation::InvokeValidatedAction,
+                    )
+                    .await?;
+                    Err(HarnessError::PolicyDenied(PolicyDenial::new(
+                        capability,
+                        PolicyDenialReason::ApprovalRequiredButUnsupported,
+                    )))
+                }
+                AuthorizationDecision::Denied(denial) => {
+                    self.record_policy_denied(
+                        context,
+                        tool_call_id,
+                        tool_name,
+                        capability,
+                        HarnessOperation::InvokeValidatedAction,
+                    )
+                    .await?;
+                    Err(HarnessError::PolicyDenied(denial))
+                }
+            },
+            CapabilityKind::LocalWrite => match decision {
+                AuthorizationDecision::Denied(denial) => {
+                    self.record_policy_denied(
+                        context,
+                        tool_call_id,
+                        tool_name,
+                        capability,
+                        HarnessOperation::InvokeValidatedAction,
+                    )
+                    .await?;
+                    Err(HarnessError::PolicyDenied(denial))
+                }
+                AuthorizationDecision::Allowed => {
+                    self.record_policy_denied(
+                        context,
+                        tool_call_id,
+                        tool_name,
+                        capability,
+                        HarnessOperation::InvokeValidatedAction,
+                    )
+                    .await?;
+                    Err(HarnessError::ApprovalRequired)
+                }
+                AuthorizationDecision::RequiresApproval => match binding.execution().clone() {
+                    ExecutionBinding::Direct(_) => {
+                        self.record_containment_failed(
+                            context,
+                            tool_call_id,
+                            tool_name.clone(),
+                            capability,
+                            ContainmentFailureKind::Unavailable,
+                        )
+                        .await?;
+                        Err(HarnessError::ContainmentUnavailable { name: tool_name })
+                    }
+                    ExecutionBinding::Contained(port) => {
+                        if context.audit_degraded() {
+                            return Err(HarnessError::AuditDegraded);
+                        }
+                        self.invoke_approved_local_write(
+                            context,
+                            port,
+                            action.into_tool_call(tool_call_id),
+                            ApprovedLocalWriteMeta {
+                                action_proposal_id,
+                                tool_name,
+                                capability,
+                                action_digest,
+                            },
+                        )
+                        .await
+                    }
+                },
+            },
+            CapabilityKind::ExternalWrite | CapabilityKind::Privileged => {
+                self.record_policy_denied(
+                    context,
+                    tool_call_id,
+                    tool_name,
+                    capability,
+                    HarnessOperation::InvokeValidatedAction,
+                )
+                .await?;
+                Err(HarnessError::CapabilityNotExecutable { capability })
+            }
+        }
     }
 
     pub async fn checkpoint(&self, context: &mut RunContext) -> Result<(), HarnessError> {
@@ -304,25 +454,149 @@ impl ExecutionHarness {
         let capability = binding.definition().capability();
         let tool_name = binding.definition().name().clone();
 
-        if let AuthorizationDecision::Denied(denial) = self.capability_policy.authorize(capability)
-        {
-            let event = context.next_event(AgentEventKind::ToolPolicyDenied {
-                tool_call_id: call.id(),
-                tool_name,
-                capability,
-            })?;
-            self.audit_invocation(
-                context,
-                &event,
-                HarnessOperation::InvokeTool,
-                AuditPhase::BeforeInvocation,
-                OperationEffect::NotInvoked,
-            )
-            .await?;
-            return Err(HarnessError::PolicyDenied(denial));
+        match self.capability_policy.authorize(capability) {
+            AuthorizationDecision::Allowed => {}
+            AuthorizationDecision::RequiresApproval => {
+                self.record_policy_denied(
+                    context,
+                    call.id(),
+                    tool_name,
+                    capability,
+                    HarnessOperation::InvokeTool,
+                )
+                .await?;
+                return Err(HarnessError::PolicyDenied(PolicyDenial::new(
+                    capability,
+                    PolicyDenialReason::ApprovalRequiredButUnsupported,
+                )));
+            }
+            AuthorizationDecision::Denied(denial) => {
+                self.record_policy_denied(
+                    context,
+                    call.id(),
+                    tool_name,
+                    capability,
+                    HarnessOperation::InvokeTool,
+                )
+                .await?;
+                return Err(HarnessError::PolicyDenied(denial));
+            }
         }
 
-        if let Err(error) = context.reserve_tool_call() {
+        match (capability, binding.execution().clone()) {
+            (CapabilityKind::ReadOnly, ExecutionBinding::Direct(port)) => {
+                self.invoke_direct_tool(context, port, call, tool_name, capability)
+                    .await
+            }
+            (CapabilityKind::ReadOnly, ExecutionBinding::Contained(port)) => {
+                self.invoke_contained_read_only(context, port, call, tool_name, capability)
+                    .await
+            }
+            (CapabilityKind::LocalWrite, ExecutionBinding::Contained(_))
+            | (CapabilityKind::LocalWrite, ExecutionBinding::Direct(_))
+            | (CapabilityKind::ExternalWrite, _)
+            | (CapabilityKind::Privileged, _) => {
+                self.record_policy_denied(
+                    context,
+                    call.id(),
+                    tool_name,
+                    capability,
+                    HarnessOperation::InvokeTool,
+                )
+                .await?;
+                Err(HarnessError::CapabilityNotExecutable { capability })
+            }
+        }
+    }
+
+    async fn invoke_direct_tool(
+        &self,
+        context: &mut RunContext,
+        port: Arc<dyn ToolPort>,
+        call: ToolCall,
+        tool_name: ToolName,
+        capability: CapabilityKind,
+    ) -> Result<ToolResult, HarnessError> {
+        self.reserve_and_record_tool_started(
+            context,
+            call.id(),
+            tool_name,
+            capability,
+            HarnessOperation::InvokeTool,
+            ToolStartAudit::Configured,
+        )
+        .await?;
+        let tool_call_id = call.id();
+        let result = self.invoke_tool_port(context, &port, call).await;
+        self.finish_tool_invocation(
+            context,
+            tool_call_id,
+            HarnessOperation::InvokeTool,
+            result,
+            ToolTerminalAudit::Configured,
+        )
+        .await
+    }
+
+    async fn invoke_contained_read_only(
+        &self,
+        context: &mut RunContext,
+        port: Arc<dyn ContainedToolPort>,
+        call: ToolCall,
+        tool_name: ToolName,
+        capability: CapabilityKind,
+    ) -> Result<ToolResult, HarnessError> {
+        self.reserve_and_record_tool_started(
+            context,
+            call.id(),
+            tool_name,
+            capability,
+            HarnessOperation::InvokeTool,
+            ToolStartAudit::Configured,
+        )
+        .await?;
+        let tool_call_id = call.id();
+        let result = self.invoke_contained_tool_port(context, &port, call).await;
+        self.finish_tool_invocation(
+            context,
+            tool_call_id,
+            HarnessOperation::InvokeTool,
+            result,
+            ToolTerminalAudit::Configured,
+        )
+        .await
+    }
+
+    async fn invoke_approved_local_write(
+        &self,
+        context: &mut RunContext,
+        port: Arc<dyn ContainedToolPort>,
+        call: ToolCall,
+        meta: ApprovedLocalWriteMeta,
+    ) -> Result<ToolResult, HarnessError> {
+        let preview = match port.approval_preview(call.input()) {
+            Ok(preview) => preview,
+            Err(error) => {
+                self.record_containment_failed(
+                    context,
+                    call.id(),
+                    meta.tool_name.clone(),
+                    meta.capability,
+                    containment_failure_kind(error),
+                )
+                .await?;
+                return Err(HarnessError::ContainmentPort(error));
+            }
+        };
+        self.preflight(context, HarnessOperation::RequestApproval)
+            .await?;
+        let approval = Arc::clone(
+            self.approval
+                .as_ref()
+                .ok_or(HarnessError::ApprovalPortMissing)?,
+        );
+        let approval_request_id = ApprovalRequestId::new();
+        if let Err(error) = context.reserve_approval_request() {
             self.terminalize_safety(
                 context,
                 SafetyTerminalization::BudgetExceeded(error.dimension()),
@@ -330,76 +604,125 @@ impl ExecutionHarness {
             .await;
             return Err(error.into());
         }
-        let tool_call_id = call.id();
-        let event = context.next_event(AgentEventKind::ToolInvocationStarted {
-            tool_call_id,
-            tool_name,
-            capability,
-            usage: context.usage().tool_calls(),
-            limit: context.budget().max_tool_calls(),
+        let request = ApprovalRequest::new(
+            approval_request_id,
+            meta.action_proposal_id,
+            call.id(),
+            meta.tool_name.clone(),
+            meta.capability,
+            meta.action_digest,
+            preview,
+        );
+        let event = context.next_event(AgentEventKind::ApprovalRequested {
+            approval_request_id,
+            action_proposal_id: meta.action_proposal_id,
+            tool_call_id: call.id(),
+            tool_name: meta.tool_name.clone(),
+            capability: meta.capability,
+            usage: context.usage().approval_requests(),
+            limit: context.budget().max_approval_requests(),
         })?;
-        self.audit_invocation(
+        self.audit_required(
             context,
             &event,
-            HarnessOperation::InvokeTool,
+            HarnessOperation::RequestApproval,
             AuditPhase::BeforeInvocation,
             OperationEffect::NotInvoked,
         )
         .await?;
 
-        let port = binding.port();
-        let result = self.invoke_tool_port(context, &port, call).await;
-        match result {
-            Ok(result) => {
-                if result.call_id() != tool_call_id {
-                    let event = context
-                        .next_event(AgentEventKind::ToolInvocationAdapterFailed { tool_call_id })?;
-                    self.audit_invocation(
-                        context,
-                        &event,
-                        HarnessOperation::InvokeTool,
-                        AuditPhase::AfterInvocation,
-                        OperationEffect::InvocationStarted,
-                    )
-                    .await?;
-                    return Err(HarnessError::ToolPort(crate::ToolPortError::AdapterFailure));
-                }
-                let event_kind = match &result {
-                    ToolResult::Succeeded { .. } => {
-                        AgentEventKind::ToolInvocationCompleted { tool_call_id }
-                    }
-                    ToolResult::DomainFailure { failure, .. } => {
-                        AgentEventKind::ToolInvocationDomainFailed {
-                            tool_call_id,
-                            kind: failure.kind(),
-                        }
-                    }
+        let decision = match self.await_approval(context, &approval, request).await {
+            Ok(decision) => decision,
+            Err(HarnessError::ApprovalPort(error)) => {
+                let kind = match error {
+                    ApprovalPortError::Unavailable => ApprovalFailureKind::PortUnavailable,
+                    ApprovalPortError::Failed => ApprovalFailureKind::PortFailed,
                 };
-                let event = context.next_event(event_kind)?;
-                self.audit_invocation(
+                let event = context.next_event(AgentEventKind::ApprovalFailed {
+                    approval_request_id,
+                    kind,
+                })?;
+                self.audit_required(
                     context,
                     &event,
-                    HarnessOperation::InvokeTool,
+                    HarnessOperation::RequestApproval,
                     AuditPhase::AfterInvocation,
-                    OperationEffect::InvocationStarted,
+                    OperationEffect::NotInvoked,
                 )
                 .await?;
-                Ok(result)
+                return Err(HarnessError::ApprovalPort(error));
             }
-            Err(HarnessError::ToolPort(error)) => {
-                let event = context
-                    .next_event(AgentEventKind::ToolInvocationAdapterFailed { tool_call_id })?;
-                self.audit_invocation(
+            Err(error) => return Err(error),
+        };
+        self.preflight(context, HarnessOperation::RequestApproval)
+            .await?;
+        if decision.request_id() != approval_request_id
+            || decision.action_digest() != meta.action_digest
+        {
+            let event = context.next_event(AgentEventKind::ApprovalFailed {
+                approval_request_id,
+                kind: ApprovalFailureKind::DecisionMismatch,
+            })?;
+            self.audit_required(
+                context,
+                &event,
+                HarnessOperation::RequestApproval,
+                AuditPhase::AfterInvocation,
+                OperationEffect::NotInvoked,
+            )
+            .await?;
+            return Err(HarnessError::ApprovalDecisionMismatch);
+        }
+
+        match decision.outcome() {
+            ApprovalOutcome::Denied => {
+                let event = context.next_event(AgentEventKind::ApprovalDenied {
+                    approval_request_id,
+                })?;
+                self.audit_required(
                     context,
                     &event,
-                    HarnessOperation::InvokeTool,
+                    HarnessOperation::RequestApproval,
                     AuditPhase::AfterInvocation,
-                    OperationEffect::InvocationStarted,
+                    OperationEffect::NotInvoked,
                 )
                 .await?;
-                Err(HarnessError::ToolPort(error))
+                Err(HarnessError::ApprovalDenied)
             }
-            Err(error) => Err(error),
+            ApprovalOutcome::Granted => {
+                let event = context.next_event(AgentEventKind::ApprovalGranted {
+                    approval_request_id,
+                })?;
+                self.audit_required(
+                    context,
+                    &event,
+                    HarnessOperation::RequestApproval,
+                    AuditPhase::AfterInvocation,
+                    OperationEffect::NotInvoked,
+                )
+                .await?;
+                self.preflight(context, HarnessOperation::InvokeTool)
+                    .await?;
+                self.reserve_and_record_tool_started(
+                    context,
+                    call.id(),
+                    meta.tool_name,
+                    meta.capability,
+                    HarnessOperation::InvokeTool,
+                    ToolStartAudit::Required,
+                )
+                .await?;
+                let tool_call_id = call.id();
+                let result = self.invoke_contained_tool_port(context, &port, call).await;
+                self.finish_tool_invocation(
+                    context,
+                    tool_call_id,
+                    HarnessOperation::InvokeTool,
+                    result,
+                    ToolTerminalAudit::Required,
+                )
+                .await
+            }
         }
     }
 
@@ -485,6 +808,270 @@ impl ExecutionHarness {
         }
     }
 
+    async fn invoke_contained_tool_port(
+        &self,
+        context: &mut RunContext,
+        port: &Arc<dyn ContainedToolPort>,
+        call: ToolCall,
+    ) -> Result<ToolResult, HarnessError> {
+        let cancellation = context.cancellation()?;
+        let deadline = context.deadline_at()?;
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                self.terminalize_safety(context, SafetyTerminalization::Cancelled).await;
+                Err(HarnessError::Cancelled { stage: ExecutionStage::Invocation })
+            }
+            () = sleep_until(deadline) => {
+                self.terminalize_safety(context, SafetyTerminalization::DeadlineExceeded).await;
+                Err(HarnessError::DeadlineExceeded { stage: ExecutionStage::Invocation })
+            }
+            result = port.invoke_contained(call) => {
+                result.map_err(HarnessError::ContainmentPort)
+            },
+        }
+    }
+
+    async fn await_approval(
+        &self,
+        context: &mut RunContext,
+        approval: &Arc<dyn ApprovalPort>,
+        request: ApprovalRequest,
+    ) -> Result<crate::ApprovalDecision, HarnessError> {
+        let cancellation = context.cancellation()?;
+        let deadline = context.deadline_at()?;
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                self.terminalize_safety(context, SafetyTerminalization::Cancelled).await;
+                Err(HarnessError::Cancelled { stage: ExecutionStage::Invocation })
+            }
+            () = sleep_until(deadline) => {
+                self.terminalize_safety(context, SafetyTerminalization::DeadlineExceeded).await;
+                Err(HarnessError::DeadlineExceeded { stage: ExecutionStage::Invocation })
+            }
+            result = approval.decide(&request) => {
+                result.map_err(HarnessError::ApprovalPort)
+            },
+        }
+    }
+
+    async fn reserve_and_record_tool_started(
+        &self,
+        context: &mut RunContext,
+        tool_call_id: ToolCallId,
+        tool_name: ToolName,
+        capability: CapabilityKind,
+        operation: HarnessOperation,
+        audit_mode: ToolStartAudit,
+    ) -> Result<(), HarnessError> {
+        if let Err(error) = context.reserve_tool_call() {
+            self.terminalize_safety(
+                context,
+                SafetyTerminalization::BudgetExceeded(error.dimension()),
+            )
+            .await;
+            return Err(error.into());
+        }
+        let event = context.next_event(AgentEventKind::ToolInvocationStarted {
+            tool_call_id,
+            tool_name,
+            capability,
+            usage: context.usage().tool_calls(),
+            limit: context.budget().max_tool_calls(),
+        })?;
+        match audit_mode {
+            ToolStartAudit::Configured => {
+                self.audit_invocation(
+                    context,
+                    &event,
+                    operation,
+                    AuditPhase::BeforeInvocation,
+                    OperationEffect::NotInvoked,
+                )
+                .await
+            }
+            ToolStartAudit::Required => {
+                self.audit_required(
+                    context,
+                    &event,
+                    operation,
+                    AuditPhase::BeforeInvocation,
+                    OperationEffect::NotInvoked,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn finish_tool_invocation(
+        &self,
+        context: &mut RunContext,
+        tool_call_id: ToolCallId,
+        operation: HarnessOperation,
+        result: Result<ToolResult, HarnessError>,
+        audit_mode: ToolTerminalAudit,
+    ) -> Result<ToolResult, HarnessError> {
+        match result {
+            Ok(result) => {
+                if result.call_id() != tool_call_id {
+                    self.record_tool_terminal_event(
+                        context,
+                        AgentEventKind::ToolInvocationAdapterFailed { tool_call_id },
+                        operation,
+                        audit_mode,
+                    )
+                    .await?;
+                    return Err(HarnessError::ToolPort(crate::ToolPortError::AdapterFailure));
+                }
+                let event_kind = match &result {
+                    ToolResult::Succeeded { .. } => {
+                        AgentEventKind::ToolInvocationCompleted { tool_call_id }
+                    }
+                    ToolResult::DomainFailure { failure, .. } => {
+                        AgentEventKind::ToolInvocationDomainFailed {
+                            tool_call_id,
+                            kind: failure.kind(),
+                        }
+                    }
+                };
+                self.record_tool_terminal_event(context, event_kind, operation, audit_mode)
+                    .await?;
+                Ok(result)
+            }
+            Err(HarnessError::ToolPort(error)) => {
+                self.record_tool_terminal_event(
+                    context,
+                    AgentEventKind::ToolInvocationAdapterFailed { tool_call_id },
+                    operation,
+                    audit_mode,
+                )
+                .await?;
+                Err(HarnessError::ToolPort(error))
+            }
+            Err(HarnessError::ContainmentPort(error)) => {
+                self.record_tool_terminal_event(
+                    context,
+                    AgentEventKind::ToolInvocationAdapterFailed { tool_call_id },
+                    operation,
+                    audit_mode,
+                )
+                .await?;
+                Err(HarnessError::ContainmentPort(error))
+            }
+            Err(error) => {
+                self.record_tool_terminal_after_runtime_error(
+                    context,
+                    tool_call_id,
+                    operation,
+                    audit_mode,
+                )
+                .await?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn record_tool_terminal_after_runtime_error(
+        &self,
+        context: &mut RunContext,
+        tool_call_id: ToolCallId,
+        operation: HarnessOperation,
+        audit_mode: ToolTerminalAudit,
+    ) -> Result<(), HarnessError> {
+        let event_kind = AgentEventKind::ToolInvocationAdapterFailed { tool_call_id };
+        if matches!(context.status(), RunStatus::Running) {
+            return self
+                .record_tool_terminal_event(context, event_kind, operation, audit_mode)
+                .await;
+        }
+
+        match context.next_event(event_kind) {
+            Ok(event) => self.audit_terminal_best_effort(context, &event).await,
+            Err(_) => context.mark_audit_degraded(),
+        }
+        Ok(())
+    }
+
+    async fn record_tool_terminal_event(
+        &self,
+        context: &mut RunContext,
+        event_kind: AgentEventKind,
+        operation: HarnessOperation,
+        audit_mode: ToolTerminalAudit,
+    ) -> Result<(), HarnessError> {
+        let event = context.next_event(event_kind)?;
+        match audit_mode {
+            ToolTerminalAudit::Configured => {
+                self.audit_invocation(
+                    context,
+                    &event,
+                    operation,
+                    AuditPhase::AfterInvocation,
+                    OperationEffect::InvocationStarted,
+                )
+                .await
+            }
+            ToolTerminalAudit::Required => {
+                self.audit_required(
+                    context,
+                    &event,
+                    operation,
+                    AuditPhase::AfterInvocation,
+                    OperationEffect::InvocationStarted,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn record_policy_denied(
+        &self,
+        context: &mut RunContext,
+        tool_call_id: ToolCallId,
+        tool_name: ToolName,
+        capability: CapabilityKind,
+        operation: HarnessOperation,
+    ) -> Result<(), HarnessError> {
+        let event = context.next_event(AgentEventKind::ToolPolicyDenied {
+            tool_call_id,
+            tool_name,
+            capability,
+        })?;
+        self.audit_invocation(
+            context,
+            &event,
+            operation,
+            AuditPhase::BeforeInvocation,
+            OperationEffect::NotInvoked,
+        )
+        .await
+    }
+
+    async fn record_containment_failed(
+        &self,
+        context: &mut RunContext,
+        tool_call_id: ToolCallId,
+        tool_name: ToolName,
+        capability: CapabilityKind,
+        kind: ContainmentFailureKind,
+    ) -> Result<(), HarnessError> {
+        let event = context.next_event(AgentEventKind::ContainmentFailed {
+            tool_call_id,
+            tool_name,
+            capability,
+            kind,
+        })?;
+        self.audit_required(
+            context,
+            &event,
+            HarnessOperation::InvokeValidatedAction,
+            AuditPhase::BeforeInvocation,
+            OperationEffect::NotInvoked,
+        )
+        .await
+    }
+
     async fn preflight(
         &self,
         context: &mut RunContext,
@@ -565,6 +1152,42 @@ impl ExecutionHarness {
             AuditOutcome::Recorded => Ok(()),
             AuditOutcome::Failed(kind) => {
                 self.apply_audit_failure(context, operation, phase, effect, kind)
+            }
+            AuditOutcome::Cancelled => {
+                self.terminalize_safety(context, SafetyTerminalization::Cancelled)
+                    .await;
+                Err(HarnessError::Cancelled {
+                    stage: audit_stage(phase),
+                })
+            }
+            AuditOutcome::DeadlineExceeded => {
+                self.terminalize_safety(context, SafetyTerminalization::DeadlineExceeded)
+                    .await;
+                Err(HarnessError::DeadlineExceeded {
+                    stage: audit_stage(phase),
+                })
+            }
+        }
+    }
+
+    async fn audit_required(
+        &self,
+        context: &mut RunContext,
+        event: &AgentEvent,
+        operation: HarnessOperation,
+        phase: AuditPhase,
+        effect: OperationEffect,
+    ) -> Result<(), HarnessError> {
+        match self.audit_with_run_bounds(context, event).await {
+            AuditOutcome::Recorded => Ok(()),
+            AuditOutcome::Failed(kind) => {
+                context.mark_audit_degraded();
+                Err(HarnessError::Audit {
+                    phase,
+                    operation,
+                    effect,
+                    kind,
+                })
             }
             AuditOutcome::Cancelled => {
                 self.terminalize_safety(context, SafetyTerminalization::Cancelled)
@@ -718,6 +1341,14 @@ fn audit_stage(phase: AuditPhase) -> ExecutionStage {
     }
 }
 
+const fn containment_failure_kind(error: crate::ContainmentPortError) -> ContainmentFailureKind {
+    match error {
+        crate::ContainmentPortError::Unavailable => ContainmentFailureKind::Unavailable,
+        crate::ContainmentPortError::PreviewRejected => ContainmentFailureKind::PreviewRejected,
+        crate::ContainmentPortError::Infrastructure => ContainmentFailureKind::Infrastructure,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RequiredStatus {
     Pending,
@@ -736,4 +1367,23 @@ enum SafetyTerminalization {
     Cancelled,
     DeadlineExceeded,
     BudgetExceeded(BudgetDimension),
+}
+
+#[derive(Clone, Copy)]
+enum ToolStartAudit {
+    Configured,
+    Required,
+}
+
+#[derive(Clone, Copy)]
+enum ToolTerminalAudit {
+    Configured,
+    Required,
+}
+
+struct ApprovedLocalWriteMeta {
+    action_proposal_id: ActionProposalId,
+    tool_name: ToolName,
+    capability: CapabilityKind,
+    action_digest: ActionDigest,
 }

@@ -13,11 +13,23 @@ and produces a single-use `ValidatedAction`. The Act phase then binds a fresh
 `ToolCallId` and delegates policy, budget, audit, and execution to
 `ExecutionHarness`.
 
-A proposal is not a `ToolCall` and does not authorize execution. M5 remains
-ReadOnly-only: write and privileged actions are denied by the existing policy
-without consuming tool-call budget. Rig/OpenAI tool execution, native provider
-tool calls, approvals, retries, and heuristic JSON or markdown extraction are
-not enabled.
+A proposal is not a `ToolCall` and does not authorize execution. Rig/OpenAI
+tool execution, native provider tool calls, retries, and heuristic JSON or
+markdown extraction are not enabled.
+
+## M6 approval and containment boundary
+
+M6 keeps capability policy, explicit approval, and technical containment as
+independent authorities. ReadOnly actions remain executable without approval.
+LocalWrite actions require `M6ApprovalPolicy::RequiresApproval`, a matching
+approval decision for the exact validated action, required security audit
+records, and a separately registered `ContainedToolPort`. ExternalWrite and
+Privileged actions remain non-executable even if a custom policy is faulty.
+
+`ContainedToolPort` is a trusted adapter contract; implementing the Rust trait
+does not prove operating-system isolation. This milestone ships no production
+containment adapter. Production LocalWrite therefore remains disabled until a
+separately supplied and reviewed containment implementation exists.
 
 ## Deterministic demonstration
 
@@ -31,6 +43,16 @@ cargo run -p agent-cli
 
 It prints only run identifiers, provider label, loop progression, final status,
 budget usage, and audit-degraded status.
+
+An explicit governance-only demonstration is also available:
+
+```bash
+cargo run -p agent-cli -- --demo-local-write-fake-containment
+```
+
+That mode uses scripted fake approval and a test fake contained executor. It
+does not write files, launch processes, use a network, or provide OS isolation;
+the CLI labels both fakes prominently.
 
 ## OpenAI-compatible live mode
 
@@ -60,7 +82,7 @@ The live mode uses the same M5 `ActionProgram`; only model composition changes.
 If a live model returns prose, code fences, malformed JSON, or an invalid
 action, preparation fails closed without extraction heuristics.
 
-M4/M5 intentionally do not provide readiness calls, retries, proxy settings,
+M4-M6 intentionally do not provide readiness calls, retries, proxy settings,
 custom certificate authorities, mTLS, streaming, structured output, model
-fallback, native provider tool calls, provider-driven tool execution, or
-approvals.
+fallback, native provider tool calls, provider-driven tool execution,
+enterprise identity, durable approval, or a production sandbox.
