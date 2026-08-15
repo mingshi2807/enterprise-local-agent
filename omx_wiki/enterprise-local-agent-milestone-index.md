@@ -1,0 +1,46 @@
+---
+title: "Enterprise Local Agent Milestone Index"
+tags: ["enterprise-local-agent", "milestones", "roadmap", "index"]
+created: 2026-08-15T13:34:09.996Z
+updated: 2026-08-15T13:34:09.996Z
+sources: ["docs/proposal/proposal.md", "docs/reports/reports_impl.md", "git history"]
+links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md"]
+category: reference
+confidence: high
+schemaVersion: 1
+---
+
+# Enterprise Local Agent Milestone Index
+
+This is the durable navigation page for completed architectural milestones. Git and the implementation remain authoritative; the wiki captures approved decisions, evidence, and forward constraints.
+
+| Milestone | Status | Tag | Durable record |
+| --- | --- | --- | --- |
+| M0 Foundation | Completed | `m0-foundation` | [[m0-foundation]] |
+| M1 Enterprise Harness | Completed | `m1-enterprise-harness` | [[m1-enterprise-harness]] |
+| M2 Deterministic Loop | Completed | `m2-deterministic-loop` | [[m2-deterministic-loop]] |
+| M3 Rig Model Adapter | Completed | `m3-rig-model-adapter` | [[m3-rig-model-adapter]] |
+| M4 OpenAI-Compatible Gateway | Completed | `m4-openai-compatible-gateway` | [[m4-openai-compatible-gateway]] |
+| M5 Typed Action Planning | Completed | `m5-typed-action-planning` | [[m5-typed-action-planning]] |
+
+## Stable architecture
+
+Client → Enterprise Harness → Deterministic Loop → future Graph Engine → Model / Tools / Knowledge.
+
+Provider and framework types remain outside agent-core, agent-harness, and agent-loop. ExecutionHarness remains the authority for lifecycle, budgets, policy, audit, cancellation, deadlines, and external effects.
+
+## Source-log policy
+
+The historical append-only files remain available at `docs/proposal/proposal.md` and `docs/reports/reports_impl.md`. M6 and later should create or update milestone wiki dossiers instead of appending another complete transcript to those files.
+
+## M6+ milestone dossier contract
+
+Maintain exactly one compact wiki dossier for each milestone. Update the same page across the milestone lifecycle with:
+
+1. Architecture proposal and scope boundaries.
+2. Approval and review adjustments.
+3. Implementation report and material deviations.
+4. Verification evidence, including tests and quality gates.
+5. Deliberate deferrals and forward constraints.
+
+Keep the dossier curated rather than transcript-like. Git, committed source, and test results remain authoritative; the dossier is the durable navigation and decision record.

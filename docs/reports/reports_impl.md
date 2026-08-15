@@ -863,3 +863,18 @@ M5 is fully implemented and verified. No commit was created, and the external li
 
      No architectural deviations. The only provider-crate modification is test-only adaptation to the new call-ID invariant. The validator also defensively reapplies structural limits so future non-text/native
      candidates cannot bypass them.
+
+• Migration completed using the OMX Wiki workflow.
+
+- Created the omx_wiki/enterprise-local-agent-milestone-index.md.
+- Created curated dossiers for omx_wiki/m0-foundation.md, omx_wiki/m1-enterprise-harness.md, omx_wiki/m2-deterministic-loop.md, omx_wiki/m3-rig-model-adapter.md, omx_wiki/m4-openai-compatible-gateway.md, and
+    omx_wiki/m5-typed-action-planning.md.
+
+- Each dossier preserves objectives, approved decisions, implementation results, verification evidence, deferrals, Git tag/commit, and historical source ranges.
+- OMX generated the searchable omx_wiki/index.md and omx_wiki/log.md.
+- Wiki lint: 7 pages, zero issues, broken references, or orphan pages.
+- Retrieval test successfully found the M5 action-planning decisions.
+- The original proposal.md and reports_impl.md remain unchanged as historical archives.
+- No commit was created; Git currently shows only the new omx_wiki/ directory.
+
+  For M6 onward, we can maintain one compact milestone dossier containing proposal, approval refinements, implementation report, evidence, and deferrals instead of extending both large tracking logs.
