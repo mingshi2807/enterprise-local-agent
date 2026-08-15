@@ -3344,3 +3344,958 @@ At the end report:
 16. tests and quality gates
 17. deliberate deferrals
 18. deviations and justification
+
+# M4
+
+Proposal Codex
+
+# M4 Architecture Proposal
+
+  Decision: extend agent-provider-rig with a narrow OpenAI-compatible configuration and construction module. Do not create a gateway crate and do not change agent-core, agent-harness, agent-loop, ModelPort, or
+  RigModelAdapter.
+
+## 1. Inspected Rig 0.41 client APIs
+
+  Inspected the committed rig-core = 0.41.0 source and published API.
+
+  Use the Chat Completions client deliberately:
+
+  use rig_core::{
+      client::CompletionClient,
+      providers::openai::CompletionsClient,
+  };
+
+  let client = CompletionsClient::builder()
+      .api_key(credential)
+      .base_url(base_url)
+      .build()?;
+
+  let model = client.completion_model(model_identifier);
+
+  Exact relevant types:
+
+- rig_core::providers::openai::CompletionsClient
+  - Alias for Client<OpenAICompletionsExt, reqwest::Client>.
+
+- rig_core::providers::openai::CompletionsClientBuilder
+- rig_core::client::ClientBuilder
+  - .api_key(...)
+  - .base_url(...)
+  - .http_headers(http::HeaderMap)
+  - .http_client(...)
+  - .build()
+
+- rig_core::client::CompletionClient
+  - .completion_model(model_identifier)
+
+- Resulting model:
+  - rig_core::providers::openai::completion::CompletionModel
+  - Alias for GenericCompletionModel<OpenAICompletionsExt, reqwest::Client>.
+
+  api_key means OpenAI-style bearer authentication: Rig inserts Authorization: Bearer <credential>. Custom headers are technically supported through http_headers; when that map already contains Authorization,
+  Rig does not overwrite it.
+
+  M4 should not use openai::Client, because in 0.41.0 that is the Responses API client. CompletionsClient selects /chat/completions, which is the broader vLLM/SGLang/gateway-compatible route.
+
+  Rig joins the configured API root with /chat/completions, so these work:
+
+- <http://127.0.0.1:8000/v1>
+- <https://gateway.internal.example/v1>
+- <https://oai.endpoints.kepler.ai.cloud.ovh.net/v1>
+
+  The public API and non-dyn CompletionModel shape are confirmed in Rig’s 0.41.0 CompletionsClient documentation (<https://docs.rs/rig-core/latest/rig_core/providers/openai/client/type.CompletionsClient.html>) and
+  CompletionModel documentation (<https://docs.rs/rig-core/latest/rig_core/completion/request/trait.CompletionModel.html>).
+
+  Important dependency finding: the current default-features = false configuration has HTTP transport but no TLS backend. M4 must enable exactly Rig’s rustls feature for HTTPS endpoints.
+
+## 2. Proposed file/tree changes
+
+  Cargo.toml
+  Cargo.lock
+
+  crates/agent-provider-rig/
+  ├── Cargo.toml
+  ├── src/
+  │   ├── lib.rs
+  │   └── openai_compatible.rs
+  └── tests/
+      ├── openai_compatible_http.rs
+      └── support/
+          ├── mod.rs
+          └── openai_server.rs
+
+  apps/agent-cli/
+  ├── Cargo.toml
+  └── src/main.rs
+
+  README.md
+
+  Responsibilities:
+
+- Existing crates/agent-provider-rig/src/lib.rs:31 retains RigModelAdapter.
+- openai_compatible.rs owns validated configuration, secret handling, Rig client/model construction, and sanitized construction errors.
+- Integration tests own the in-process HTTP server.
+- CLI owns mode selection and environment loading.
+- README documents the explicit live mode and security rules.
+
+  No production changes are proposed under agent-core, agent-harness, or agent-loop.
+
+## 3. Configuration model
+
+  Proposed public provider-layer API:
+
+  pub struct OpenAiCompatibleConfig {
+      base_url: Url,
+      model_identifier: String,
+      credential: BearerCredential,
+      provider_label: Option<ProviderLabel>,
+  }
+
+  impl OpenAiCompatibleConfig {
+      pub fn new(
+          base_url: impl AsRef<str>,
+          model_identifier: impl Into<String>,
+          credential: BearerCredential,
+      ) -> Result<Self, OpenAiCompatibleConfigError>;
+
+      pub fn with_provider_label(
+          self,
+          label: ProviderLabel,
+      ) -> Self;
+  }
+
+  Configuration ownership:
+
+- agent-cli
+  - Reads environment variables.
+  - Selects fake or live mode.
+  - Constructs BearerCredential.
+  - Passes raw configuration into the validated provider constructor.
+
+- agent-provider-rig
+  - Validates endpoint, model identifier, credential, and label.
+  - Builds the Rig client/model.
+  - Does not read environment variables.
+
+- Core, harness, and loop
+  - Know nothing about endpoints, credentials, providers, or model identifiers.
+
+  Recommended live environment names:
+
+  ELA_OPENAI_COMPAT_BASE_URL
+  ELA_OPENAI_COMPAT_MODEL
+  ELA_OPENAI_COMPAT_API_KEY
+  ELA_OPENAI_COMPAT_LABEL       # optional
+
+  No OVH-, Qwen-, vLLM-, or SGLang-specific environment variables belong in production code.
+
+  The model identifier remains an opaque string. It may represent a deployed model, gateway alias, or virtual-model query.
+
+## 4. Secret model
+
+  Use a small local wrapper:
+
+  pub struct BearerCredential(String);
+
+  Properties:
+
+- No Serialize or Deserialize.
+- No Display.
+- No AsRef<str> or public secret accessor.
+- No derived Debug.
+- Manual Debug produces BearerCredential(<redacted>).
+- Prefer no Clone; construction consumes the credential.
+- Empty or whitespace-only credentials are rejected.
+- Credential contents never appear in configuration or construction errors.
+
+  Add a compile-fail doctest proving serialization is unavailable, plus a runtime Debug-redaction test.
+
+  A secret-management dependency is not justified in M4. Memory zeroization is deliberately deferred because Rig and HTTP header construction necessarily create additional copies; adding zeroization only to the
+  initial wrapper would not provide an honest end-to-end guarantee.
+
+## 5. Endpoint and TLS policy
+
+  Validate before building the Rig client:
+
+- URL must parse using url::Url.
+- Scheme must be http or https.
+- Host must be present.
+- Username/password userinfo is rejected.
+- Query and fragment are rejected.
+- A URL already ending in /chat/completions is rejected; configuration must name the API root.
+- Model identifier must be nonempty after trimming and contain no control characters.
+- Credential is mandatory in M4.
+- Optional label should be bounded and restricted to safe printable metadata.
+
+  HTTP policy:
+
+- http is permitted only for:
+  - localhost
+  - IPv4 loopback
+  - IPv6 loopback
+
+- Non-loopback HTTP is rejected by default.
+- Non-loopback endpoints require HTTPS.
+- 0.0.0.0 is not treated as loopback.
+
+  Trailing slash handling:
+
+- Accept both /v1 and /v1/.
+- Do not rewrite arbitrary paths.
+- Rig already joins both forms correctly with /chat/completions.
+- Document that the supplied URL is an API-root URL.
+
+  This allows local development without weakening the enterprise default.
+
+## 6. Provider/model construction
+
+  Expose one construction function:
+
+  pub fn build_openai_compatible_model_port(
+      config: OpenAiCompatibleConfig,
+  ) -> Result<Arc<dyn ModelPort>, OpenAiCompatibleBuildError>;
+
+  Internally:
+
+  validated config
+  → CompletionsClient::builder()
+  → api_key
+  → base_url
+  → build
+  → completion_model(configured identifier)
+  → RigModelAdapter::new(model)
+  → Arc<dyn ModelPort>
+
+  This does not introduce another ModelPort implementation. It constructs and erases the existing generic RigModelAdapter.
+
+  Client-builder failures become a stable sanitized error such as:
+
+  OpenAiCompatibleBuildError::ClientConstructionFailed
+
+  Do not retain the raw Rig/HTTP error as a public source if it could expose configuration.
+
+  No readiness call is required in M4. Although Rig’s client implements VerifyClient using /models, many compatible endpoints do not implement that endpoint consistently. Normal startup should not depend on it.
+
+  A future opt-in readiness command could call /models outside ExecutionHarness, consume no ModelCalls, and return only sanitized status.
+
+## 7. Deterministic HTTP test architecture
+
+  Use a private Tokio-based test server rather than adding WireMock, Axum, or another HTTP framework.
+
+  TestOpenAiServer should:
+
+- Bind 127.0.0.1:0.
+- Accept a bounded scripted number of requests.
+- Parse the request line, headers, Content-Length, and JSON body.
+- Capture request data without deriving Debug.
+- Return a scripted HTTP status and minimal OpenAI-compatible JSON.
+- Set Connection: close.
+- Shut down deterministically after the expected request count.
+
+  Existing Tokio dev dependency gains only:
+
+  features = ["test-util", "net", "io-util", "sync"]
+
+  The server verifies:
+
+- POST /v1/chat/completions
+- Authorization: Bearer <sentinel>
+- Configured model identifier
+- Ordered System/User/Assistant messages
+- No tools or tool choice
+- Text response conversion
+- Usage conversion
+- HTTP error classification
+- Malformed response handling
+
+  No external network access is required.
+
+## 8. Opt-in live architecture
+
+  CLI modes:
+
+  agent-cli
+      default: deterministic FakeRigModel demo
+
+  agent-cli --live-openai-compatible
+      explicit real endpoint mode
+
+  The default remains network-free and requires no environment variables.
+
+  Live mode:
+
+  1. Reads the four generic environment variables.
+  2. Validates configuration before starting a run.
+  3. Constructs Arc<dyn ModelPort> through the provider factory.
+  4. Executes the existing deterministic loop and ReadOnly fake tool.
+  5. Never prints the response body.
+
+  Runtime path:
+
+  start_run
+  → LoopEngine
+  → Plan
+  → LoopEffects::invoke_model
+  → ExecutionHarness
+  → RigModelAdapter
+  → CompletionsClient model
+  → real endpoint
+  → provider-neutral ModelResponse
+  → deterministic Act
+  → Verify
+  → Reflect(Complete)
+  → Finished(Completed)
+
+  CI does not invoke this mode. No ignored live test is necessary if the CLI mode supplies the required operator validation path.
+
+## 9. Error behavior
+
+  Configuration errors occur before run startup:
+
+- Malformed URL → sanitized configuration error
+- Insecure remote HTTP → sanitized configuration error
+- Empty model identifier → sanitized configuration error
+- Empty credential → sanitized configuration error
+- Rig client construction failure → sanitized build error
+
+  Invocation behavior continues using M3 mappings:
+
+   Condition                                        ModelPortError
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━
+   400, 401, 403, 404, 422                          Rejected
+  ───────────────────────────────────────────────  ────────────────
+   408, 429                                         Unavailable
+  ───────────────────────────────────────────────  ────────────────
+   5xx                                              Unavailable
+  ───────────────────────────────────────────────  ────────────────
+   Connection/DNS/statusless HTTP failure           Unavailable
+  ───────────────────────────────────────────────  ────────────────
+   Malformed JSON                                   Failed
+  ───────────────────────────────────────────────  ────────────────
+   Valid HTTP status with invalid response shape    Failed
+  ───────────────────────────────────────────────  ────────────────
+   Unsupported tool/reasoning/image output          Failed
+
+  The harness still reserves exactly one model call before invocation. Its deadline tokio::select! remains authoritative and drops the provider future on timeout or cancellation.
+
+  No retries, fallback, backoff, or alternate model selection are introduced.
+
+## 10. Security and logging
+
+  Security invariants:
+
+- Keep record_telemetry_content = false in the existing adapter.
+- Do not log request or response bodies.
+- Never log credentials or Authorization headers.
+- Never place endpoint, credential, provider, or model configuration into RunContext, LoopState, or AgentEvent.
+- Do not derive payload-bearing Debug on test captures or provider configuration.
+- CLI prints only safe run metadata and an optional validated provider label.
+- Full URLs should not be logged; if needed, expose only scheme plus host/port.
+- Model identifiers may be treated as operational metadata, but the default CLI should not print them.
+
+  Rig 0.41.0 contains full request/response body logging at the rig::completions TRACE target. M4 must explicitly keep the CLI subscriber capped above TRACE for that target and document that production
+  compositions must not enable it. record_telemetry_content=false does not suppress those explicit TRACE statements.
+
+## 11. Dependency changes
+
+  Workspace:
+
+  rig-core = {
+      version = "=0.41.0",
+      default-features = false,
+      features = ["rustls"]
+  }
+  url = "2.5"
+
+  agent-provider-rig production dependencies:
+
+- agent-core — provider-neutral request/response types.
+- agent-harness — ModelPort and sanitized port errors.
+- rig-core — OpenAI-compatible client and completion model.
+- url — explicit endpoint validation and loopback classification.
+- thiserror — stable sanitized configuration/build errors.
+
+  Dev-only:
+
+- Existing Tokio, extended with net, io-util, sync, and test-util.
+
+  No direct production dependencies on:
+
+- reqwest
+- http
+- Axum/Hyper/WireMock
+- config frameworks
+- secret managers
+- retry libraries
+- OVH SDKs
+
+  Rig will still transitively provide reqwest, Tokio, and Rustls.
+
+## 12. Local Qwen path
+
+  Example configuration:
+
+  base URL: <http://127.0.0.1:8000/v1>
+  model:    value advertised by the local vLLM/SGLang deployment
+  token:    deployment-configured API key
+
+  No Qwen model name is compiled into Rust.
+
+  Changing from one Qwen version to another requires configuration only. The same applies to quantized variants, deployment aliases, or a new local serving engine.
+
+  For M4, local deployments should be configured with an API key because Rig’s stock CompletionsClient requires bearer credential construction.
+
+## 13. Optional OVH path
+
+  OVH’s current OpenAI-compatible examples use:
+
+- Base URL <https://oai.endpoints.kepler.ai.cloud.ovh.net/v1>
+- Authorization: Bearer <OVH_AI_ENDPOINTS_ACCESS_TOKEN>
+- Model supplied through the normal model field. OVH OpenAI-compatible example (<https://help.ovhcloud.com/csm/asia-public-cloud-ai-endpoints-function-calling?id=kb_article_view&sysparm_article=KB0071913>)
+
+  Therefore, no OVH-specific code or custom header extension is needed.
+
+  OVH virtual-model expressions can also remain opaque model identifiers—their documentation explicitly places these expressions in the normal OpenAI model field. OVH virtual-model documentation
+  (<https://help.ovhcloud.com/csm/en-public-cloud-ai-endpoints-virtual-models%3Fid%3Dkb_article_view%26sysparm_article%3DKB0072094>)
+
+  If a future gateway requires non-bearer authentication, introduce a reviewed typed authentication variant then. Do not expose arbitrary header maps prematurely.
+
+## 14. Enterprise-gateway evolution
+
+  Only composition configuration changes:
+
+  M4 initial:
+  agent → localhost vLLM/SGLang → Qwen
+
+  Later:
+  agent → internal OpenAI-compatible gateway
+        → Qwen / Alibaba / another provider
+
+  Unchanged:
+
+- agent-core
+- agent-harness
+- agent-loop
+- ModelPort
+- RigModelAdapter
+- deterministic loop transition authority
+- harness budgets, cancellation, audit, and lifecycle
+
+  A model identifier may be a concrete deployment, alias, or virtual model. The runtime does not interpret it.
+
+  Routing, fallback, load balancing, retry policy, and provider selection remain gateway/future-milestone concerns.
+
+## 15. Tests
+
+  Required deterministic coverage:
+
+- Valid localhost HTTP configuration.
+- Malformed URL rejected.
+- Empty model identifier rejected.
+- Empty credential rejected.
+- Non-loopback HTTP rejected.
+- URL userinfo/query/fragment rejected.
+- Secret Debug redacted.
+- Secret cannot implement serialization, enforced by compile-fail test.
+- Correct /v1/chat/completions path.
+- Correct bearer header.
+- Token does not leak through errors or events.
+- Configured model identifier reaches request unchanged.
+- Ordered message roles/content preserved.
+- Tools absent and tool choice unset.
+- Text completion converts successfully.
+- Usage converts correctly.
+- record_telemetry_content remains false.
+- 401/403 → Rejected.
+- 408/429 → Unavailable.
+- 5xx → Unavailable.
+- Malformed JSON/response → Failed.
+- Model budget increments exactly once.
+- Zero model budget prevents HTTP request.
+- Harness cancellation/deadline terminalize a pending HTTP request.
+- Full deterministic M2 loop completes against the local HTTP server.
+- Existing ReadOnly tool remains harness-mediated.
+- No prompt, response, credential, URL, or provider-error sentinel appears in AgentEvent or loggable public errors.
+- Core/harness/loop production sources remain Rig/provider/network-free.
+- Cargo trees confirm Rig and transport dependencies remain confined to the adapter/CLI path.
+- Default CLI performs no network request.
+
+## 16. Risks and tradeoffs
+
+- Rig API churn: direct use of exact 0.41.0 builder types creates a useful compile-time upgrade tripwire.
+- TLS surface: enabling rustls is necessary for enterprise/OVH HTTPS and expands the transitive dependency tree.
+- Mandatory bearer auth: safe for enterprise and OVH, but requires local servers to accept/configure an API key.
+- Internal certificates/proxies: custom CA bundles and proxy policy are not exposed in M4.
+- Compatibility variance: “OpenAI-compatible” servers may differ in response fields or reasoning/tool-call behavior; unsupported content continues to fail atomically.
+- TRACE leakage: Rig’s own TRACE body logging requires an explicit production logging restriction.
+- Deadline semantics: dropping the future stops local awaiting but cannot prove remote provider cancellation.
+- Live nondeterminism: real model output is intentionally excluded from CI assertions.
+- Virtual model identifiers: a gateway alias can resolve to different models over time; that is allowed configuration behavior, not runtime routing.
+- Readiness: omitting startup verification avoids dependence on inconsistent /models endpoints but means the first completion discovers connectivity failure.
+- Custom authentication: arbitrary/custom header authentication is deferred until a concrete gateway requires it.
+- Tool calls, streaming, structured output, retries, routing, and fallback remain deliberately deferred.
+
+No files were edited. Awaiting architectural approval.
+
+# M4 web openai review approvals
+
+The M4 architecture proposal is approved with the following required
+refinements.
+
+Implement M4 now.
+
+1. Preserve the approved architecture.
+
+Do not modify:
+
+- agent-core
+- agent-harness
+- agent-loop
+- ModelPort
+- RigModelAdapter
+
+unless actual compilation reveals a genuine provider-neutral deficiency.
+
+M4 belongs in:
+
+- agent-provider-rig
+- agent-cli composition
+- deterministic integration-test infrastructure
+- documentation
+
+No gateway crate.
+
+1. Use Rig 0.41 Chat Completions exactly as proposed.
+
+Use:
+
+rig-core = {
+    version = "=0.41.0",
+    default-features = false,
+    features = ["rustls"]
+}
+
+Use:
+
+- rig_core::providers::openai::CompletionsClient
+- rig_core::client::CompletionClient
+- completion_model(...)
+
+Do not use:
+
+- OpenAI Responses API client
+- Rig Agent
+- AgentRun
+- AgentRunner
+- Rig tool execution
+- retries
+- streaming
+
+1. Bearer authentication remains mandatory in M4.
+
+Keep BearerCredential as the provider config credential.
+
+The wrapper:
+
+- must not implement Serialize/Deserialize
+- must not implement Display
+- must use redacted Debug
+- preferably does not Clone
+- exposes no public raw-secret accessor
+- rejects empty/whitespace-only values
+
+The provider module itself may consume/access its private secret value to pass
+it into Rig.
+
+Do not introduce Authentication enums, custom headers, secret frameworks or
+no-auth modes yet.
+
+1. Configuration ownership remains:
+
+agent-cli:
+
+- reads environment/configuration
+- selects fake/live mode
+
+agent-provider-rig:
+
+- validates provider configuration
+- builds Rig client/model
+- owns secret wrapper
+
+core/harness/loop:
+
+- remain unaware of endpoint/model/credential/provider configuration.
+
+1. URL validation.
+
+Use url::Url.
+
+Require:
+
+- http or https
+- host present
+- no username/password
+- no query
+- no fragment
+
+Reject API roots ending in:
+
+- /chat/completions
+- /chat/completions/
+
+Only normalize an optional trailing slash on the API-root path.
+
+Do not otherwise rewrite:
+
+- host
+- scheme
+- port
+- arbitrary path segments.
+
+Test both:
+
+- /v1
+- /v1/
+
+and prove both produce:
+POST /v1/chat/completions
+
+1. HTTP transport policy.
+
+HTTP is allowed only for loopback.
+
+Determine loopback using URL host semantics:
+
+- domain exactly localhost (case-insensitive)
+- IPv4 addr.is_loopback()
+- IPv6 addr.is_loopback()
+
+Do not treat:
+
+- 0.0.0.0
+- RFC1918/private IPv4
+- arbitrary internal DNS names
+
+as loopback.
+
+Non-loopback endpoints require HTTPS.
+
+Do not add an insecure-remote override in M4.
+
+1. Model identifier.
+
+Treat as opaque validated String.
+
+Validation:
+
+- non-empty after trimming
+- no control characters
+
+Do not hard-code Qwen/OVH model constants.
+
+Do not parse gateway aliases or virtual-model syntax.
+
+Pass the configured value unchanged into completion_model().
+
+1. Provider label.
+
+Keep ProviderLabel optional and safe.
+
+Bound its length and restrict it to safe printable metadata.
+
+Do not treat it as security-sensitive configuration.
+
+It may be printed by live CLI.
+
+Do not print model identifier by default.
+
+1. Keep:
+
+build_openai_compatible_model_port(
+    OpenAiCompatibleConfig
+) -> Result<Arc<dyn ModelPort>, OpenAiCompatibleBuildError>
+
+Internally:
+
+validated config
+→ CompletionsClient builder
+→ api_key
+→ base_url
+→ build
+→ completion_model
+→ RigModelAdapter
+→ Arc<dyn ModelPort>
+
+Do not create another ModelPort wrapper.
+
+1. Error sanitation.
+
+Configuration/build errors must not contain:
+
+- credential
+- Authorization header
+- full URL
+- request/response body
+- provider raw errors
+
+Use stable typed variants.
+
+Do not publicly expose underlying Rig/reqwest errors as Error::source if doing
+so may reveal configuration or transport bodies.
+
+1. Security logging.
+
+Keep the existing Rig request invariant:
+
+record_telemetry_content = false
+
+Add/retain a test for it.
+
+Do not assert in documentation that Rig 0.41 necessarily logs full
+request/response bodies at a specific TRACE target unless that is proven from
+the exact pinned source.
+
+Instead document:
+
+Production compositions must not enable TRACE-level Rig/provider logging
+without first reviewing the exact pinned Rig version for content leakage.
+
+The CLI should use conservative metadata-only logging.
+
+1. Test HTTP server.
+
+Implement the proposed private Tokio test server.
+
+It is not a general HTTP server.
+
+Bound it explicitly:
+
+- fixed small expected request count
+- maximum header size
+- maximum Content-Length/body size
+- bounded read/accept timeout
+- Content-Length requests only
+- Connection: close
+- no chunked transfer decoding
+- no keep-alive support
+- no HTTP/2
+
+Unexpected protocol behavior should fail the deterministic test.
+
+Do not add Axum, Hyper, WireMock or another web framework merely for M4 tests.
+
+1. Deterministic HTTP tests must verify:
+
+- /v1 and /v1/ both lead to /v1/chat/completions
+- exact configured model field
+- Authorization: Bearer ...
+- ordered System/User/Assistant messages
+- no tools/tool-choice
+- successful textual completion
+- token usage conversion
+- 401/403 -> Rejected
+- 408/429 -> Unavailable
+- 5xx -> Unavailable
+- malformed JSON -> Failed
+- malformed success response -> Failed
+- secret sentinel does not appear in public errors/events
+- prompt/response sentinel does not appear in AgentEvent
+
+1. Preserve harness authority.
+
+The provider factory/model must add no:
+
+- timeout
+- retry
+- cancellation token
+- fallback
+
+ExecutionHarness remains authoritative for:
+
+- ModelCalls
+- deadline
+- cancellation
+- audit
+- lifecycle.
+
+Cancellation of the local future does not prove remote cancellation.
+
+1. Full deterministic integration test.
+
+Exercise:
+
+start_run
+→ LoopEngine
+→ Plan
+→ LoopEffects
+→ ExecutionHarness
+→ ModelPort
+→ RigModelAdapter
+→ CompletionsClient
+→ local deterministic HTTP server
+→ textual response
+→ existing deterministic ReadOnly Act
+→ Verify
+→ Reflect(Complete)
+→ Finished(Completed)
+
+Assert usage:
+
+- ModelCalls = 1
+- ToolCalls = 1
+- Iterations = 1
+
+1. Live CLI mode.
+
+Default mode remains network-free.
+
+Add explicit:
+
+--live-openai-compatible
+
+without adding Clap unless there is a concrete reason.
+
+Environment variables:
+
+ELA_OPENAI_COMPAT_BASE_URL
+ELA_OPENAI_COMPAT_MODEL
+ELA_OPENAI_COMPAT_API_KEY
+ELA_OPENAI_COMPAT_LABEL optional
+
+Only live mode reads/requires these values.
+
+Validate configuration before start_run.
+
+1. Keep live-loop control deterministic.
+
+Plan may invoke the real model.
+
+Verify must only inspect provider-neutral typed facts needed for success, for
+example:
+
+- at least one textual ModelOutputPart exists
+- Act produced the expected typed ReadOnly result
+
+Reflect must produce deterministic Complete for the M4 smoke path.
+
+Do not use another model invocation for Verify/Reflect.
+
+Do not let free-form model output decide the outer loop transition.
+
+1. CLI live output may contain only safe metadata:
+
+- RunId
+- provider label
+- iteration/phase progression
+- final RunStatus
+- ModelCalls
+- ToolCalls
+- Iterations
+- audit_degraded
+
+Do not print:
+
+- prompt
+- response
+- token
+- full URL
+- model identifier by default
+- captured HTTP request
+
+1. Readiness remains deferred.
+
+Do not call /models during normal startup.
+
+Do not spend ModelCalls on connectivity checks.
+
+No new health abstraction.
+
+1. HTTPS support.
+
+Enable exactly Rig's rustls feature.
+
+Do not add:
+
+- native-tls
+- proxy configuration
+- custom CA
+- mTLS
+
+in M4.
+
+Document those as enterprise deployment extensions.
+
+1. Test build/security surface.
+
+Keep:
+
+- url as production dependency if needed for validation
+- thiserror for typed provider construction errors
+
+Do not add:
+
+- reqwest directly
+- http directly
+- config framework
+- secret manager
+- retry library
+- OVH SDK
+
+Tokio net/io/sync features may be dev-only for deterministic HTTP tests.
+
+1. Boundary checks.
+
+Verify no changes/imports of provider/network/Rig concerns in:
+
+- agent-core
+- agent-harness
+- agent-loop
+
+Run:
+cargo tree -p agent-core
+cargo tree -p agent-harness
+cargo tree -p agent-loop
+cargo tree -p agent-provider-rig
+cargo tree -i rig-core
+
+Also run the existing architecture source scan.
+
+1. Required quality gates:
+
+cargo fmt --all -- --check
+
+cargo clippy \
+  --workspace \
+  --all-targets \
+  --all-features \
+  -- -D warnings
+
+cargo test --workspace --all-features
+
+git diff --check
+
+Run the deterministic/default CLI mode.
+
+Do NOT execute the live external mode automatically.
+
+Do not commit.
+
+1. Final implementation report must include:
+
+1. changed tree
+1. exact Rig feature/dependency change
+1. OpenAiCompatibleConfig API
+1. BearerCredential behavior
+1. endpoint normalization/security policy
+1. provider factory
+1. deterministic HTTP server design
+1. HTTP integration test results
+1. full loop HTTP integration result
+1. live CLI mode/configuration
+1. security/logging behavior
+1. dependency-tree verification
+1. core/harness/loop boundary verification
+1. quality gates
+1. deliberate deferrals
+1. any deviations and justification

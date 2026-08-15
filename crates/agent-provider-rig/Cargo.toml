@@ -10,9 +10,10 @@ test-support = []
 agent-core.workspace = true
 agent-harness.workspace = true
 rig-core.workspace = true
+thiserror.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 agent-harness = { workspace = true, features = ["test-support"] }
 agent-loop.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
-url = "2.5"
+tokio = { workspace = true, features = ["io-util", "net", "sync", "test-util"] }

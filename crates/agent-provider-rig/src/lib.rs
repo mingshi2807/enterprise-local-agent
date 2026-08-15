@@ -15,6 +15,14 @@
 //! Future real-provider adapters need an explicit retry and idempotency review
 //! before adding retry behavior around completion calls.
 
+mod openai_compatible;
+
+pub use openai_compatible::{
+    BearerCredential, BearerCredentialError, OpenAiCompatibleBuildError, OpenAiCompatibleConfig,
+    OpenAiCompatibleConfigError, ProviderLabel, ProviderLabelError,
+    build_openai_compatible_model_port,
+};
+
 use agent_core::{
     ModelMessage, ModelOutputPart, ModelRequest, ModelResponse, ModelRole, TokenUsage,
 };

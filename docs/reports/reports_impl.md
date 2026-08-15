@@ -559,3 +559,193 @@ M2 is implemented and fully verified. No files were committed.
   1. Deviations
 
   No architectural or provider-neutral contract deviations were necessary. agent-core, agent-harness, and agent-loop were unchanged. No commit was created.
+
+  # M4 implementation report
+
+• M4 is implemented and fully verified. The default CLI remains network-free, the live external mode was not executed, and no commit was created.
+
+  1. Changed tree
+
+- Modified Cargo.toml:15, Cargo.lock
+- Modified crates/agent-provider-rig/Cargo.toml:9
+- Added crates/agent-provider-rig/src/openai_compatible.rs:1
+- Re-exported the new API from crates/agent-provider-rig/src/lib.rs:18; RigModelAdapter itself was unchanged
+- Added bounded HTTP integration infrastructure:
+  - crates/agent-provider-rig/tests/support/openai_server.rs:1
+  - crates/agent-provider-rig/tests/openai_compatible_http.rs:1
+
+- Updated apps/agent-cli/src/main.rs:23
+- Added usage/security documentation in README.md:6
+
+  docs/proposal/proposal.md was already modified before M4 and was not touched.
+
+  1. Rig dependency
+
+  Exactly:
+
+  rig-core = {
+      version = "=0.41.0",
+      default-features = false,
+      features = ["rustls"]
+  }
+
+  No rig-agent, facade, native TLS, direct reqwest, or direct http dependency was added.
+
+  1. OpenAiCompatibleConfig
+
+  The provider-owned API validates and retains private:
+
+- Url API root
+- opaque model identifier
+- mandatory BearerCredential
+- optional ProviderLabel
+
+  The factory returns Arc<dyn ModelPort> without exposing Rig types.
+
+  1. BearerCredential
+
+  crates/agent-provider-rig/src/openai_compatible.rs:23:
+
+- Rejects empty or whitespace-only values
+- Has redacted Debug
+- Has no Clone, Display, serialization traits, or public secret accessor
+- Has a compile-fail test proving it is not serializable
+
+  1. Endpoint policy
+
+  crates/agent-provider-rig/src/openai_compatible.rs:173 requires:
+
+- HTTP or HTTPS with a host
+- No URL credentials, query, or fragment
+- API root rather than /chat/completions
+- HTTP only for localhost, loopback IPv4, or loopback IPv6
+- HTTPS for private IPs, internal DNS, and all other non-loopback hosts
+- Only one optional trailing path slash is removed
+
+  Both /v1 and /v1/ are proven to produce POST /v1/chat/completions.
+
+  1. Provider factory
+
+  crates/agent-provider-rig/src/openai_compatible.rs:153 performs:
+
+  validated configuration
+  → CompletionsClient builder
+  → api_key
+  → base_url
+  → build
+  → completion_model(model_identifier)
+  → RigModelAdapter
+  → Arc<dyn ModelPort>
+
+  It adds no timeout, retry, fallback, readiness, or cancellation layer.
+
+  1. Deterministic HTTP server
+
+  The private Tokio server has:
+
+- Maximum 8 scripted requests
+- 16 KiB header and 64 KiB body limits
+- Three-second accept/read/write bounds
+- Content-Length only
+- HTTP/1.1 only
+- No chunked transfer, HTTP/2, or persistent connections
+- Connection: close
+
+  1. HTTP integration results
+
+  Five integration tests passed, covering:
+
+- URL/path normalization
+- Bearer header and configured model
+- Ordered System/User/Assistant messages
+- No tools or tool choice
+- Text and usage conversion
+- 401/403, 408/429, and 5xx mappings
+- Malformed JSON and malformed success responses
+- Secret, prompt, response, and event leakage checks
+
+  1. Full loop HTTP integration
+
+  The full deterministic HTTP test completed:
+
+  LoopEngine → LoopEffects → ExecutionHarness → ModelPort
+  → RigModelAdapter → CompletionsClient → local HTTP server
+  → ReadOnly ToolPort → Verify → Reflect(Complete)
+
+  Final outcome was Finished(Completed) with:
+
+- ModelCalls: 1
+- ToolCalls: 1
+- Iterations: 1
+
+  1. Live CLI mode
+
+  apps/agent-cli/src/main.rs:248 supports explicit:
+
+  --live-openai-compatible
+
+  Only that mode reads:
+
+- ELA_OPENAI_COMPAT_BASE_URL
+- ELA_OPENAI_COMPAT_MODEL
+- ELA_OPENAI_COMPAT_API_KEY
+- ELA_OPENAI_COMPAT_LABEL optionally
+
+  Configuration is validated before start_run. The model identifier, URL, prompt, response, and credential are not printed.
+
+  1. Security and logging
+
+- record_telemetry_content = false remains explicitly constructed and tested.
+- Provider construction errors use stable sanitized variants without raw sources.
+- CLI logging is capped at INFO.
+- Documentation warns that TRACE-level Rig/provider logging requires reviewing the pinned source first.
+- Local future cancellation does not claim remote work cancellation.
+
+  1. Dependency verification
+
+  cargo tree checks passed for all requested crates.
+
+  Inverse Rig dependency:
+
+  rig-core v0.41.0
+  └── agent-provider-rig
+      └── agent-cli
+
+  Rustls is enabled; no native-tls feature is present. Rig’s transitive Tokio/reqwest/runtime surface remains isolated behind agent-provider-rig.
+
+  1. Boundary verification
+
+  Source and manifest scans found no Rig/provider/network imports or dependencies in:
+
+- agent-core
+- agent-harness
+- agent-loop
+
+  None of those crates changed.
+
+  1. Quality gates
+
+  All passed:
+
+- cargo fmt --all -- --check
+- cargo clippy --workspace --all-targets --all-features -- -D warnings
+- cargo test --workspace --all-features
+  - 105 unit/integration tests
+  - 2 compile-fail doctests
+
+- All requested dependency trees
+- Architecture source scans
+- git diff --check
+- Default deterministic CLI run
+
+  The default CLI finished successfully with 1/1/1 model/tool/iteration usage and audit_degraded=false.
+
+  1. Deliberate deferrals
+
+  No readiness call, retry, proxy configuration, custom CA, mTLS, streaming, structured output, routing/fallback, no-auth mode, custom headers, model-driven tools, OVH SDK, or external live test execution was
+  introduced.
+
+  1. Deviations
+
+  None. The approved provider boundary and existing M0–M3 contracts were preserved. No files were committed.
+  

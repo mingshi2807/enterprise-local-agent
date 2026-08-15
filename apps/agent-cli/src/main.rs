@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{env, sync::Arc, time::Duration};
 
 use agent_core::{
     AgentEventKind, CapabilityKind, LoopEventKind, LoopFailureKind, ModelMessage, ModelRequest,
@@ -14,8 +14,27 @@ use agent_loop::{
     LoopEffects, LoopEngine, LoopFuture, LoopProgram, LoopStepError, ReflectDecision,
     VerificationResult,
 };
-use agent_provider_rig::{RigModelAdapter, testing::FakeRigModel};
-use anyhow::Context;
+use agent_provider_rig::{
+    BearerCredential, OpenAiCompatibleConfig, ProviderLabel, RigModelAdapter,
+    build_openai_compatible_model_port, testing::FakeRigModel,
+};
+use anyhow::{Context, bail};
+
+const LIVE_MODE_FLAG: &str = "--live-openai-compatible";
+const LIVE_BASE_URL_ENV: &str = "ELA_OPENAI_COMPAT_BASE_URL";
+const LIVE_MODEL_ENV: &str = "ELA_OPENAI_COMPAT_MODEL";
+const LIVE_API_KEY_ENV: &str = "ELA_OPENAI_COMPAT_API_KEY";
+const LIVE_LABEL_ENV: &str = "ELA_OPENAI_COMPAT_LABEL";
+
+enum CliMode {
+    Deterministic,
+    LiveOpenAiCompatible,
+}
+
+struct ModelComposition {
+    port: Arc<dyn ModelPort>,
+    provider_label: String,
+}
 
 struct DemoWorkingState {
     model_response: Option<ModelResponse>,
@@ -80,7 +99,16 @@ impl LoopProgram for DemoProgram {
         working_state: &'a mut Self::WorkingState,
         _effects: LoopEffects<'a>,
     ) -> LoopFuture<'a, Result<VerificationResult, LoopStepError>> {
-        let result = if working_state.model_response.is_some()
+        let has_text = working_state
+            .model_response
+            .as_ref()
+            .is_some_and(|response| {
+                response
+                    .output()
+                    .iter()
+                    .any(|part| matches!(part, agent_core::ModelOutputPart::Text(text) if !text.is_empty()))
+            });
+        let result = if has_text
             && matches!(
                 working_state.tool_result,
                 Some(ToolResult::Succeeded { .. })
@@ -111,20 +139,19 @@ impl LoopProgram for DemoProgram {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    let mode = parse_mode()?;
     tracing_subscriber::fmt()
         .with_target(false)
         .without_time()
+        .with_max_level(tracing::Level::INFO)
         .try_init()
         .map_err(|error| anyhow::anyhow!("failed to initialize tracing: {error}"))?;
 
     let budget = RunBudget::new(1, 1, 1, Duration::from_secs(5))
-        .context("failed to construct the M3 run budget")?;
+        .context("failed to construct the M4 run budget")?;
     let mut context = RunContext::new(RunId::new(), SessionId::new(), budget);
 
-    let model = Arc::new(RigModelAdapter::new(FakeRigModel::scripted_text(
-        "deterministic fake response",
-    )));
-    let model_port: Arc<dyn ModelPort> = model;
+    let model = compose_model(mode)?;
 
     let tool_call_id = ToolCallId::new();
     let tool_name = ToolName::new("local_lookup")?;
@@ -149,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
     let audit_sink: Arc<dyn AuditSink> = audit.clone();
     let config = HarnessConfig::new(AuditFailurePolicy::FailClosed, Duration::from_secs(1))?;
     let harness = ExecutionHarness::new(
-        model_port,
+        model.port,
         tools,
         Arc::new(M0ReadOnlyPolicy),
         audit_sink,
@@ -178,7 +205,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     println!("RunId: {}", context.run_id());
-    println!("Model adapter: RigModelAdapter<FakeRigModel>");
+    println!("Provider: {}", model.provider_label);
     println!("Run start");
     for event in audit.events() {
         let AgentEventKind::Loop { event } = event.kind() else {
@@ -216,4 +243,72 @@ async fn main() -> anyhow::Result<()> {
     println!("Audit degraded: {}", context.audit_degraded());
 
     Ok(())
+}
+
+fn parse_mode() -> anyhow::Result<CliMode> {
+    let mut arguments = env::args().skip(1);
+    match (arguments.next(), arguments.next()) {
+        (None, None) => Ok(CliMode::Deterministic),
+        (Some(flag), None) if flag == LIVE_MODE_FLAG => Ok(CliMode::LiveOpenAiCompatible),
+        _ => bail!("usage: agent-cli [{LIVE_MODE_FLAG}]"),
+    }
+}
+
+fn compose_model(mode: CliMode) -> anyhow::Result<ModelComposition> {
+    match mode {
+        CliMode::Deterministic => {
+            let port: Arc<dyn ModelPort> = Arc::new(RigModelAdapter::new(
+                FakeRigModel::scripted_text("deterministic fake response"),
+            ));
+            Ok(ModelComposition {
+                port,
+                provider_label: "deterministic-rig-fake".to_owned(),
+            })
+        }
+        CliMode::LiveOpenAiCompatible => compose_live_model(),
+    }
+}
+
+fn compose_live_model() -> anyhow::Result<ModelComposition> {
+    let base_url = required_live_environment(LIVE_BASE_URL_ENV)?;
+    let model_identifier = required_live_environment(LIVE_MODEL_ENV)?;
+    let credential = BearerCredential::new(required_live_environment(LIVE_API_KEY_ENV)?)
+        .context("live OpenAI-compatible credential is invalid")?;
+
+    let configured_label = optional_live_environment(LIVE_LABEL_ENV)?
+        .map(ProviderLabel::new)
+        .transpose()
+        .context("live OpenAI-compatible provider label is invalid")?;
+    let provider_label = configured_label
+        .as_ref()
+        .map_or("openai-compatible", ProviderLabel::as_str)
+        .to_owned();
+
+    let mut config = OpenAiCompatibleConfig::new(base_url, model_identifier, credential)
+        .context("live OpenAI-compatible provider configuration is invalid")?;
+    if let Some(label) = configured_label {
+        config = config.with_provider_label(label);
+    }
+    let port = build_openai_compatible_model_port(config)
+        .context("live OpenAI-compatible model client could not be constructed")?;
+
+    Ok(ModelComposition {
+        port,
+        provider_label,
+    })
+}
+
+fn required_live_environment(name: &'static str) -> anyhow::Result<String> {
+    env::var(name)
+        .map_err(|_| anyhow::anyhow!("required live configuration variable {name} is missing"))
+}
+
+fn optional_live_environment(name: &'static str) -> anyhow::Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(anyhow::anyhow!(
+            "live configuration variable {name} is invalid"
+        )),
+    }
 }
