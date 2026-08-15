@@ -1,9 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use agent_core::{ToolDefinition, ToolName};
+use jsonschema::Validator;
 use thiserror::Error;
 
-use crate::ToolPort;
+use crate::{ToolPort, ToolSchemaRegistrationError, action::compile_tool_schema};
 
 #[derive(Default)]
 pub struct ToolRegistry {
@@ -14,6 +15,7 @@ pub struct ToolRegistry {
 pub struct ToolBinding {
     definition: ToolDefinition,
     port: Arc<dyn ToolPort>,
+    validator: Arc<Validator>,
 }
 
 impl ToolBinding {
@@ -25,6 +27,10 @@ impl ToolBinding {
     #[must_use]
     pub fn port(&self) -> Arc<dyn ToolPort> {
         Arc::clone(&self.port)
+    }
+
+    pub(crate) fn validator(&self) -> &Validator {
+        &self.validator
     }
 }
 
@@ -40,11 +46,18 @@ impl ToolRegistry {
         if self.tools.contains_key(&name) {
             return Err(ToolRegistryError::DuplicateName { name });
         }
+        let validator = compile_tool_schema(definition.input_schema()).map_err(|reason| {
+            ToolRegistryError::InvalidInputSchema {
+                name: name.clone(),
+                reason,
+            }
+        })?;
         self.tools.insert(
             name,
             ToolBinding {
                 definition,
                 port: tool,
+                validator,
             },
         );
         Ok(())
@@ -70,6 +83,11 @@ impl ToolRegistry {
 pub enum ToolRegistryError {
     #[error("tool '{name}' is already registered")]
     DuplicateName { name: ToolName },
+    #[error("tool '{name}' has an invalid or unsupported input schema: {reason}")]
+    InvalidInputSchema {
+        name: ToolName,
+        reason: ToolSchemaRegistrationError,
+    },
 }
 
 #[cfg(test)]

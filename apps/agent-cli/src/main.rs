@@ -1,24 +1,24 @@
+mod action_program;
+
 use std::{env, sync::Arc, time::Duration};
 
 use agent_core::{
-    AgentEventKind, CapabilityKind, LoopEventKind, LoopFailureKind, ModelMessage, ModelRequest,
-    ModelResponse, ModelRole, RunBudget, RunId, SessionId, ToolCall, ToolCallId, ToolDefinition,
-    ToolInput, ToolName, ToolOutput, ToolResult, ToolSchema,
+    AgentEventKind, CapabilityKind, LoopEventKind, ModelMessage, ModelRequest, ModelRole,
+    RunBudget, RunId, SessionId, ToolDefinition, ToolName, ToolOutput, ToolSchema,
 };
 use agent_harness::{
     AuditFailurePolicy, AuditSink, ExecutionHarness, HarnessConfig, M0ReadOnlyPolicy, ModelPort,
     RunContext, ToolPort, ToolRegistry,
     testing::{FakeToolPort, InMemoryAuditSink},
 };
-use agent_loop::{
-    LoopEffects, LoopEngine, LoopFuture, LoopProgram, LoopStepError, ReflectDecision,
-    VerificationResult,
-};
+use agent_loop::LoopEngine;
 use agent_provider_rig::{
     BearerCredential, OpenAiCompatibleConfig, ProviderLabel, RigModelAdapter,
     build_openai_compatible_model_port, testing::FakeRigModel,
 };
 use anyhow::{Context, bail};
+
+use crate::action_program::{ActionProgram, ActionWorkingState};
 
 const LIVE_MODE_FLAG: &str = "--live-openai-compatible";
 const LIVE_BASE_URL_ENV: &str = "ELA_OPENAI_COMPAT_BASE_URL";
@@ -34,107 +34,6 @@ enum CliMode {
 struct ModelComposition {
     port: Arc<dyn ModelPort>,
     provider_label: String,
-}
-
-struct DemoWorkingState {
-    model_response: Option<ModelResponse>,
-    tool_result: Option<ToolResult>,
-}
-
-struct DemoProgram {
-    model_request: ModelRequest,
-    tool_call: ToolCall,
-}
-
-impl LoopProgram for DemoProgram {
-    type WorkingState = DemoWorkingState;
-
-    fn observe<'a>(
-        &'a mut self,
-        _iteration: u32,
-        _working_state: &'a mut Self::WorkingState,
-        _effects: LoopEffects<'a>,
-    ) -> LoopFuture<'a, Result<(), LoopStepError>> {
-        Box::pin(std::future::ready(Ok(())))
-    }
-
-    fn retrieve<'a>(
-        &'a mut self,
-        _iteration: u32,
-        _working_state: &'a mut Self::WorkingState,
-        _effects: LoopEffects<'a>,
-    ) -> LoopFuture<'a, Result<(), LoopStepError>> {
-        Box::pin(std::future::ready(Ok(())))
-    }
-
-    fn plan<'a>(
-        &'a mut self,
-        _iteration: u32,
-        working_state: &'a mut Self::WorkingState,
-        mut effects: LoopEffects<'a>,
-    ) -> LoopFuture<'a, Result<(), LoopStepError>> {
-        let request = self.model_request.clone();
-        Box::pin(async move {
-            working_state.model_response = Some(effects.invoke_model(request).await?);
-            Ok(())
-        })
-    }
-
-    fn act<'a>(
-        &'a mut self,
-        _iteration: u32,
-        working_state: &'a mut Self::WorkingState,
-        mut effects: LoopEffects<'a>,
-    ) -> LoopFuture<'a, Result<(), LoopStepError>> {
-        let call = self.tool_call.clone();
-        Box::pin(async move {
-            working_state.tool_result = Some(effects.invoke_tool(call).await?);
-            Ok(())
-        })
-    }
-
-    fn verify<'a>(
-        &'a mut self,
-        _iteration: u32,
-        working_state: &'a mut Self::WorkingState,
-        _effects: LoopEffects<'a>,
-    ) -> LoopFuture<'a, Result<VerificationResult, LoopStepError>> {
-        let has_text = working_state
-            .model_response
-            .as_ref()
-            .is_some_and(|response| {
-                response
-                    .output()
-                    .iter()
-                    .any(|part| matches!(part, agent_core::ModelOutputPart::Text(text) if !text.is_empty()))
-            });
-        let result = if has_text
-            && matches!(
-                working_state.tool_result,
-                Some(ToolResult::Succeeded { .. })
-            ) {
-            VerificationResult::Passed
-        } else {
-            VerificationResult::Failed
-        };
-        Box::pin(std::future::ready(Ok(result)))
-    }
-
-    fn reflect<'a>(
-        &'a mut self,
-        _iteration: u32,
-        _working_state: &'a mut Self::WorkingState,
-        verification: VerificationResult,
-        _effects: LoopEffects<'a>,
-    ) -> LoopFuture<'a, Result<ReflectDecision, LoopStepError>> {
-        let decision = match verification {
-            VerificationResult::Passed => ReflectDecision::Complete,
-            VerificationResult::Failed => ReflectDecision::Fail {
-                kind: LoopFailureKind::VerificationFailed,
-            },
-        };
-        Box::pin(std::future::ready(Ok(decision)))
-    }
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -153,20 +52,20 @@ async fn main() -> anyhow::Result<()> {
 
     let model = compose_model(mode)?;
 
-    let tool_call_id = ToolCallId::new();
-    let tool_name = ToolName::new("local_lookup")?;
+    let tool_name = ToolName::new("get_agent_capabilities")?;
     let definition = ToolDefinition::new(
         tool_name.clone(),
-        "deterministic read-only lookup",
+        "report the agent's deterministic capabilities",
         CapabilityKind::ReadOnly,
-        ToolSchema::new(serde_json::json!({"type": "object"}))?,
+        ToolSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }))?,
     )?;
-    let tool = Arc::new(FakeToolPort::scripted(
+    let tool = Arc::new(FakeToolPort::succeeding(
         definition,
-        vec![Ok(ToolResult::Succeeded {
-            call_id: tool_call_id,
-            output: ToolOutput::new(serde_json::json!({"status": "available"})),
-        })],
+        ToolOutput::new(serde_json::json!({"status": "available"})),
     ));
     let tool_port: Arc<dyn ToolPort> = tool;
     let mut tools = ToolRegistry::new();
@@ -183,21 +82,11 @@ async fn main() -> anyhow::Result<()> {
         config,
     );
 
-    let mut program = DemoProgram {
-        model_request: ModelRequest::new(vec![ModelMessage::new(
-            ModelRole::User,
-            "sentinel prompt stays outside audit events",
-        )]),
-        tool_call: ToolCall::new(
-            tool_call_id,
-            tool_name,
-            ToolInput::new(serde_json::json!({"sentinel": "tool input"})),
-        ),
-    };
-    let mut working_state = DemoWorkingState {
-        model_response: None,
-        tool_result: None,
-    };
+    let mut program = ActionProgram::new(ModelRequest::new(vec![ModelMessage::new(
+        ModelRole::User,
+        "Return only the exact JSON action envelope for get_agent_capabilities with an empty arguments object.",
+    )]));
+    let mut working_state = ActionWorkingState::new();
 
     let _cancellation = harness.start_run(&mut context).await?;
     LoopEngine::new()
@@ -208,32 +97,56 @@ async fn main() -> anyhow::Result<()> {
     println!("Provider: {}", model.provider_label);
     println!("Run start");
     for event in audit.events() {
-        let AgentEventKind::Loop { event } = event.kind() else {
-            continue;
-        };
-        match event {
-            LoopEventKind::IterationStarted { iteration, .. } => {
-                println!("Iteration {iteration} started");
+        match event.kind() {
+            AgentEventKind::ModelInvocationStarted { model_call_id, .. } => {
+                println!("ModelCallId: {model_call_id}");
             }
-            LoopEventKind::PhaseEntered { iteration, phase } => {
-                println!("Iteration {iteration}: {phase:?} entered");
+            AgentEventKind::ActionProposed {
+                action_proposal_id,
+                tool_name,
+                ..
+            } => println!("ActionProposalId: {action_proposal_id}; tool: {tool_name}"),
+            AgentEventKind::ActionExecutionBound {
+                action_proposal_id,
+                tool_call_id,
+            } => {
+                println!("ActionProposalId: {action_proposal_id}; ToolCallId: {tool_call_id} bound")
             }
-            LoopEventKind::PhaseCompleted { iteration, phase } => {
-                println!("Iteration {iteration}: {phase:?} completed");
-            }
-            LoopEventKind::ReflectDecision {
-                iteration,
-                decision,
-            } => println!("Iteration {iteration}: Reflect decision {decision:?}"),
-            LoopEventKind::IterationCompleted { iteration } => {
-                println!("Iteration {iteration} completed");
-            }
-            LoopEventKind::LoopCompleted {
-                completed_iterations,
-            } => println!("Loop completed after {completed_iterations} iteration(s)"),
-            LoopEventKind::LoopFailed { iteration, kind } => {
-                println!("Loop failed in iteration {iteration}: {kind:?}");
-            }
+            AgentEventKind::Loop { event } => match event {
+                LoopEventKind::IterationStarted { iteration, .. } => {
+                    println!("Iteration {iteration} started");
+                }
+                LoopEventKind::PhaseEntered { iteration, phase } => {
+                    println!("Iteration {iteration}: {phase:?} entered");
+                }
+                LoopEventKind::PhaseCompleted { iteration, phase } => {
+                    println!("Iteration {iteration}: {phase:?} completed");
+                }
+                LoopEventKind::ReflectDecision {
+                    iteration,
+                    decision,
+                } => println!("Iteration {iteration}: Reflect decision {decision:?}"),
+                LoopEventKind::IterationCompleted { iteration } => {
+                    println!("Iteration {iteration} completed");
+                }
+                LoopEventKind::LoopCompleted {
+                    completed_iterations,
+                } => println!("Loop completed after {completed_iterations} iteration(s)"),
+                LoopEventKind::LoopFailed { iteration, kind } => {
+                    println!("Loop failed in iteration {iteration}: {kind:?}");
+                }
+            },
+            AgentEventKind::RunStarted
+            | AgentEventKind::RunFinished { .. }
+            | AgentEventKind::ModelInvocationCompleted { .. }
+            | AgentEventKind::ModelInvocationFailed { .. }
+            | AgentEventKind::ActionValidated { .. }
+            | AgentEventKind::ActionRejected { .. }
+            | AgentEventKind::ToolInvocationStarted { .. }
+            | AgentEventKind::ToolInvocationCompleted { .. }
+            | AgentEventKind::ToolInvocationDomainFailed { .. }
+            | AgentEventKind::ToolInvocationAdapterFailed { .. }
+            | AgentEventKind::ToolPolicyDenied { .. } => {}
         }
     }
     println!("Final status: {:?}", context.status());
@@ -257,9 +170,10 @@ fn parse_mode() -> anyhow::Result<CliMode> {
 fn compose_model(mode: CliMode) -> anyhow::Result<ModelComposition> {
     match mode {
         CliMode::Deterministic => {
-            let port: Arc<dyn ModelPort> = Arc::new(RigModelAdapter::new(
-                FakeRigModel::scripted_text("deterministic fake response"),
-            ));
+            let port: Arc<dyn ModelPort> =
+                Arc::new(RigModelAdapter::new(FakeRigModel::scripted_text(
+                    r#"{"action":{"tool":"get_agent_capabilities","arguments":{}}}"#,
+                )));
             Ok(ModelComposition {
                 port,
                 provider_label: "deterministic-rig-fake".to_owned(),

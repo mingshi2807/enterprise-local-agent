@@ -226,16 +226,11 @@ fn runtime(
         ToolSchema::new(serde_json::json!({"type": "object"})).expect("test schema must be valid"),
     )
     .expect("test definition must be valid");
-    let tool_results = (0..tool_calls.max(1))
-        .map(|_| {
-            let call_id = ToolCallId::new();
-            Ok(ToolResult::Succeeded {
-                call_id,
-                output: ToolOutput::new(serde_json::json!({"value": TOOL_OUTPUT_SENTINEL})),
-            })
-        })
-        .collect();
-    let tool = Arc::new(FakeToolPort::scripted(tool_definition, tool_results));
+    let tool = Arc::new(FakeToolPort::succeeding_times(
+        tool_definition,
+        ToolOutput::new(serde_json::json!({"value": TOOL_OUTPUT_SENTINEL})),
+        tool_calls.max(1) as usize,
+    ));
     let tool_port: Arc<dyn ToolPort> = tool.clone();
     let mut registry = ToolRegistry::new();
     registry
@@ -1017,7 +1012,7 @@ async fn loop_and_event_ordering_is_deterministic_and_payload_free() {
             .collect::<Vec<_>>(),
         (0..events.len() as u64).collect::<Vec<_>>()
     );
-    assert!(events.iter().all(|event| event.schema_version().get() == 3));
+    assert!(events.iter().all(|event| event.schema_version().get() == 4));
     assert!(matches!(
         events.last().map(agent_core::AgentEvent::kind),
         Some(AgentEventKind::RunFinished {

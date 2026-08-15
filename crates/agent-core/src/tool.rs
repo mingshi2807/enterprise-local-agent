@@ -267,6 +267,15 @@ pub enum ToolResult {
     },
 }
 
+impl ToolResult {
+    #[must_use]
+    pub const fn call_id(&self) -> ToolCallId {
+        match self {
+            Self::Succeeded { call_id, .. } | Self::DomainFailure { call_id, .. } => *call_id,
+        }
+    }
+}
+
 impl fmt::Debug for ToolResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -361,5 +370,22 @@ mod tests {
             serde_json::from_str::<ToolDefinition>(json).expect_err("empty description must fail");
 
         assert!(error.to_string().contains("description"));
+    }
+
+    #[test]
+    fn every_tool_result_preserves_its_call_id() {
+        let succeeded_id = ToolCallId::new();
+        let failed_id = ToolCallId::new();
+        let succeeded = ToolResult::Succeeded {
+            call_id: succeeded_id,
+            output: ToolOutput::new(serde_json::json!({})),
+        };
+        let failed = ToolResult::DomainFailure {
+            call_id: failed_id,
+            failure: ToolDomainFailure::new(ToolDomainFailureKind::InvalidInput),
+        };
+
+        assert_eq!(succeeded.call_id(), succeeded_id);
+        assert_eq!(failed.call_id(), failed_id);
     }
 }

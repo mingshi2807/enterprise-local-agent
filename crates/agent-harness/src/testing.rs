@@ -13,7 +13,10 @@ use std::{
     time::Duration,
 };
 
-use agent_core::{AgentEvent, ModelRequest, ModelResponse, ToolCall, ToolDefinition, ToolResult};
+use agent_core::{
+    AgentEvent, ModelRequest, ModelResponse, ToolCall, ToolDefinition, ToolDomainFailure,
+    ToolOutput, ToolResult,
+};
 
 use crate::{
     AuditPortError, AuditSink, ModelPort, ModelPortError, PortFuture, ToolPort, ToolPortError,
@@ -131,6 +134,8 @@ impl ModelPort for FakeModelPort {
 #[derive(Clone)]
 enum ToolBehavior {
     Immediate(Result<ToolResult, ToolPortError>),
+    EchoSuccess(ToolOutput),
+    EchoDomainFailure(ToolDomainFailure),
     Delayed(Duration, Result<ToolResult, ToolPortError>),
     Pending,
 }
@@ -151,6 +156,33 @@ impl FakeToolPort {
         Self::with_behaviors(
             definition,
             results.into_iter().map(ToolBehavior::Immediate).collect(),
+            InvocationLog::default(),
+        )
+    }
+
+    #[must_use]
+    pub fn succeeding(definition: ToolDefinition, output: ToolOutput) -> Self {
+        Self::succeeding_times(definition, output, 1)
+    }
+
+    #[must_use]
+    pub fn succeeding_times(
+        definition: ToolDefinition,
+        output: ToolOutput,
+        invocation_count: usize,
+    ) -> Self {
+        Self::with_behaviors(
+            definition,
+            std::iter::repeat_n(ToolBehavior::EchoSuccess(output), invocation_count).collect(),
+            InvocationLog::default(),
+        )
+    }
+
+    #[must_use]
+    pub fn domain_failing(definition: ToolDefinition, failure: ToolDomainFailure) -> Self {
+        Self::with_behaviors(
+            definition,
+            VecDeque::from([ToolBehavior::EchoDomainFailure(failure)]),
             InvocationLog::default(),
         )
     }
@@ -214,7 +246,7 @@ impl ToolPort for FakeToolPort {
         &self.definition
     }
 
-    fn invoke<'a>(&'a self, _call: ToolCall) -> PortFuture<'a, Result<ToolResult, ToolPortError>> {
+    fn invoke<'a>(&'a self, call: ToolCall) -> PortFuture<'a, Result<ToolResult, ToolPortError>> {
         self.invocations.fetch_add(1, Ordering::SeqCst);
         self.log.push(FakeInvocation::Tool);
         let behavior = lock_recover(&self.behaviors)
@@ -223,6 +255,14 @@ impl ToolPort for FakeToolPort {
         Box::pin(async move {
             match behavior {
                 ToolBehavior::Immediate(result) => result,
+                ToolBehavior::EchoSuccess(output) => Ok(ToolResult::Succeeded {
+                    call_id: call.id(),
+                    output,
+                }),
+                ToolBehavior::EchoDomainFailure(failure) => Ok(ToolResult::DomainFailure {
+                    call_id: call.id(),
+                    failure,
+                }),
                 ToolBehavior::Delayed(delay, result) => {
                     tokio::time::sleep(delay).await;
                     result

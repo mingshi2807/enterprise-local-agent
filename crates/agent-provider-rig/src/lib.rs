@@ -893,14 +893,11 @@ mod tests {
         let model_port: Arc<dyn ModelPort> = Arc::new(RigModelAdapter::new(model));
 
         let tool_name = "m3_lookup";
-        let tool = Arc::new(FakeToolPort::scripted(
+        let tool = Arc::new(FakeToolPort::succeeding(
             tool_definition(tool_name),
-            vec![Ok(ToolResult::Succeeded {
-                call_id: ToolCallId::new(),
-                output: ToolOutput::new(rig_core::serde_json::json!({
-                    "value": "LOOP_TOOL_OUTPUT_SENTINEL"
-                })),
-            })],
+            ToolOutput::new(rig_core::serde_json::json!({
+                "value": "LOOP_TOOL_OUTPUT_SENTINEL"
+            })),
         ));
         let tool_handle = tool.clone();
         let tool_port: Arc<dyn ToolPort> = tool;

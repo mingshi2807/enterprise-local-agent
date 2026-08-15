@@ -1,15 +1,18 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentEvent, AgentEventKind, BudgetDimension, LoopEventKind, LoopProgressEvent, ModelCallId,
-    ModelRequest, ModelResponse, RunFailureKind, RunOutcome, RunStatus, ToolCall, ToolResult,
+    ActionProposalId, AgentEvent, AgentEventKind, BudgetDimension, LoopEventKind,
+    LoopProgressEvent, ModelCallId, ModelRequest, ModelResponse, RunFailureKind, RunOutcome,
+    RunStatus, ToolCall, ToolCallId, ToolResult,
 };
 use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::{
-    AuditFailurePolicy, AuditPhase, AuditPortError, AuditSink, AuthorizationDecision,
-    CapabilityPolicy, ExecutionStage, HarnessConfig, HarnessError, HarnessOperation, ModelPort,
-    OperationEffect, RunCancellationHandle, RunContext, ToolRegistry,
+    ActionPreparationError, ActionValidationError, AuditFailurePolicy, AuditPhase, AuditPortError,
+    AuditSink, AuthorizationDecision, CapabilityPolicy, CompletedModelInvocation, ExecutionStage,
+    HarnessConfig, HarnessError, HarnessOperation, ModelPort, OperationEffect,
+    RunCancellationHandle, RunContext, ToolRegistry, ValidatedAction,
+    action::{ActionValidator, TextActionDecoder},
 };
 
 /// Guarded execution boundary for lifecycle, budget, policy, audit,
@@ -75,6 +78,16 @@ impl ExecutionHarness {
         context: &mut RunContext,
         request: ModelRequest,
     ) -> Result<ModelResponse, HarnessError> {
+        self.invoke_model_tracked(context, request)
+            .await
+            .map(CompletedModelInvocation::into_response)
+    }
+
+    pub async fn invoke_model_tracked(
+        &self,
+        context: &mut RunContext,
+        request: ModelRequest,
+    ) -> Result<CompletedModelInvocation, HarnessError> {
         self.preflight(context, HarnessOperation::InvokeModel)
             .await?;
 
@@ -116,7 +129,7 @@ impl ExecutionHarness {
                     OperationEffect::InvocationStarted,
                 )
                 .await?;
-                Ok(response)
+                Ok(CompletedModelInvocation::new(model_call_id, response))
             }
             Err(HarnessError::ModelPort(error)) => {
                 let event =
@@ -133,6 +146,87 @@ impl ExecutionHarness {
             }
             Err(error) => Err(error),
         }
+    }
+
+    pub async fn prepare_action(
+        &self,
+        context: &mut RunContext,
+        invocation: CompletedModelInvocation,
+    ) -> Result<ValidatedAction, ActionPreparationError> {
+        self.preflight(context, HarnessOperation::PrepareAction)
+            .await?;
+        let (model_call_id, response) = invocation.into_parts();
+        let action_proposal_id = ActionProposalId::new();
+        let proposal = match TextActionDecoder::decode(response, action_proposal_id, model_call_id)
+        {
+            Ok(proposal) => proposal,
+            Err(error) => {
+                self.record_action_rejected(context, error).await?;
+                return Err(error.into());
+            }
+        };
+
+        let event = context
+            .next_event(AgentEventKind::ActionProposed {
+                model_call_id,
+                action_proposal_id,
+                tool_name: proposal.tool_name().clone(),
+            })
+            .map_err(HarnessError::from)?;
+        self.audit_invocation(
+            context,
+            &event,
+            HarnessOperation::PrepareAction,
+            AuditPhase::Lifecycle,
+            OperationEffect::StateCommitted,
+        )
+        .await?;
+
+        let validated = match ActionValidator::validate(proposal, &self.tools) {
+            Ok(validated) => validated,
+            Err(error) => {
+                self.record_action_rejected(context, error).await?;
+                return Err(error.into());
+            }
+        };
+        let event = context
+            .next_event(AgentEventKind::ActionValidated { action_proposal_id })
+            .map_err(HarnessError::from)?;
+        self.audit_invocation(
+            context,
+            &event,
+            HarnessOperation::PrepareAction,
+            AuditPhase::Lifecycle,
+            OperationEffect::StateCommitted,
+        )
+        .await?;
+        Ok(validated)
+    }
+
+    pub async fn invoke_validated_action(
+        &self,
+        context: &mut RunContext,
+        action: ValidatedAction,
+    ) -> Result<ToolResult, HarnessError> {
+        self.preflight(context, HarnessOperation::InvokeValidatedAction)
+            .await?;
+        let action_proposal_id = action.proposal_id();
+        let tool_call_id = ToolCallId::new();
+        let event = context.next_event(AgentEventKind::ActionExecutionBound {
+            action_proposal_id,
+            tool_call_id,
+        })?;
+        self.audit_invocation(
+            context,
+            &event,
+            HarnessOperation::InvokeValidatedAction,
+            AuditPhase::BeforeInvocation,
+            OperationEffect::NotInvoked,
+        )
+        .await?;
+
+        self.invoke_tool(context, action.into_tool_call(tool_call_id))
+            .await
     }
 
     pub async fn checkpoint(&self, context: &mut RunContext) -> Result<(), HarnessError> {
@@ -257,6 +351,19 @@ impl ExecutionHarness {
         let result = self.invoke_tool_port(context, &port, call).await;
         match result {
             Ok(result) => {
+                if result.call_id() != tool_call_id {
+                    let event = context
+                        .next_event(AgentEventKind::ToolInvocationAdapterFailed { tool_call_id })?;
+                    self.audit_invocation(
+                        context,
+                        &event,
+                        HarnessOperation::InvokeTool,
+                        AuditPhase::AfterInvocation,
+                        OperationEffect::InvocationStarted,
+                    )
+                    .await?;
+                    return Err(HarnessError::ToolPort(crate::ToolPortError::AdapterFailure));
+                }
                 let event_kind = match &result {
                     ToolResult::Succeeded { .. } => {
                         AgentEventKind::ToolInvocationCompleted { tool_call_id }
@@ -403,6 +510,26 @@ impl ExecutionHarness {
         }
 
         Ok(())
+    }
+
+    async fn record_action_rejected(
+        &self,
+        context: &mut RunContext,
+        error: ActionValidationError,
+    ) -> Result<(), HarnessError> {
+        let event = context.next_event(AgentEventKind::ActionRejected {
+            model_call_id: error.model_call_id(),
+            action_proposal_id: error.proposal_id(),
+            reason: error.reason(),
+        })?;
+        self.audit_invocation(
+            context,
+            &event,
+            HarnessOperation::PrepareAction,
+            AuditPhase::Lifecycle,
+            OperationEffect::StateCommitted,
+        )
+        .await
     }
 
     fn require_status(

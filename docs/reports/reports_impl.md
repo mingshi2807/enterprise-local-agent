@@ -749,3 +749,117 @@ M2 is implemented and fully verified. No files were committed.
 
   None. The approved provider boundary and existing M0–M3 contracts were preserved. No files were committed.
   
+# M5 implementation reporting
+
+M5 is fully implemented and verified. No commit was created, and the external live mode was not executed.
+
+  1. Changed tree
+      - Workspace: Cargo.toml:21, Cargo.lock, README.md:7
+      - Core: new crates/agent-core/src/action.rs:7, IDs, events, tool correlation, exports
+      - Harness: new crates/agent-harness/src/action.rs:14 and action_tests.rs; execution, registry, errors, test fakes, exports
+      - Loop: governed action methods in crates/agent-loop/src/program.rs:96; LoopEngine itself remains unchanged
+      - CLI: new apps/agent-cli/src/action_program.rs:22, updated composition/output
+      - Provider: test-only fake tool fixture updated to echo the runtime ToolCallId
+      - docs/proposal/proposal.md was already modified before implementation and was not altered by this work.
+
+  2. Action domain types
+
+     Added provider-neutral ActionProposalId, ActionProposal, and stable ActionRejectionReason. A proposal is explicitly untrusted, non-executable, and non-authorizing.
+
+  3. Strict decoder behavior
+
+     TextActionDecoder accepts exactly one textual output containing exactly:
+
+     {"action":{"tool":"...","arguments":{...}}}
+
+     It rejects prose, code fences, trailing content, missing/unknown envelope fields, multiple/mixed output parts, non-object arguments, and normalized/fuzzy tool names.
+
+  4. Duplicate detection
+
+     A recursive custom Serde visitor rejects duplicate keys during deserialization, including nested argument objects. ToolInput is constructed only after uniqueness and structural limits pass.
+
+  5. Security limits
+
+     Enforced fixed M5 limits: 16 KiB planning response, 128-byte tool name, 8 KiB arguments, depth 8, 64 object keys, 128 array elements, 256 nodes; schemas are limited to 32 KiB, depth 16, and 256 keys.
+
+  6. JSON Schema profile and compilation
+
+     ToolRegistry::register validates the profile and compiles once using jsonschema::draft202012::options() at crates/agent-harness/src/action.rs:277.
+
+     Supported keywords match the approved profile, including title/description. $ref, composition, conditional, pattern, format, custom keywords, type unions, and wrong drafts are rejected. properties names and
+     enum/const data are handled contextually.
+
+  7. ValidatedAction invariants
+
+     ValidatedAction has no public constructor, no raw-argument accessor, no Clone, and no serialization. Compile-fail doctests enforce the latter two contracts. It is consumed by value during execution.
+
+  8. Tracked ModelCall correlation
+
+     crates/agent-harness/src/execution.rs:86 returns opaque CompletedModelInvocation. crates/agent-harness/src/execution.rs:151 consumes it and binds the harness-generated ModelCallId to a fresh runtime
+     ActionProposalId.
+
+  9. Proposal/tool-call binding
+
+     crates/agent-harness/src/execution.rs:206 generates a fresh ToolCallId, records ActionExecutionBound, and then delegates to existing governed tool execution.
+
+  10. Policy and budget behavior
+
+     Validation occurs before policy and tool budget. ReadOnly actions execute. LocalWrite, ExternalWrite, and Privileged actions validate but are denied with zero ToolCalls usage. Budget exhaustion after
+     binding terminalizes as BudgetExceeded { ToolCalls }.
+
+  11. ToolResult call-ID invariant
+
+     Added crates/agent-core/src/tool.rs:272. Harness verifies returned IDs against requested IDs; mismatch becomes sanitized ToolPortError::AdapterFailure. Success and domain-failure results preserve exact
+     correlation.
+
+  12. Audit events
+
+     Event schema advanced to version 4 at crates/agent-core/src/event.rs:8.
+
+     Added metadata-only ActionProposed, ActionValidated, ActionRejected, and ActionExecutionBound. Tests cover correlation, ordering, FailClosed/FailOpen behavior, and payload sentinel absence.
+
+  13. Deterministic ActionProgram
+
+     Plan invokes and prepares the action, storing only ValidatedAction. Act consumes it once. Verify inspects typed ToolResult; Reflect deterministically returns Complete or VerificationFailed. Model text never
+     controls loop transitions.
+
+  14. Live-mode compatibility
+
+     Deterministic and --live-openai-compatible modes use the same ActionProgram; only ModelPort composition changes. Invalid live prose/code fences fail safely without extraction heuristics.
+
+  15. Dependency changes
+
+     Added exactly:
+
+     jsonschema = { version = "=0.49.2", default-features = false }
+
+     It is directly used only by agent-harness; serde_json became a harness production dependency. No new crate or network/schema-resolution feature was added.
+
+  16. Architecture boundaries
+
+     Scans found no Rig/OpenAI/reqwest/url imports in production core, harness, or loop sources. Provider production code contains no tool execution path; its only tool-call reference rejects unsupported Rig
+     response content.
+
+     cargo tree -i rig-core remains:
+
+     rig-core → agent-provider-rig → agent-cli
+
+  17. Tests and quality gates
+
+     All passed:
+      - cargo fmt --all -- --check
+      - strict workspace Clippy with -D warnings
+      - cargo test --workspace --all-features: 130 unit/integration tests plus 4 compile-fail doctests
+      - All requested dependency trees
+      - Architecture scans
+      - git diff --check
+      - Default CLI: Finished(Completed), ModelCalls=1, ToolCalls=1, Iterations=1, audit_degraded=false
+
+  18. Deliberate deferrals
+
+     Native provider tool calls, Rig tools/agents, structured output, approvals, write execution, retries, recovery heuristics, MCP, RAG, graph execution, persistence, and multi-agent execution remain deferred.
+
+  19. Deviations
+
+     No architectural deviations. The only provider-crate modification is test-only adaptation to the new call-ID invariant. The validator also defensively reapplies structural limits so future non-text/native
+     candidates cannot bypass them.

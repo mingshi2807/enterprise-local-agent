@@ -12,6 +12,8 @@ pub enum HarnessOperation {
     BeginIteration,
     RecordLoopProgress,
     InvokeModel,
+    PrepareAction,
+    InvokeValidatedAction,
     InvokeTool,
     CompleteRun,
     FailRun,

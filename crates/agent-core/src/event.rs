@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityKind, LoopEventKind, ModelCallId, RunId, RunOutcome, TokenUsage, ToolCallId,
-    ToolDomainFailureKind, ToolName,
+    ActionProposalId, ActionRejectionReason, CapabilityKind, LoopEventKind, ModelCallId, RunId,
+    RunOutcome, TokenUsage, ToolCallId, ToolDomainFailureKind, ToolName,
 };
 
-pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(3);
+pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(4);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -106,6 +106,27 @@ pub enum AgentEventKind {
     ModelInvocationFailed {
         model_call_id: ModelCallId,
     },
+    ActionProposed {
+        model_call_id: ModelCallId,
+        action_proposal_id: ActionProposalId,
+        tool_name: ToolName,
+    },
+    ActionValidated {
+        action_proposal_id: ActionProposalId,
+    },
+    ActionRejected {
+        model_call_id: ModelCallId,
+        action_proposal_id: ActionProposalId,
+        reason: ActionRejectionReason,
+    },
+    /// The proposal was assigned a runtime tool-call identity.
+    ///
+    /// This event does not mean the action was authorized, budgeted, invoked,
+    /// or executed.
+    ActionExecutionBound {
+        action_proposal_id: ActionProposalId,
+        tool_call_id: ToolCallId,
+    },
     ToolInvocationStarted {
         tool_call_id: ToolCallId,
         tool_name: ToolName,
@@ -146,7 +167,7 @@ mod tests {
         );
 
         assert_eq!(event.schema_version(), CURRENT_EVENT_SCHEMA_VERSION);
-        assert_eq!(event.schema_version().get(), 3);
+        assert_eq!(event.schema_version().get(), 4);
         assert_eq!(event.sequence().get(), 7);
 
         let json = serde_json::to_string(&event).expect("event must serialize");
@@ -230,5 +251,53 @@ mod tests {
         assert!(!json.contains("sentinel tool input"));
         assert!(!json.contains("sentinel tool output"));
         assert!(!json.contains("provider failed noisily"));
+    }
+
+    #[test]
+    fn action_events_carry_only_metadata_correlation() {
+        let model_call_id = ModelCallId::new();
+        let action_proposal_id = ActionProposalId::new();
+        let tool_call_id = ToolCallId::new();
+        let tool_name = ToolName::new("lookup").expect("tool name must be valid");
+        let events = [
+            AgentEvent::new(
+                RunId::new(),
+                EventSequence::new(0),
+                AgentEventKind::ActionProposed {
+                    model_call_id,
+                    action_proposal_id,
+                    tool_name,
+                },
+            ),
+            AgentEvent::new(
+                RunId::new(),
+                EventSequence::new(1),
+                AgentEventKind::ActionValidated { action_proposal_id },
+            ),
+            AgentEvent::new(
+                RunId::new(),
+                EventSequence::new(2),
+                AgentEventKind::ActionExecutionBound {
+                    action_proposal_id,
+                    tool_call_id,
+                },
+            ),
+        ];
+
+        let json = serde_json::to_string(&events).expect("events must serialize");
+
+        assert!(json.contains(&model_call_id.to_string()));
+        assert!(json.contains(&action_proposal_id.to_string()));
+        assert!(json.contains(&tool_call_id.to_string()));
+        for sentinel in [
+            "sentinel model output",
+            "sentinel arguments",
+            "sentinel schema",
+            "sentinel tool result",
+            "sentinel provider",
+            "sentinel credential",
+        ] {
+            assert!(!json.contains(sentinel));
+        }
     }
 }

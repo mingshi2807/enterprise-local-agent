@@ -1,7 +1,10 @@
 use std::{future::Future, pin::Pin};
 
 use agent_core::{LoopFailureKind, ModelRequest, ModelResponse, ToolCall, ToolResult};
-use agent_harness::{ExecutionHarness, HarnessError, RunContext};
+use agent_harness::{
+    ActionPreparationError, CompletedModelInvocation, ExecutionHarness, HarnessError, RunContext,
+    ValidatedAction,
+};
 
 use crate::LoopStepError;
 
@@ -67,7 +70,7 @@ pub trait LoopProgram: Send {
     ) -> LoopFuture<'a, Result<ReflectDecision, LoopStepError>>;
 }
 
-/// The only enterprise effect surface supplied to an M2 loop program.
+/// The only enterprise effect surface supplied to a loop program.
 ///
 /// `LoopProgram` is trusted in-process application logic. This type preserves
 /// the project boundary for model and tool operations, but it is not a sandbox
@@ -88,6 +91,31 @@ impl<'a> LoopEffects<'a> {
         request: ModelRequest,
     ) -> Result<ModelResponse, HarnessError> {
         self.harness.invoke_model(self.context, request).await
+    }
+
+    pub async fn invoke_model_tracked(
+        &mut self,
+        request: ModelRequest,
+    ) -> Result<CompletedModelInvocation, HarnessError> {
+        self.harness
+            .invoke_model_tracked(self.context, request)
+            .await
+    }
+
+    pub async fn prepare_action(
+        &mut self,
+        invocation: CompletedModelInvocation,
+    ) -> Result<ValidatedAction, ActionPreparationError> {
+        self.harness.prepare_action(self.context, invocation).await
+    }
+
+    pub async fn invoke_validated_action(
+        &mut self,
+        action: ValidatedAction,
+    ) -> Result<ToolResult, HarnessError> {
+        self.harness
+            .invoke_validated_action(self.context, action)
+            .await
     }
 
     pub async fn invoke_tool(&mut self, call: ToolCall) -> Result<ToolResult, HarnessError> {

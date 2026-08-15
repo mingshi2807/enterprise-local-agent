@@ -1,12 +1,29 @@
 # Enterprise Local Agent
 
 Local-first Rust agent runtime with an enterprise execution harness, a typed
-deterministic outer loop, and replaceable model/provider adapters.
+deterministic outer loop, replaceable model/provider adapters, and governed
+model-proposed actions.
+
+## M5 action planning
+
+The Plan phase treats model output as untrusted data. It accepts one strict
+provider-neutral JSON envelope, assigns a runtime `ActionProposalId`, validates
+the exact tool name and arguments against the registered Draft 2020-12 schema,
+and produces a single-use `ValidatedAction`. The Act phase then binds a fresh
+`ToolCallId` and delegates policy, budget, audit, and execution to
+`ExecutionHarness`.
+
+A proposal is not a `ToolCall` and does not authorize execution. M5 remains
+ReadOnly-only: write and privileged actions are denied by the existing policy
+without consuming tool-call budget. Rig/OpenAI tool execution, native provider
+tool calls, approvals, retries, and heuristic JSON or markdown extraction are
+not enabled.
 
 ## Deterministic demonstration
 
 The default CLI path is network-free. It uses `RigModelAdapter<FakeRigModel>`
-and the deterministic ReadOnly fake tool:
+to return a strict action envelope, then validates and executes the
+deterministic ReadOnly fake tool through the harness:
 
 ```bash
 cargo run -p agent-cli
@@ -39,6 +56,11 @@ URLs, or model identifiers. Production compositions must not enable TRACE-level
 Rig/provider logging without first reviewing the exact pinned Rig version for
 content leakage.
 
-M4 intentionally does not provide readiness calls, retries, proxy settings,
+The live mode uses the same M5 `ActionProgram`; only model composition changes.
+If a live model returns prose, code fences, malformed JSON, or an invalid
+action, preparation fails closed without extraction heuristics.
+
+M4/M5 intentionally do not provide readiness calls, retries, proxy settings,
 custom certificate authorities, mTLS, streaming, structured output, model
-fallback, or model-driven tool execution.
+fallback, native provider tool calls, provider-driven tool execution, or
+approvals.

@@ -1,5 +1,6 @@
 //! Provider-independent domain values for the enterprise agent runtime.
 
+mod action;
 mod budget;
 mod capability;
 mod event;
@@ -9,12 +10,13 @@ mod model;
 mod run;
 mod tool;
 
+pub use action::{ActionProposal, ActionRejectionReason};
 pub use budget::{BudgetDimension, BudgetError, BudgetUsage, RunBudget};
 pub use capability::CapabilityKind;
 pub use event::{
     AgentEvent, AgentEventKind, CURRENT_EVENT_SCHEMA_VERSION, EventSchemaVersion, EventSequence,
 };
-pub use ids::{ModelCallId, RunId, SessionId, ToolCallId};
+pub use ids::{ActionProposalId, ModelCallId, RunId, SessionId, ToolCallId};
 pub use loop_control::{
     LoopDecisionKind, LoopEventKind, LoopFailureKind, LoopPhase, LoopProgressEvent,
 };
