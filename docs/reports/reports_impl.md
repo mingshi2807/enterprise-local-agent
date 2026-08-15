@@ -401,3 +401,161 @@ M2 is implemented and fully verified. No files were committed.
 
      No architectural deviations. LoopFailed metadata uses shared RunFailureKind, allowing stable model/tool/audit/internal and loop-specific categories without moving ReflectDecision or VerificationResult into
      core.
+
+15.08.2026
+
+# M3 implementation report
+
+• M3 is implemented, fully verified, and remains uncommitted. The independent final review found zero issues.
+
+  1. Final changed tree
+
+- Modified Cargo.toml:1
+- Updated Cargo.lock
+- Added crates/agent-provider-rig/Cargo.toml:1
+- Added crates/agent-provider-rig/src/lib.rs:1
+- Updated apps/agent-cli/Cargo.toml:1
+- Updated apps/agent-cli/src/main.rs:124
+
+  The existing modification to docs/proposal/proposal.md was preserved and was not part of M3.
+
+  1. Exact Rig dependency
+
+  rig-core = { version = "=0.41.0", default-features = false }
+
+  No rig facade, rig-agent, Agent, AgentRun, AgentRunner, or Rig orchestration features are present.
+
+  1. RigModelAdapter shape
+
+  RigModelAdapter<M> remains generic over rig_core::CompletionModel + Send + Sync and implements the existing ModelPort.
+
+  Type erasure occurs only at Arc<dyn ModelPort>. No Rig types escaped into core, harness, or loop APIs.
+
+  1. Request conversion
+
+  The adapter preserves message order and maps System/User/Assistant explicitly. It rejects empty requests and directly constructs every Rig 0.41.0 CompletionRequest field.
+
+  preamble, tools, tool choice, model overrides, schemas, and additional parameters remain unset. Direct construction serves as a Rig upgrade compilation tripwire.
+
+  1. Response conversion
+
+  Rig assistant content is processed in source order. Only textual content becomes ModelOutputPart::Text.
+
+  Raw response data and provider message identifiers are discarded after conversion and cannot be accessed through the adapter.
+
+  1. Usage conversion
+
+  Only input_tokens and output_tokens are mapped:
+
+- Nonzero → Some(value)
+- Zero → None
+- Both zero → no TokenUsage
+
+  No totals, cache, reasoning, or tool-use token concepts were added to core.
+
+  1. Unsupported content
+
+  Tool calls, reasoning, images, and mixed supported/unsupported responses fail atomically with sanitized ModelPortError::Failed. Partial text is never returned.
+
+  1. Error mapping
+
+  Implemented the approved HTTP mapping:
+
+- Other HTTP 4xx → Rejected
+- 408, 429, and 5xx → Unavailable
+- Statusless HTTP errors → Unavailable
+- URL, request, JSON, response, provider, provider-response without status, and unknown errors → Failed
+
+  Rig error Display, Debug, bodies, URLs, and provider strings never cross the boundary.
+
+  1. Security and telemetry
+
+  record_telemetry_content is always false and covered by tests. Adapter and fake request-bearing types do not derive payload-exposing Debug.
+
+  Audit and CLI output remain metadata-only.
+
+  1. Cancellation and retries
+
+  The adapter performs exactly one:
+
+  model.completion(request).await
+
+  It adds no timeout, cancellation token, tokio::select!, retry, or hook logic. ExecutionHarness remains authoritative.
+
+  Dropping the future only stops local awaiting; it cannot prove remote provider cancellation.
+
+  1. Fake Rig model
+
+  A gated FakeRigModel implements the actual Rig 0.41.0 CompletionModel and supports:
+
+- Scripted text and usage
+- Scripted completion errors
+- Request capture
+- Invocation counting
+- Pending completions
+- Deterministic sanitized streaming rejection
+
+  It contains no network client and no hidden retries.
+
+  1. ExecutionHarness integration
+
+  Tests prove model budget reservation occurs exactly once through the harness. Zero or exhausted model budget prevents adapter invocation. Pending calls remain governed by harness cancellation and deadline
+  behavior.
+
+  1. LoopEngine integration
+
+  The CLI and integration test exercise:
+
+  LoopEngine
+  → LoopEffects
+  → ExecutionHarness
+  → dyn ModelPort
+  → RigModelAdapter<FakeRigModel>
+  → rig_core::CompletionModel
+
+  The existing ReadOnly fake tool continues through ToolPort. One iteration finishes as Finished(Completed) with model/tool/iteration usage all equal to one.
+
+  1. Dependency trees
+
+  Reverse Rig tree:
+
+  rig-core v0.41.0
+  └── agent-provider-rig
+      └── agent-cli
+
+  agent-core, agent-harness, and agent-loop trees contain no Rig crates.
+
+  rig-core still brings transitive Tokio, reqwest, and HTTP-related dependencies despite disabled default features; this surface remains isolated behind the adapter crate.
+
+  1. Architecture boundary scan
+
+  Production sources under agent-core, agent-harness, and agent-loop produced no matches for:
+
+  rig_core
+  rig::
+  rig_agent
+
+  Their manifests also contain no Rig dependencies. No production changes were required in these crates.
+
+  1. Tests and quality gates
+
+  All passed:
+
+- cargo fmt --all -- --check
+- Workspace Clippy with -D warnings
+- Workspace tests: 93 unit tests plus 1 doctest
+- Adapter tests: 17 passed
+- All requested Cargo tree commands
+- Architecture source and manifest scans
+- Deterministic CLI run
+- git diff --check
+- Independent final review: zero findings
+
+  1. Deliberate deferrals
+
+  Deferred as required: real providers, network configuration, tool-call correlation, streaming APIs, structured output, Rig agents, retries/idempotency, RAG, MCP, persistence, graph execution, and remote
+  cancellation guarantees.
+
+  1. Deviations
+
+  No architectural or provider-neutral contract deviations were necessary. agent-core, agent-harness, and agent-loop were unchanged. No commit was created.

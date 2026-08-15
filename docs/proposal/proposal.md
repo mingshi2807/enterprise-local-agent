@@ -2499,3 +2499,848 @@ At the end report:
 13. test and quality-gate results
 14. deliberate deferrals
 15. deviations and justification
+
+15.08.2026
+
+# M3
+
+proposal codex waiting web OpenAI review approval :
+
+# M3 Architecture Proposal
+
+## 1. Inspected Rig version/API
+
+  The inspected release is exactly rig-core 0.41.0, rig 0.41.0, and rig-agent 0.41.0, release commit 68b4eab, published July 28, 2026. The release introduced the rig-core/rig-agent split. Rig 0.41.0 release
+  (<https://github.com/0xplaygrounds/rig/releases/tag/v0.41.0>).
+
+  Adapter-relevant contracts reside in rig-core:
+
+- CompletionModel
+- CompletionRequest
+- CompletionResponse<T>
+- CompletionError
+- Message, UserContent, AssistantContent, Text
+- Usage
+- OneOrMany
+
+  CompletionModel has associated Response, StreamingResponse, and Client types and returns impl Future; it is explicitly not dyn-compatible. CompletionModel 0.41.0
+  (<https://docs.rs/rig-core/0.41.0/rig_core/completion/request/trait.CompletionModel.html>).
+
+  CompletionRequest carries ordered, non-empty chat_history, while CompletionResponse contains ordered assistant content, usage, raw response, and optional provider message ID. Exact 0.41.0 completion source
+  (<https://github.com/0xPlaygrounds/rig/blob/68b4eabb8c9cf749ca73c917b9306e97fb0eda24/crates/rig-core/src/completion/request.rs>).
+
+  No Agent, AgentRun, AgentRunner, ToolSet, memory, or retry hooks are required for one completion invocation.
+
+## 2. Crate/dependency selection
+
+  Use rig-core directly:
+
+  rig-core = { version = "=0.41.0", default-features = false }
+
+  Do not use the rig facade. Its defaults enable:
+
+  rig-core/default
+  agent
+  derive
+  rustls
+
+  The agent feature pulls rig-agent, introducing the competing orchestration authority M3 excludes. Rig facade manifest
+  (<https://github.com/0xPlaygrounds/rig/blob/68b4eabb8c9cf749ca73c917b9306e97fb0eda24/Cargo.toml>).
+
+  Direct rig-core still has non-optional base reqwest and Tokio dependencies even with defaults disabled. M3 will neither construct an HTTP client nor perform network access; isolating this transitive surface in
+  the provider crate limits its architectural reach. rig-core manifest (<https://github.com/0xPlaygrounds/rig/blob/68b4eabb8c9cf749ca73c917b9306e97fb0eda24/crates/rig-core/Cargo.toml>).
+
+## 3. Proposed tree
+
+  Cargo.toml
+  Cargo.lock
+
+  apps/
+    agent-cli/
+      Cargo.toml
+      src/main.rs
+
+  crates/
+    agent-provider-rig/
+      Cargo.toml
+      src/
+        lib.rs
+        adapter.rs
+        convert.rs
+        testing.rs          # feature-gated test support
+      tests/
+        adapter.rs
+        harness.rs
+        loop_integration.rs
+        boundaries.rs
+
+  No production changes are expected in agent-core, agent-harness, or agent-loop.
+
+  Cargo.lock will be updated normally during implementation, not deleted or regenerated independently.
+
+## 4. Dependency direction
+
+  agent-cli
+    ├── agent-loop
+    │     └── agent-harness
+    │           └── agent-core
+    │
+    └── agent-provider-rig
+          ├── agent-harness
+          ├── agent-core
+          └── rig-core
+
+  Forbidden edges remain:
+
+  agent-core    -/-> Rig
+  agent-harness -/-> Rig
+  agent-loop    -/-> Rig
+
+  This preserves the existing provider-erasure boundary at crates/agent-harness/src/ports.rs:8 and the harness-only effect route in crates/agent-loop/src/program.rs:70.
+
+## 5. RigModelAdapter public/internal API
+
+  Minimal public API:
+
+  pub struct RigModelAdapter<M> {
+      model: M,
+  }
+
+  impl<M> RigModelAdapter<M> {
+      pub const fn new(model: M) -> Self;
+  }
+
+  Implementation shape:
+
+  impl<M> ModelPort for RigModelAdapter<M>
+  where
+      M: CompletionModel + Send + Sync + 'static,
+  {
+      fn invoke<'a>(
+          &'a self,
+          request: ModelRequest,
+      ) -> PortFuture<'a, Result<ModelResponse, ModelPortError>>;
+  }
+
+  Rig’s existing trait bounds already constrain response and streaming-response types.
+
+  The adapter remains generic because CompletionModel is not dyn-compatible. Type erasure occurs only at the existing application boundary:
+
+  let model_port: Arc<dyn ModelPort> =
+      Arc::new(RigModelAdapter::new(fake_rig_model));
+
+  RigModelAdapter will not derive Debug, and it will not expose its model through payload-bearing inspection methods.
+
+  Internal convert functions translate requests, responses, usage, and errors. No new public error type is needed.
+
+## 6. Request mapping
+
+  The existing provider-neutral contract is sufficient; no ModelPort, ModelRequest, or core change is proposed. crates/agent-core/src/model.rs:39 already preserves ordered roles and textual content.
+
+  Mapping:
+
+  ModelRole::System
+    -> Message::System { content }
+
+  ModelRole::User
+    -> Message::User {
+         content: OneOrMany::one(UserContent::Text(Text::new(content)))
+       }
+
+  ModelRole::Assistant
+    -> Message::Assistant {
+         id: None,
+         content: OneOrMany::one(AssistantContent::Text(Text::new(content)))
+       }
+
+  Rules:
+
+- Preserve exact message ordering.
+- Preserve system messages in place; do not convert them into legacy preamble.
+- Reject an empty ModelRequest as ModelPortError::Rejected, because Rig requires non-empty OneOrMany.
+- Do not impose a speculative final-role restriction in M3. The portable Rig message type represents all three roles; provider-specific final-role restrictions belong to the later concrete provider
+    integration.
+
+- Construct CompletionRequest directly with:
+
+  model                    = None
+  preamble                 = None
+  chat_history             = converted ordered messages
+  documents                = []
+  tools                    = []
+  temperature              = None
+  max_tokens               = None
+  tool_choice              = None
+  additional_params        = None
+  output_schema            = None
+  record_telemetry_content = false
+
+  Direct construction avoids builder behavior that might reinterpret one message as a separately supplied prompt.
+
+## 7. Response mapping
+
+  Process Rig choices in their original order.
+
+  AssistantContent::Text(text)
+    -> ModelOutputPart::Text(text.text)
+
+  Rig Text::additional_params, raw provider response, provider message ID, cache metadata, and reasoning metadata do not cross the adapter boundary.
+
+  Usage mapping:
+
+- A nonzero input_tokens becomes Some(input_tokens).
+- A nonzero output_tokens becomes Some(output_tokens).
+- Zero means unavailable and becomes None.
+- If neither mapped value is available, return ModelResponse.token_usage = None.
+- Never infer input/output counts from total_tokens.
+- Cache, tool-use, and reasoning-token counters remain deliberately unmapped.
+
+  Any unsupported response item makes conversion fail atomically. Mixed Text + unsupported content must not return partial text.
+
+## 8. Tool-call treatment
+
+  M3 will reject Rig tool-call responses as ModelPortError::Failed.
+
+  Although the core contains ModelOutputPart::ToolCall, Rig’s tool call carries provider string IDs and optional provider call IDs, while the current domain uses a UUID crates/agent-core/src/ids.rs:59.
+  Generating a new UUID would silently lose provider correlation.
+
+  Therefore:
+
+- No tools are registered with Rig.
+- CompletionRequest.tools is empty.
+- tool_choice is None.
+- Rig ToolCall, Reasoning, and Image response items are unsupported.
+- No Rig tool execution API is imported.
+
+  A future provider-neutral external-call correlation field could enable safe mapping, but M3 does not add it prematurely.
+
+## 9. Error/security mapping
+
+  A private mapper consumes CompletionError and returns only the existing sanitized crates/agent-harness/src/ports.rs:25.
+
+  Status-aware mapping:
+
+  HTTP 4xx except 408/429 -> Rejected
+  HTTP 408 or 429        -> Unavailable
+  HTTP 5xx               -> Unavailable
+  other preserved status -> Failed
+
+  When no status is available:
+
+  UrlError / RequestError          -> Rejected
+  HttpError                        -> Unavailable
+  JsonError / ResponseError        -> Failed
+  ProviderError / ProviderResponse -> Failed
+  future non-exhaustive variant    -> Failed
+
+  Security rules:
+
+- Never use Rig error Display or Debug in returned errors, events, or default tracing.
+- Never expose response bodies, credentials, prompts, model output, or provider strings.
+- Do not retain raw errors in adapter state.
+- No adapter type containing the model or captured requests derives Debug.
+- Fake request capture is test-support-only and is never audited or printed.
+
+  Existing model audit events already contain only call IDs, budget metadata, and optional token usage. crates/agent-core/src/event.rs:90 requires no schema change.
+
+## 10. Cancellation/retry semantics
+
+  The adapter performs exactly one:
+
+  model.completion(rig_request).await
+
+  per ModelPort::invoke.
+
+  It adds no:
+
+- timeout
+- cancellation token
+- retry loop
+- Tokio selection
+- Rig AgentRunner hooks
+- transport policy
+
+  ExecutionHarness remains authoritative for preflight, model-call reservation, auditing, cancellation, and deadline selection. Its current tokio::select! wraps the port future at crates/agent-harness/src/
+  execution.rs:338.
+
+  Dropping the Rig future stops local awaiting but cannot prove that a future remote provider stopped processing. Remote cancellation acknowledgement and idempotency remain deferred.
+
+  A future concrete model implementation might retry internally. Such behavior must be inspected and approved when that provider is introduced; the M3 fake performs no retries.
+
+  Rig Agent, AgentRun, and AgentRunner are explicitly excluded. They could only be reconsidered later inside a bounded specialist node after defining non-competing authority for turns, tools, retries, policy,
+  lifecycle, budgets, and audit.
+
+## 11. Fake Rig model strategy
+
+  Expose local deterministic support behind:
+
+  [features]
+  default = []
+  test-support = []
+
+  #[cfg(feature = "test-support")]
+  pub mod testing;
+
+  FakeRigModel implements the actual Rig 0.41.0 CompletionModel trait and supports:
+
+- scripted text choices
+- scripted Usage
+- scripted CompletionError
+- deterministic request capture
+- invocation count
+- pending completion future
+
+  The required stream method returns an immediate test-only unsupported error; neither adapter nor CLI calls it.
+
+  The fake uses no network, HTTP client, provider credentials, or separate test-support crate. The CLI enables agent-provider-rig/test-support.
+
+## 12. Tests
+
+  Adapter conversion:
+
+- RigModelAdapter<FakeRigModel> implements ModelPort.
+- Empty request is rejected without invoking the model.
+- System/User/Assistant roles map correctly.
+- Message ordering is exact.
+- All unused CompletionRequest fields have their required safe values.
+- Text choices and ordering map correctly.
+- Zero, partial, and complete usage map without invented values.
+- Raw response and message ID do not leak.
+
+  Unsupported content and security:
+
+- ToolCall, Reasoning, and Image each produce Failed.
+- Mixed Text plus unsupported content fails atomically.
+- Every Rig error class maps to the expected stable category.
+- Status tests cover normal 4xx, 408, 429, 5xx, unusual 2xx error envelopes, and no-status transport errors.
+- Prompt, response, provider-error, credential, and body sentinels appear in neither ModelPortError nor serialized audit events.
+
+  Harness integration:
+
+- One harness invocation consumes exactly one ModelCalls slot.
+- Zero/exhausted ModelCalls budget never invokes the adapter.
+- Pending completion is terminalized correctly by cancellation.
+- Pending completion is terminalized correctly by elapsed deadline.
+- Existing harness metadata ordering remains unchanged.
+
+  Loop integration:
+
+- One full M2 iteration invokes the model through LoopEffects → ExecutionHarness → dyn ModelPort.
+- The Rig fake is invoked exactly once.
+- The existing ReadOnly fake tool still runs through ToolPort.
+- Verify passes, Reflect completes, and the run finishes Completed.
+
+  Boundary verification:
+
+- No Rig import in production sources of core, harness, or loop.
+- Existing agent-loop dependency guard remains passing.
+- cargo tree -i rig-core shows only agent-provider-rig and CLI paths.
+- cargo tree -p agent-core, agent-harness, and agent-loop contains no Rig.
+- The exact =0.41.0 pin and disabled default features are checked.
+
+## 13. CLI demonstration
+
+  Composition:
+
+  start_run
+  → LoopEngine
+  → Observe
+  → Retrieve
+  → Plan
+  → LoopEffects::invoke_model
+  → ExecutionHarness::invoke_model
+  → dyn ModelPort
+  → RigModelAdapter
+  → FakeRigModel
+  → provider-neutral ModelResponse
+  → Act
+  → existing fake ReadOnly ToolPort
+  → Verify(Passed)
+  → Reflect(Complete)
+  → Finished(Completed)
+
+  Output remains limited to:
+
+- RunId
+- safe iteration/phase progression from metadata events
+- final RunStatus
+- ModelCalls usage
+- ToolCalls usage
+- Iterations usage
+- audit_degraded
+- compile-time static label such as rig-core / deterministic-fake
+
+  No prompt, model response, tool input/output, Rig error, or captured request is printed.
+
+## 14. Dependency/features
+
+  Root workspace additions:
+
+  [workspace.dependencies]
+  agent-provider-rig = { path = "crates/agent-provider-rig" }
+  rig-core = { version = "=0.41.0", default-features = false }
+
+  agent-provider-rig production dependencies:
+
+  [dependencies]
+  agent-core.workspace = true
+  agent-harness.workspace = true
+  rig-core.workspace = true
+
+  No production dependency on:
+
+- rig
+- rig-agent
+- Tokio
+- thiserror
+- serde_json
+- tracing
+- provider clients
+- MCP/RAG/vector crates
+
+  Dev dependencies may include agent-loop, agent-harness/test-support, Tokio, and serde_json for deterministic integration tests.
+
+  No Rig feature is enabled in M3. test-utils is unnecessary because the local fake needs pending behavior and precise request capture.
+
+## 15. Risks and future extension points
+
+- Rig API churn: exact pin plus a single adapter crate contains pre-1.0 breaking changes.
+- Direct request construction: deliberately couples conversion code to 0.41.0 fields, but gives exact ordering and safe defaults.
+- Transitive HTTP/runtime weight: rig-core still brings base HTTP/Tokio dependencies; dependency-tree evidence will make this explicit.
+- Conversion loss: unsupported rich content fails explicitly instead of being discarded.
+- Tool-call correlation: deferred until the domain can preserve provider call identity safely.
+- Token concepts: Rig usage is telemetry; harness ModelCalls remains the governing budget.
+- Cancellation: local future cancellation does not guarantee remote cancellation.
+- Hidden retries: every future concrete provider implementation requires a retry-behavior audit.
+- Streaming: requires a future provider-neutral streaming port; M3 does not call stream.
+- Structured output: requires a provider-neutral schema/result contract before mapping Rig output_schema.
+- Qwen gateway: future provider composition owns client/TLS/endpoint configuration outside core, harness, and loop.
+- Rig AgentRun: potentially useful later inside an explicitly bounded specialist node, never as the outer runtime authority.
+
+  Status: proposal only. No files were changed. Implementation awaits architectural approval.
+
+# M3 web OpenAI review approvals
+
+The M3 architecture proposal is approved with the following required
+adjustments.
+
+Implement M3 after applying these decisions.
+
+1. Keep the selected architecture:
+
+Use exactly:
+
+rig-core = { version = "=0.41.0", default-features = false }
+
+Do not depend on:
+
+- rig facade
+- rig-agent
+
+Do not use:
+
+- Agent
+- AgentRun
+- AgentRunner
+- Rig tool execution
+- Rig memory
+- Rig RAG
+- Rig MCP
+- Rig retry/hook orchestration
+
+The outer runtime remains:
+
+LoopEngine
+→ LoopEffects
+→ ExecutionHarness
+→ ModelPort
+→ RigModelAdapter
+→ rig_core::CompletionModel
+
+1. Keep RigModelAdapter generic.
+
+Use the approved shape conceptually:
+
+RigModelAdapter<M>
+
+where M implements the current rig_core::CompletionModel plus the bounds
+required for ModelPort.
+
+Do not attempt to store CompletionModel as a trait object because the current
+Rig CompletionModel API is not dyn-compatible.
+
+Type erasure remains at:
+
+Arc<dyn ModelPort>
+
+outside the adapter.
+
+No Rig generic/type may leak into agent-core, agent-harness, or agent-loop.
+
+1. Correct the CompletionError mapping.
+
+Use stable semantics:
+
+Provider response HTTP 4xx except 408/429
+→ ModelPortError::Rejected
+
+Provider response HTTP 408 or 429
+→ ModelPortError::Unavailable
+
+Provider response HTTP 5xx
+→ ModelPortError::Unavailable
+
+HttpError with no usable HTTP status
+→ ModelPortError::Unavailable
+
+UrlError
+RequestError
+JsonError
+ResponseError
+ProviderError without usable status
+ProviderResponse without usable status
+future/unknown non-exhaustive CompletionError
+→ ModelPortError::Failed
+
+Do not classify local URL parsing or request-construction failures as
+Rejected.
+
+Never expose:
+
+- CompletionError Display
+- CompletionError Debug
+- provider body
+- provider string
+- URL
+- credentials
+- request content
+
+through ModelPortError or AgentEvent.
+
+1. Keep request conversion explicit and loss-aware.
+
+Convert ordered provider-neutral ModelMessage values one-by-one.
+
+Map:
+
+System
+→ Rig Message::System
+
+User
+→ Rig Message::User text content
+
+Assistant
+→ Rig Message::Assistant text content
+
+Preserve exact message order.
+
+Reject an empty ModelRequest before invoking the Rig model.
+
+Do not normalize or reorder messages.
+
+Do not move system content into Rig's legacy preamble.
+
+Construct CompletionRequest directly and explicitly set every current
+0.41.0 field.
+
+For M3 the intended values are:
+
+model = None
+preamble = None
+chat_history = converted non-empty messages
+documents = []
+tools = []
+temperature = None
+max_tokens = None
+tool_choice = None
+additional_params = None
+output_schema = None
+record_telemetry_content = false
+
+Treat record_telemetry_content=false as a security invariant.
+
+Add a test proving it remains false.
+
+Document that direct struct construction is intentionally a Rig upgrade
+tripwire: if a later Rig release changes CompletionRequest fields, compilation
+should force explicit adapter review rather than silently accepting new
+behavior.
+
+1. Keep response conversion text-focused and atomic.
+
+Process Rig AssistantContent in source order.
+
+Map only supported textual content to:
+
+ModelOutputPart::Text
+
+Do not map:
+
+- reasoning
+- images
+- provider-native content
+- unknown future response content
+- Rig tool calls
+
+If ANY unsupported response item is present, fail the entire conversion with
+sanitized ModelPortError::Failed.
+
+Do not return partial text from a mixed supported/unsupported response.
+
+1. Tool-call mapping remains deferred.
+
+Even though agent-core currently has ModelOutputPart::ToolCall, do not invent a
+UUID or discard Rig/provider call correlation merely to fit it.
+
+No tools are supplied to Rig in M3.
+
+tools = []
+tool_choice = None
+
+Actual tool execution remains exclusively:
+
+LoopProgram
+→ LoopEffects
+→ ExecutionHarness
+→ ToolPort
+
+A future milestone will explicitly design provider-neutral model-proposed
+action/tool-call correlation.
+
+1. Usage mapping must follow Rig's documented zero-sentinel semantics.
+
+Only map:
+
+usage.input_tokens
+usage.output_tokens
+
+For each field:
+
+- nonzero → Some(value)
+- zero → None
+
+If both are None:
+
+- ModelResponse.token_usage = None
+
+Do not infer usage from:
+
+- total_tokens
+- cached_input_tokens
+- cache_creation_input_tokens
+- tool_use_prompt_tokens
+- reasoning_tokens
+
+Do not add these provider/Rig telemetry concepts to agent-core in M3.
+
+1. Keep raw Rig response data private.
+
+Do not expose or retain beyond conversion:
+
+- CompletionResponse.raw_response
+- CompletionResponse.message_id
+- provider response bodies
+- provider-specific metadata
+
+Do not add an accessor returning Rig response types.
+
+1. Sensitive Debug/logging.
+
+RigModelAdapter and fake/request-capture types containing model/request data
+must not derive Debug unless explicitly redacted.
+
+Do not emit request or response content through tracing.
+
+The fake CLI must not print captured Rig CompletionRequest.
+
+1. Cancellation and deadline authority remain in ExecutionHarness.
+
+RigModelAdapter performs one:
+
+model.completion(request).await
+
+per ModelPort::invoke.
+
+Do not add:
+
+- timeout
+- cancellation token
+- tokio::select!
+- retries
+- retry hooks
+
+inside the adapter.
+
+Document that dropping the completion future stops local awaiting but cannot
+prove remote provider work was cancelled.
+
+1. No hidden retry semantics in the fake.
+
+FakeRigModel executes exactly once per completion call.
+
+Future real provider implementations must undergo a separate retry/idempotency
+review in the provider/gateway milestone.
+
+1. Fake Rig model.
+
+Implement actual rig_core::CompletionModel for FakeRigModel behind test-support
+or tests.
+
+Support:
+
+- scripted text response
+- scripted Rig Usage
+- scripted CompletionError
+- request capture
+- invocation count
+- pending completion for cancellation/deadline integration tests
+
+The required streaming method may return a deterministic sanitized unsupported
+test error.
+
+Do not panic or use unreachable! for the streaming method.
+
+Do not create network clients.
+
+1. Dependency language and verification.
+
+agent-provider-rig itself should have no direct production Tokio dependency,
+but document that rig-core 0.41.0 has transitive Tokio/reqwest/runtime
+dependencies even with default features disabled.
+
+Do not claim the resulting dependency graph contains no HTTP/Tokio crates.
+
+The architectural requirement is that this transitive surface remains isolated
+behind agent-provider-rig and does not enter the direct dependency manifests of
+agent-core, agent-harness, or agent-loop.
+
+1. Add explicit architecture boundary checks.
+
+Verify production Rust sources under:
+
+crates/agent-core
+crates/agent-harness
+crates/agent-loop
+
+contain no imports/references to:
+
+- rig_core
+- rig::
+- rig_agent
+
+Also verify:
+
+cargo tree -p agent-core
+cargo tree -p agent-harness
+cargo tree -p agent-loop
+
+contain no Rig crates.
+
+cargo tree -i rig-core
+
+should show only approved paths through agent-provider-rig / CLI composition.
+
+1. Tests must include all proposed tests plus:
+
+- converted CompletionRequest.record_telemetry_content is always false
+- direct request mapping leaves tools empty and tool_choice unset
+- unsupported mixed Text + ToolCall/Reasoning/Image fails atomically
+- UrlError/RequestError do NOT become Rejected
+- HTTP status mapping distinguishes:
+  400-class rejection
+  408
+  429
+  500-class unavailable
+- no Rig error Display/Debug sentinel leaks through ModelPortError
+- no captured request/prompt/response sentinel leaks into AgentEvent
+- production core/harness/loop source contains no Rig reference
+
+1. Keep current M2 CLI architecture.
+
+The deterministic CLI demonstration must be:
+
+start_run
+→ LoopEngine
+→ Plan
+→ LoopEffects::invoke_model
+→ ExecutionHarness
+→ dyn ModelPort
+→ RigModelAdapter<FakeRigModel>
+→ rig_core::CompletionModel
+→ provider-neutral ModelResponse
+→ Act through existing ToolPort
+→ Complete
+
+No real network access.
+
+Print only safe metadata:
+
+- RunId
+- iteration/phase progression
+- final RunStatus
+- ModelCalls
+- ToolCalls
+- Iterations
+- audit_degraded
+- static adapter label if useful
+
+Never print model request/response contents.
+
+1. No production changes should be made to agent-core, agent-harness or
+agent-loop unless actual compilation reveals a genuine provider-neutral
+contract deficiency.
+
+If such a deficiency appears:
+
+- stop broad implementation
+- make the smallest possible provider-neutral change
+- explain it clearly in the final implementation report
+
+Do not modify core merely to match Rig convenience APIs.
+
+1. After implementation run:
+
+cargo fmt --all -- --check
+
+cargo clippy \
+  --workspace \
+  --all-targets \
+  --all-features \
+  -- -D warnings
+
+cargo test --workspace --all-features
+
+cargo tree --workspace
+cargo tree -p agent-core
+cargo tree -p agent-harness
+cargo tree -p agent-loop
+cargo tree -p agent-provider-rig
+cargo tree -i rig-core
+
+git diff --check
+
+Also run an architecture source scan proving no Rig reference exists in
+production sources of agent-core, agent-harness or agent-loop.
+
+Do not commit automatically.
+
+At the end report:
+
+1. final changed tree
+2. exact Rig dependency/version/features
+3. RigModelAdapter implementation shape
+4. request conversion
+5. response conversion
+6. usage conversion
+7. unsupported-content handling
+8. error mapping
+9. security/telemetry behavior
+10. cancellation/retry behavior
+11. fake Rig model
+12. integration with ExecutionHarness
+13. integration with LoopEngine
+14. dependency trees
+15. architecture boundary scans
+16. tests and quality gates
+17. deliberate deferrals
+18. deviations and justification

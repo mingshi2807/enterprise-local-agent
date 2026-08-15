@@ -1,19 +1,20 @@
 use std::{sync::Arc, time::Duration};
 
 use agent_core::{
-    AgentEventKind, CapabilityKind, LoopEventKind, LoopFailureKind, ModelMessage, ModelOutputPart,
-    ModelRequest, ModelResponse, ModelRole, RunBudget, RunId, SessionId, ToolCall, ToolCallId,
-    ToolDefinition, ToolInput, ToolName, ToolOutput, ToolResult, ToolSchema,
+    AgentEventKind, CapabilityKind, LoopEventKind, LoopFailureKind, ModelMessage, ModelRequest,
+    ModelResponse, ModelRole, RunBudget, RunId, SessionId, ToolCall, ToolCallId, ToolDefinition,
+    ToolInput, ToolName, ToolOutput, ToolResult, ToolSchema,
 };
 use agent_harness::{
     AuditFailurePolicy, AuditSink, ExecutionHarness, HarnessConfig, M0ReadOnlyPolicy, ModelPort,
     RunContext, ToolPort, ToolRegistry,
-    testing::{FakeModelPort, FakeToolPort, InMemoryAuditSink},
+    testing::{FakeToolPort, InMemoryAuditSink},
 };
 use agent_loop::{
     LoopEffects, LoopEngine, LoopFuture, LoopProgram, LoopStepError, ReflectDecision,
     VerificationResult,
 };
+use agent_provider_rig::{RigModelAdapter, testing::FakeRigModel};
 use anyhow::Context;
 
 struct DemoWorkingState {
@@ -117,15 +118,12 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("failed to initialize tracing: {error}"))?;
 
     let budget = RunBudget::new(1, 1, 1, Duration::from_secs(5))
-        .context("failed to construct the M2 run budget")?;
+        .context("failed to construct the M3 run budget")?;
     let mut context = RunContext::new(RunId::new(), SessionId::new(), budget);
 
-    let model = Arc::new(FakeModelPort::scripted(vec![Ok(ModelResponse::new(
-        vec![ModelOutputPart::Text(
-            "deterministic fake response".to_owned(),
-        )],
-        None,
-    ))]));
+    let model = Arc::new(RigModelAdapter::new(FakeRigModel::scripted_text(
+        "deterministic fake response",
+    )));
     let model_port: Arc<dyn ModelPort> = model;
 
     let tool_call_id = ToolCallId::new();
@@ -180,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     println!("RunId: {}", context.run_id());
+    println!("Model adapter: RigModelAdapter<FakeRigModel>");
     println!("Run start");
     for event in audit.events() {
         let AgentEventKind::Loop { event } = event.kind() else {
