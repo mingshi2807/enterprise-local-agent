@@ -107,3 +107,18 @@ Recommended sequence:
 
 Do not use graph lookup mechanically for trivial local edits where the
 target file and symbol are already known.
+
+## Architectural memory
+
+For changes affecting cross-crate interfaces, execution authority,
+model/tool ports, policy, approval, containment, budgets or the loop engine:
+
+1. Read the Codebase Memory ADR before proposing the change.
+2. Use graph evidence to identify affected boundaries.
+3. Explicitly state whether the proposal preserves or changes an existing
+   architectural invariant.
+4. Do not silently violate an ADR invariant.
+5. If an invariant must change, treat that as an architectural decision and
+   update the ADR deliberately after implementation/review.
+6. Run detect_changes after implementation and compare the actual blast
+   radius with the proposed architecture.
