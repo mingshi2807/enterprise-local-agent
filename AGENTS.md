@@ -89,3 +89,21 @@ official or installed APIs when external-library behavior is uncertain.
 
 After changes, report modified files, important decisions, verification
 evidence, deferred work, and deviations. Do not commit unless explicitly asked.
+
+## Codebase discovery
+
+For architecture-sensitive tasks, unfamiliar subsystems, cross-crate
+changes, refactoring, or impact analysis, prefer codebase-memory-mcp
+before broad grep/read exploration.
+
+Recommended sequence:
+
+1. get_architecture for unfamiliar system-level tasks.
+2. search_graph to locate symbols and relationships.
+3. trace_path for caller/callee analysis.
+4. get_code_snippet or direct file reads only after structural discovery.
+5. detect_changes after non-trivial implementation changes.
+6. consult relevant ADRs before altering architectural boundaries.
+
+Do not use graph lookup mechanically for trivial local edits where the
+target file and symbol are already known.
