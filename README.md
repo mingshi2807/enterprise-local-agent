@@ -27,9 +27,34 @@ records, and a separately registered `ContainedToolPort`. ExternalWrite and
 Privileged actions remain non-executable even if a custom policy is faulty.
 
 `ContainedToolPort` is a trusted adapter contract; implementing the Rust trait
-does not prove operating-system isolation. This milestone ships no production
-containment adapter. Production LocalWrite therefore remains disabled until a
-separately supplied and reviewed containment implementation exists.
+alone does not prove operating-system isolation. M6.1 adds the Linux-only
+`LinuxWorkspaceWriteTool` for one operation: `workspace_write_file`. It is
+usable only after its production capability probe verifies a non-setuid
+bubblewrap with FD binding, the self-contained worker, namespaces, no external
+network, descriptor/environment isolation, and mandatory `openat2()` flags.
+Unsupported hosts fail closed before tool registration.
+
+The worker receives only a final basename and at most 4 KiB of approved UTF-8
+content. The trusted parent resolves the target parent beneath the configured
+workspace FD and exposes only that directory as writable. Landlock is reported
+and used as optional defense-in-depth; it is not part of the mandatory M6.1
+availability decision.
+
+The first certified target requires an immutable, statically linked Linux ELF
+worker (executable with no write bits, for example mode `0555`). Run the
+fail-closed host certification explicitly after installing bubblewrap 0.11.2+
+and that worker artifact:
+
+```bash
+ELA_M6_1_BWRAP=/usr/bin/bwrap \
+ELA_M6_1_WORKER=/absolute/path/enterprise-local-write-worker \
+CARGO_HOME=/tmp/enterprise-local-agent-cargo \
+cargo test -p agent-containment-linux --all-features \
+  --test linux_certification -- --ignored --exact production_linux_security_certification
+```
+
+The probe tests required behavior and does not trust the version string alone.
+Invoking certification on an unsupported host is a test failure, not a skip.
 
 ## Deterministic demonstration
 
@@ -82,7 +107,8 @@ The live mode uses the same M5 `ActionProgram`; only model composition changes.
 If a live model returns prose, code fences, malformed JSON, or an invalid
 action, preparation fails closed without extraction heuristics.
 
-M4-M6 intentionally do not provide readiness calls, retries, proxy settings,
+M4-M6.1 intentionally do not provide readiness calls, retries, proxy settings,
 custom certificate authorities, mTLS, streaming, structured output, model
 fallback, native provider tool calls, provider-driven tool execution,
-enterprise identity, durable approval, or a production sandbox.
+enterprise identity, or durable approval. M6.1 containment is Linux-only and
+limited to `workspace_write_file`; it is not an arbitrary tool sandbox.

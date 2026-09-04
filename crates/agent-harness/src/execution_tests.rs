@@ -437,6 +437,7 @@ async fn contained_local_write_approval_grant_executes_once() {
     assert_eq!(approval.invocation_count(), 1);
     assert_eq!(contained.preview_count(), 1);
     assert_eq!(contained.invocation_count(), 1);
+    assert_eq!(contained.termination_count(), 0);
     assert_eq!(run.usage().approval_requests(), 1);
     assert_eq!(run.usage().tool_calls(), 1);
     let event_kinds: Vec<_> = audit
@@ -1072,6 +1073,7 @@ async fn pending_contained_execution_cancellation_emits_terminal_tool_event() {
     assert_eq!(run.status(), &RunStatus::Finished(RunOutcome::Cancelled));
     assert_eq!(approval.invocation_count(), 1);
     assert_eq!(contained.invocation_count(), 1);
+    assert_eq!(contained.termination_count(), 1);
     assert_eq!(run.usage().approval_requests(), 1);
     assert_eq!(run.usage().tool_calls(), 1);
     assert_started_tool_has_terminal_event(&audit.events());
@@ -1113,6 +1115,7 @@ async fn pending_contained_execution_deadline_emits_terminal_tool_event() {
     );
     assert_eq!(approval.invocation_count(), 1);
     assert_eq!(contained.invocation_count(), 1);
+    assert_eq!(contained.termination_count(), 1);
     assert_eq!(run.usage().approval_requests(), 1);
     assert_eq!(run.usage().tool_calls(), 1);
     assert_started_tool_has_terminal_event(&audit.events());

@@ -1,0 +1,28 @@
+[package]
+name = "agent-containment-linux"
+version.workspace = true
+edition.workspace = true
+
+[features]
+certification-hooks = []
+
+[dependencies]
+agent-core.workspace = true
+agent-harness.workspace = true
+landlock.workspace = true
+libc.workspace = true
+rustix = { workspace = true, features = ["fs", "process", "stdio", "system", "thread"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "sync"] }
+
+[dev-dependencies]
+agent-harness = { workspace = true, features = ["test-support"] }
+agent-loop.workspace = true
+tempfile = "3.0"
+tokio = { workspace = true, features = ["test-util"] }
+
+[[bin]]
+name = "enterprise-local-write-worker"
+path = "src/bin/enterprise-local-write-worker.rs"

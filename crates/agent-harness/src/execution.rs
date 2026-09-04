@@ -816,17 +816,28 @@ impl ExecutionHarness {
     ) -> Result<ToolResult, HarnessError> {
         let cancellation = context.cancellation()?;
         let deadline = context.deadline_at()?;
+        let mut invocation = port
+            .start_contained(call)
+            .map_err(HarnessError::ContainmentPort)?;
         tokio::select! {
             biased;
             () = cancellation.cancelled() => {
+                invocation
+                    .terminate_and_reap()
+                    .await
+                    .map_err(HarnessError::ContainmentPort)?;
                 self.terminalize_safety(context, SafetyTerminalization::Cancelled).await;
                 Err(HarnessError::Cancelled { stage: ExecutionStage::Invocation })
             }
             () = sleep_until(deadline) => {
+                invocation
+                    .terminate_and_reap()
+                    .await
+                    .map_err(HarnessError::ContainmentPort)?;
                 self.terminalize_safety(context, SafetyTerminalization::DeadlineExceeded).await;
                 Err(HarnessError::DeadlineExceeded { stage: ExecutionStage::Invocation })
             }
-            result = port.invoke_contained(call) => {
+            result = invocation.wait() => {
                 result.map_err(HarnessError::ContainmentPort)
             },
         }

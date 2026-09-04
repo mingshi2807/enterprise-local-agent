@@ -26,7 +26,7 @@ pub use approval::{
     ApprovalPreviewError, ApprovalRequest,
 };
 pub use audit::{AuditFailurePolicy, HarnessConfig, HarnessConfigError};
-pub use containment::{ContainedToolPort, ContainmentPortError};
+pub use containment::{ContainedInvocation, ContainedToolPort, ContainmentPortError};
 pub use context::{BudgetExceeded, RunCancellationHandle, RunContext, RunContextError};
 pub use error::{AuditPhase, ExecutionStage, HarnessError, HarnessOperation, OperationEffect};
 pub use execution::ExecutionHarness;

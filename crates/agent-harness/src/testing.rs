@@ -291,6 +291,7 @@ pub struct FakeContainedToolPort {
     behaviors: Mutex<VecDeque<ContainedBehavior>>,
     invocations: AtomicUsize,
     previews: AtomicUsize,
+    terminations: Arc<AtomicUsize>,
 }
 
 impl FakeContainedToolPort {
@@ -345,6 +346,7 @@ impl FakeContainedToolPort {
             behaviors: Mutex::new(behaviors),
             invocations: AtomicUsize::new(0),
             previews: AtomicUsize::new(0),
+            terminations: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -356,6 +358,46 @@ impl FakeContainedToolPort {
     #[must_use]
     pub fn preview_count(&self) -> usize {
         self.previews.load(Ordering::SeqCst)
+    }
+
+    #[must_use]
+    pub fn termination_count(&self) -> usize {
+        self.terminations.load(Ordering::SeqCst)
+    }
+}
+
+struct FakeContainedInvocation {
+    call: Option<ToolCall>,
+    behavior: Option<ContainedBehavior>,
+    terminations: Arc<AtomicUsize>,
+}
+
+impl crate::ContainedInvocation for FakeContainedInvocation {
+    fn wait<'a>(&'a mut self) -> PortFuture<'a, Result<ToolResult, ContainmentPortError>> {
+        let call = self.call.take();
+        let behavior = self.behavior.take();
+        Box::pin(async move {
+            let call = call.ok_or(ContainmentPortError::Infrastructure)?;
+            match behavior.ok_or(ContainmentPortError::Infrastructure)? {
+                ContainedBehavior::Immediate(result) => result,
+                ContainedBehavior::EchoSuccess(output) => Ok(ToolResult::Succeeded {
+                    call_id: call.id(),
+                    output,
+                }),
+                ContainedBehavior::EchoDomainFailure(failure) => Ok(ToolResult::DomainFailure {
+                    call_id: call.id(),
+                    failure,
+                }),
+                ContainedBehavior::Pending => pending().await,
+            }
+        })
+    }
+
+    fn terminate_and_reap<'a>(&'a mut self) -> PortFuture<'a, Result<(), ContainmentPortError>> {
+        self.terminations.fetch_add(1, Ordering::SeqCst);
+        self.call.take();
+        self.behavior.take();
+        Box::pin(std::future::ready(Ok(())))
     }
 }
 
@@ -376,10 +418,10 @@ impl ContainedToolPort for FakeContainedToolPort {
             .map_err(ContainmentPortError::from)
     }
 
-    fn invoke_contained<'a>(
-        &'a self,
+    fn start_contained(
+        &self,
         call: ToolCall,
-    ) -> PortFuture<'a, Result<ToolResult, ContainmentPortError>> {
+    ) -> Result<Box<dyn crate::ContainedInvocation>, ContainmentPortError> {
         self.invocations.fetch_add(1, Ordering::SeqCst);
         let behavior =
             lock_recover(&self.behaviors)
@@ -387,20 +429,11 @@ impl ContainedToolPort for FakeContainedToolPort {
                 .unwrap_or(ContainedBehavior::Immediate(Err(
                     ContainmentPortError::Unavailable,
                 )));
-        Box::pin(async move {
-            match behavior {
-                ContainedBehavior::Immediate(result) => result,
-                ContainedBehavior::EchoSuccess(output) => Ok(ToolResult::Succeeded {
-                    call_id: call.id(),
-                    output,
-                }),
-                ContainedBehavior::EchoDomainFailure(failure) => Ok(ToolResult::DomainFailure {
-                    call_id: call.id(),
-                    failure,
-                }),
-                ContainedBehavior::Pending => pending().await,
-            }
-        })
+        Ok(Box::new(FakeContainedInvocation {
+            call: Some(call),
+            behavior: Some(behavior),
+            terminations: Arc::clone(&self.terminations),
+        }))
     }
 }
 

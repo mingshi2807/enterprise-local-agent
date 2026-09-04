@@ -924,3 +924,57 @@ M5 is fully implemented and verified. No commit was created, and the external li
 
   18. Deviations: No scope deviations. Constructor compatibility was preserved with additive builders. The existing metadata-only ToolInvocationAdapterFailed event is reused for runtime interruption after a
      contained invocation starts rather than introducing another lifecycle vocabulary.
+
+# M6.1 implementation reporting
+
+Implemented M6.1 without committing.
+
+  Architecture
+
+- Added agent-containment-linux (crates/agent-containment-linux/src/lib.rs:109), depending inward on agent-harness and agent-core.
+- Only workspace_write_file(relative_path, content) exists.
+- Preserved ValidatedAction → Policy → Approval → Required Audit → ContainedToolPort.
+- No changes to ActionDigest, approval binding, policy ceiling, budgets, LoopEngine, or provider/Rig behavior.
+
+  Containment
+
+- Bubblewrap policy: user/PID/network/IPC/UTS namespaces, dropped capabilities, no_new_privs, new session, empty environment, private /tmp, private /proc, empty /dev, and no host root/home mounts.
+- Only the safely resolved target parent is writable; the immutable worker FD is read-only. See crates/agent-containment-linux/src/launcher.rs:23.
+- FD inheritance uses child-only close_range(CLOSE_RANGE_CLOEXEC), dup2, and fcntl. Parent CLOEXEC state is never globally changed. Unsafe code is isolated in crates/agent-containment-linux/src/fd_map.rs:24.
+- Relative parents use descriptor-relative openat2() with BENEATH | NO_SYMLINKS | NO_MAGICLINKS | NO_XDEV; there is no weaker fallback. See crates/agent-containment-linux/src/path.rs:7.
+- Landlock is probed and reported as fully enforced, partially enforced, or unavailable. It remains optional defense-in-depth.
+
+  Worker And Lifecycle
+
+- Added a bounded, versioned, one-request/one-response worker protocol. Content is limited to 4 KiB and total frames to 8 KiB.
+- The worker receives only ToolCallId, final basename, and approved content. It writes a mode-0600 temporary file, fsyncs, atomically renames, and fsyncs the parent where supported. See crates/agent-
+    containment-linux/src/bin/enterprise-local-write-worker.rs:221.
+
+- Preview contains operation, relative target, and byte count. Content is absent from preview and audit.
+- Added provider-neutral ContainedInvocation lifecycle ownership. Cancellation/deadline explicitly calls and awaits terminate_and_reap; it does not rely on kill_on_drop. See crates/agent-harness/src/
+    containment.rs:22 and crates/agent-harness/src/execution.rs:811.
+
+- Certification hooks verify Bubblewrap, worker, and descendant PIDs disappear. There is no rollback claim after rename.
+
+  Verification
+
+- cargo fmt --all -- --check: passed.
+- Strict workspace Clippy with all targets/features: passed.
+- Workspace tests with all features: 174 tests plus 4 doc tests passed; certification is separately invoked.
+- Both existing CLI smoke paths passed.
+- Cargo dependency trees and Codebase Memory architecture/coverage checks passed with no recorded indexing gaps.
+- Certification includes governed M5→M6 create/replace, ToolCallId preservation, payload-free audit, traversal/absolute/symlink escape rejection, functional NO_XDEV, network/environment/home/SSH/FD probes, and
+    process-tree reaping. See crates/agent-containment-linux/tests/linux_certification.rs:16.
+
+  Host Result
+  The explicit certification failed closed as required:
+
+  mandatory M6.1 host capabilities must be available: Bubblewrap
+
+  This host has Bubblewrap 0.6.1, owned by nobody:nogroup. Therefore LocalWrite cannot be constructed or registered. The installed Rust target also produces a dynamic development worker, which the production
+  probe rejects; certification requires an immutable static ELF worker.
+
+  Consequently, the requested production guarantee cannot yet be claimed on this host. After installing a trusted non-setuid Bubblewrap 0.11.2+ and immutable static worker, rerun the command documented in
+  README.md:43. Landlock status and real process-tree certification remain unobserved here because Bubblewrap failed first.
+
+  Systemd sandboxing is documented as deployment defense-in-depth, not a replacement for per-call FD binding and openat2(). No files were committed.

@@ -4,7 +4,7 @@ tags: ["enterprise-local-agent", "milestones", "roadmap", "index"]
 created: 2026-08-15T13:34:09.996Z
 updated: 2026-08-15T14:49:30Z
 sources: ["docs/proposal/proposal.md", "docs/reports/reports_impl.md", "git history"]
-links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md"]
+links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m6-1-production-linux-localwrite-containment.md"]
 category: reference
 confidence: high
 schemaVersion: 1
@@ -22,7 +22,8 @@ This is the durable navigation page for architectural milestones. Git and the im
 | M3 Rig Model Adapter | Completed | `m3-rig-model-adapter` | [[m3-rig-model-adapter]] |
 | M4 OpenAI-Compatible Gateway | Completed | `m4-openai-compatible-gateway` | [[m4-openai-compatible-gateway]] |
 | M5 Typed Action Planning | Completed | `m5-typed-action-planning` | [[m5-typed-action-planning]] |
-| M6 Approval and Containment Boundary | Implemented and verified, uncommitted | — | [[m6-approval-and-containment-boundary]] |
+| M6 Approval and Containment Boundary | Implemented and verified, uncommitted | `m6-approval-containment` | [[m6-approval-and-containment-boundary]] |
+| M6.1 Production Linux LocalWrite Containment | Implemented; host certification pending prerequisites | `m6.1-linux-localwrite-containment` | [[m6-1-production-linux-localwrite-containment]] |
 
 ## Stable architecture
 
