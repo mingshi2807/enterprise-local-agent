@@ -1189,3 +1189,16 @@ M7  durable events + recovery
 13. Deviations. OCPP uses its structured API instead of its weaker Markdown MCP contract. The standards adapter uses a small fixed-operation MCP client rather than a generic MCP SDK. Backend adapters are not
      wired into the default CLI because endpoints/process configuration are deployment-specific. Standards subprocess cancellation kills the directly owned process; descendant process-tree containment is not
      claimed. Pre-existing untracked .codebase-memory/ and knowledge/ directories remain excluded from the M8 deliverable.
+
+The architecture is now:
+
+M0   Contracts
+M1   Execution Harness
+M2   Deterministic Loop
+M3   Rig Adapter
+M4   Real Model Transport
+M5   Typed Actions
+M6   Approval
+M6.1 Linux Containment
+M7   Durable Recovery
+M8   Enterprise Knowledge Integration
