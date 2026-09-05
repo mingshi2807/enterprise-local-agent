@@ -978,3 +978,65 @@ Implemented M6.1 without committing.
   README.md:43. Landlock status and real process-tree certification remain unobserved here because Bubblewrap failed first.
 
   Systemd sandboxing is documented as deployment defense-in-depth, not a replacement for per-call FD binding and openat2(). No files were committed.
+
+  # M6.1 Certification Linux env
+
+  • Exact Commit Tested
+  3081a0e279bcdf144b69583cd0d4f07cf71280f0
+  Parent M6.1 commit: 2541e5cf5cf99297d710ae7a189b263ba368286e
+
+  Environment / Kernel / Bwrap / Worker
+
+  - Linux 6.8.0-138-generic, x86_64.
+  - Debian 12 certification container, worker launched as UID/GID 1000.
+  - Bubblewrap 0.11.2, upstream commit 1b80120ef26a28e065e67f89bfef873f13bdd317.
+  - Built with support_setuid=false.
+  - /opt/m6/bin/bwrap: root-owned regular file, mode 0755, SHA-256 52461e70c92497b12ebe637eceb0a651b9cc66251a39f45afb755f84dd815581.
+  - Worker built with Rust 1.97.1 for x86_64-unknown-linux-musl.
+  - Static PIE, no ELF interpreter, root-owned mode 0555, read-only mounted.
+  - Worker SHA-256: 6c1e6a98155908d0019804422a447259110517071e5830fb8340b4cd6719fa4f.
+
+  Capability Probe
+  PASS. Functional --bind-fd/--ro-bind-fd launch succeeded. Probe reported:
+
+  - namespaces isolated
+  - network isolated
+  - environment isolated
+  - descriptors isolated
+  - home/SSH isolated
+  - capabilities dropped
+  - no_new_privileges active
+  - required openat2() behavior enforced
+  - worker startup and bounded protocol successful
+
+  Certification Results
+  PASS: production_linux_security_certification completed with 1 passed; 0 failed; 0 ignored.
+
+  Verified create/replace, absolute and traversal rejection, symlink and submount escape prevention, writable-boundary containment, network/environment/FD isolation, ToolCallId preservation, and the full
+  M5→M6→M6.1 governed LocalWrite flow.
+
+  Normal gates:
+
+  - cargo fmt --all -- --check: PASS
+  - strict workspace Clippy: PASS
+  - workspace tests: PASS, 175 unit/integration tests and 4 doc tests
+  - Codebase Memory blast-radius check found impact confined to agent-containment-linux; no M6 governance crate was modified.
+
+  Process-Reaping Evidence
+  PASS. The certification hook observed outer Bubblewrap plus at least three descendants, recorded PID/start-time identities, invoked the same terminate_and_reap implementation used by cancellation/deadline
+  paths, and verified every identity disappeared before returning. No surviving worker or descendant was detected.
+
+  Landlock Status
+  Kernel Landlock ABI: 4.
+  Status: partially_enforced, optional defense-in-depth only.
+
+  Remaining Limitations
+
+  - Native /usr/bin/bwrap remains version 0.6.1 and is not M6.1-capable.
+  - Certification used an isolated privileged Docker test environment over the host kernel; bare-metal deployment must install the certified Bubblewrap/worker artifacts and rerun the fail-closed suite.
+  - The certified worker includes the trusted certification-hooks feature; it is not reachable through model actions.
+  - Scope remains one ≤4 KiB workspace_write_file operation with existing parents.
+  - No rollback guarantee exists after atomic rename.
+
+  Final Recommendation
+  PASS for the m6.1-linux-localwrite-containment production tag pointing exactly to 3081a0e279bcdf144b69583cd0d4f07cf71280f0, scoped to environments that pass the same mandatory probe and certification suite.
