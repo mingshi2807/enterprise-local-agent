@@ -1040,3 +1040,39 @@ Implemented M6.1 without committing.
 
   Final Recommendation
   PASS for the m6.1-linux-localwrite-containment production tag pointing exactly to 3081a0e279bcdf144b69583cd0d4f07cf71280f0, scoped to environments that pass the same mandatory probe and certification suite.
+
+The enterprise write path is now genuinely closed:
+
+                     UNTRUSTED
+                         │
+                     LLM/Qwen
+                         │
+                         ▼
+                  ActionProposal
+                         │
+                    validation
+                         │
+                         ▼
+                  ValidatedAction
+                         │
+                    policy ceiling
+                         │
+                         ▼
+                     Approval
+                         │
+                 exact-action digest
+                         │
+                         ▼
+                  required audit
+                         │
+                         ▼
+               ContainedToolPort
+                         │
+                         ▼
+                 Linux namespaces
+                  + openat2()
+                         │
+                         ▼
+               workspace mutation
+
+That is substantially stronger than most agent runtimes that simply expose a shell or filesystem tool to an LLM.
