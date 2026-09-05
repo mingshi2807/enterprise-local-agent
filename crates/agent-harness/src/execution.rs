@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::SystemTime};
 
 use agent_core::{
     ActionDigest, ActionProposalId, AgentEvent, AgentEventKind, ApprovalFailureKind,
-    ApprovalRequestId, BudgetDimension, CapabilityKind, ContainmentFailureKind, LoopEventKind,
-    LoopProgressEvent, ModelCallId, ModelRequest, ModelResponse, RunFailureKind, RunOutcome,
-    RunStatus, ToolCall, ToolCallId, ToolName, ToolResult,
+    ApprovalRequestId, BudgetDimension, CapabilityKind, ContainmentFailureKind, EventSequence,
+    LoopEventKind, LoopProgressEvent, ModelCallId, ModelRequest, ModelResponse, RunFailureKind,
+    RunOutcome, RunStatus, ToolCall, ToolCallId, ToolName, ToolResult,
 };
 use tokio::time::{Instant, sleep_until, timeout};
 
@@ -13,7 +13,8 @@ use crate::{
     ApprovalPortError, ApprovalRequest, AuditFailurePolicy, AuditPhase, AuditPortError, AuditSink,
     AuthorizationDecision, CapabilityPolicy, CompletedModelInvocation, ContainedToolPort,
     ExecutionStage, HarnessConfig, HarnessError, HarnessOperation, ModelPort, OperationEffect,
-    PolicyDenial, PolicyDenialReason, RunCancellationHandle, RunContext, ToolPort, ToolRegistry,
+    PersistencePortError, PolicyDenial, PolicyDenialReason, RecoveryDisposition,
+    RunCancellationHandle, RunContext, RunKey, RunPersistencePort, ToolPort, ToolRegistry,
     ValidatedAction,
     action::{ActionValidator, TextActionDecoder},
     registry::ExecutionBinding,
@@ -36,6 +37,7 @@ pub struct ExecutionHarness {
     capability_policy: Arc<dyn CapabilityPolicy>,
     approval: Option<Arc<dyn ApprovalPort>>,
     audit: Arc<dyn AuditSink>,
+    persistence: Option<Arc<dyn RunPersistencePort>>,
     config: HarnessConfig,
 }
 
@@ -53,6 +55,7 @@ impl ExecutionHarness {
             capability_policy,
             approval: None,
             audit,
+            persistence: None,
             config,
         }
     }
@@ -63,14 +66,48 @@ impl ExecutionHarness {
         self
     }
 
+    #[must_use]
+    pub fn with_persistence_port(mut self, persistence: Arc<dyn RunPersistencePort>) -> Self {
+        self.persistence = Some(persistence);
+        self
+    }
+
+    pub async fn recover_run(&self, key: RunKey) -> Result<RecoveryDisposition, HarnessError> {
+        let persistence = self
+            .persistence
+            .as_ref()
+            .ok_or(HarnessError::Persistence(PersistencePortError::Unavailable))?;
+        let loaded = persistence
+            .load_run(key)
+            .await
+            .map_err(HarnessError::Persistence)?;
+        let now_wall = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| HarnessError::Recovery(crate::RecoveryError::ClockAmbiguous))?
+            .as_millis()
+            .try_into()
+            .map_err(|_| HarnessError::Recovery(crate::RecoveryError::ClockAmbiguous))?;
+        crate::recovery::recover_loaded_run(loaded, now_wall, Instant::now())
+            .map_err(HarnessError::Recovery)
+    }
+
     pub async fn start_run(
         &self,
         context: &mut RunContext,
     ) -> Result<RunCancellationHandle, HarnessError> {
         self.require_status(context, HarnessOperation::StartRun, RequiredStatus::Pending)?;
 
-        let handle = context.commit_running(Instant::now())?;
-        let event = context.next_event(AgentEventKind::RunStarted)?;
+        if let Some(persistence) = &self.persistence {
+            persistence
+                .create_run(&context.run_record(), &context.durable_checkpoint())
+                .await
+                .map_err(HarnessError::Persistence)?;
+        }
+
+        let handle = context.commit_running(Instant::now(), SystemTime::now())?;
+        let event = context.next_event(AgentEventKind::RunStarted {
+            started_at_unix_millis: context.started_at_unix_millis()?,
+        })?;
         match self
             .audit_lifecycle(context, &event, HarnessOperation::StartRun)
             .await
@@ -1136,6 +1173,9 @@ impl ExecutionHarness {
         operation: HarnessOperation,
         required: RequiredStatus,
     ) -> Result<(), HarnessError> {
+        if context.persistence_failed() {
+            return Err(HarnessError::Persistence(PersistencePortError::Failed));
+        }
         let valid = matches!(
             (required, context.status()),
             (RequiredStatus::Pending, RunStatus::Pending)
@@ -1159,10 +1199,12 @@ impl ExecutionHarness {
         phase: AuditPhase,
         effect: OperationEffect,
     ) -> Result<(), HarnessError> {
+        self.persist_transition(context, event).await?;
         match self.audit_with_run_bounds(context, event).await {
             AuditOutcome::Recorded => Ok(()),
             AuditOutcome::Failed(kind) => {
                 self.apply_audit_failure(context, operation, phase, effect, kind)
+                    .await
             }
             AuditOutcome::Cancelled => {
                 self.terminalize_safety(context, SafetyTerminalization::Cancelled)
@@ -1189,10 +1231,11 @@ impl ExecutionHarness {
         phase: AuditPhase,
         effect: OperationEffect,
     ) -> Result<(), HarnessError> {
+        self.persist_transition(context, event).await?;
         match self.audit_with_run_bounds(context, event).await {
             AuditOutcome::Recorded => Ok(()),
             AuditOutcome::Failed(kind) => {
-                context.mark_audit_degraded();
+                self.record_audit_degraded(context).await?;
                 Err(HarnessError::Audit {
                     phase,
                     operation,
@@ -1249,26 +1292,33 @@ impl ExecutionHarness {
         event: &AgentEvent,
         operation: HarnessOperation,
     ) -> Result<(), HarnessError> {
+        self.persist_transition(context, event).await?;
         match timeout(self.config.audit_timeout(), self.audit.record(event)).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(kind)) => self.apply_audit_failure(
-                context,
-                operation,
-                AuditPhase::Lifecycle,
-                OperationEffect::StateCommitted,
-                kind,
-            ),
-            Err(_) => self.apply_audit_failure(
-                context,
-                operation,
-                AuditPhase::Lifecycle,
-                OperationEffect::StateCommitted,
-                AuditPortError::TimedOut,
-            ),
+            Ok(Err(kind)) => {
+                self.apply_audit_failure(
+                    context,
+                    operation,
+                    AuditPhase::Lifecycle,
+                    OperationEffect::StateCommitted,
+                    kind,
+                )
+                .await
+            }
+            Err(_) => {
+                self.apply_audit_failure(
+                    context,
+                    operation,
+                    AuditPhase::Lifecycle,
+                    OperationEffect::StateCommitted,
+                    AuditPortError::TimedOut,
+                )
+                .await
+            }
         }
     }
 
-    fn apply_audit_failure(
+    async fn apply_audit_failure(
         &self,
         context: &mut RunContext,
         operation: HarnessOperation,
@@ -1284,10 +1334,16 @@ impl ExecutionHarness {
                 kind,
             }),
             AuditFailurePolicy::FailOpen => {
-                context.mark_audit_degraded();
+                self.record_audit_degraded(context).await?;
                 Ok(())
             }
         }
+    }
+
+    async fn record_audit_degraded(&self, context: &mut RunContext) -> Result<(), HarnessError> {
+        let event = context.next_event(AgentEventKind::AuditDegraded)?;
+        context.mark_audit_degraded();
+        self.persist_transition(context, &event).await
     }
 
     async fn terminalize_safety(&self, context: &mut RunContext, terminal: SafetyTerminalization) {
@@ -1335,12 +1391,45 @@ impl ExecutionHarness {
     }
 
     async fn audit_terminal_best_effort(&self, context: &mut RunContext, event: &AgentEvent) {
+        if self.persist_transition(context, event).await.is_err() {
+            context.mark_persistence_failed();
+            return;
+        }
         if !matches!(
             timeout(self.config.audit_timeout(), self.audit.record(event)).await,
             Ok(Ok(()))
         ) {
             context.mark_audit_degraded();
         }
+    }
+
+    async fn persist_transition(
+        &self,
+        context: &mut RunContext,
+        event: &AgentEvent,
+    ) -> Result<(), HarnessError> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        let expected_sequence = match event.sequence().get() {
+            0 => None,
+            value => Some(EventSequence::new(value - 1)),
+        };
+        let checkpoint = context
+            .durable_state()
+            .is_quiescent()
+            .then(|| context.durable_checkpoint());
+        let transition = crate::AppendTransition::new(
+            RunKey::new(context.run_id(), context.session_id()),
+            expected_sequence,
+            event.clone(),
+            checkpoint,
+        );
+        if let Err(error) = persistence.append_transition(&transition).await {
+            context.mark_persistence_failed();
+            return Err(HarnessError::Persistence(error));
+        }
+        Ok(())
     }
 }
 

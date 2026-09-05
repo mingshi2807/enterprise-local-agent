@@ -5,7 +5,7 @@ use agent_harness::{ExecutionHarness, HarnessError, RunContext};
 
 use crate::{
     LoopEffects, LoopError, LoopProgram, LoopState, LoopStepError, LoopTransitionError,
-    ReflectDecision, VerificationResult,
+    ReflectDecision, RestartableLoopProgram, VerificationResult,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -67,6 +67,43 @@ impl LoopEngine {
     ) -> Result<LoopRunSummary, LoopError> {
         self.run_with_state(harness, context, program, working_state, LoopState::new())
             .await
+    }
+
+    /// Continues only a run classified as resumable from metadata-only state.
+    pub async fn resume<P: RestartableLoopProgram>(
+        &self,
+        harness: &ExecutionHarness,
+        recovered: agent_harness::RecoveredRun,
+        program: &mut P,
+    ) -> Result<(LoopRunSummary, P::WorkingState), LoopError> {
+        let (mut context, durable, contract) = recovered.into_parts();
+        if contract
+            != (agent_harness::RecoveryContract::Restartable {
+                version: P::RECOVERY_VERSION,
+            })
+        {
+            return Err(LoopError::RecoveryContractMismatch);
+        }
+        let loop_state = match durable.loop_position() {
+            agent_harness::DurableLoopPosition::NotStarted => LoopState::new(),
+            agent_harness::DurableLoopPosition::Ready => {
+                LoopState::recovered_ready(durable.completed_iterations())
+            }
+            _ => return Err(LoopError::RecoveryStateInvalid),
+        };
+        let mut working_state = program
+            .restore_working_state(&durable)
+            .map_err(|_| LoopError::RecoveryStateInvalid)?;
+        let summary = self
+            .run_with_state(
+                harness,
+                &mut context,
+                program,
+                &mut working_state,
+                loop_state,
+            )
+            .await?;
+        Ok((summary, working_state))
     }
 
     pub(crate) async fn run_with_state<P: LoopProgram>(
@@ -637,6 +674,8 @@ fn failure_kind_for_harness_error(error: &HarnessError) -> RunFailureKind {
         | HarnessError::BudgetExceeded(_)
         | HarnessError::Cancelled { .. }
         | HarnessError::DeadlineExceeded { .. }
+        | HarnessError::Persistence(_)
+        | HarnessError::Recovery(_)
         | HarnessError::Context(_) => RunFailureKind::Internal,
     }
 }

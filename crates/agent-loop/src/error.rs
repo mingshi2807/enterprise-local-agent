@@ -34,4 +34,8 @@ pub enum LoopError {
     RunTerminal { status: RunStatus },
     #[error("the harness committed a terminal state but finalization reported an error")]
     Finalization { source: HarnessError },
+    #[error("the recovered loop program contract does not match durable state")]
+    RecoveryContractMismatch,
+    #[error("durable loop state is not at a restartable boundary")]
+    RecoveryStateInvalid,
 }

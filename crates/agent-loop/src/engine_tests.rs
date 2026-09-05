@@ -8,13 +8,15 @@ use agent_core::{
 };
 use agent_harness::{
     AuditFailurePolicy, AuditSink, ExecutionHarness, HarnessConfig, HarnessError, M0ReadOnlyPolicy,
-    ModelPort, ModelPortError, RunCancellationHandle, RunContext, ToolPort, ToolRegistry,
+    ModelPort, ModelPortError, RecoveryDisposition, RunCancellationHandle, RunContext, ToolPort,
+    ToolRegistry,
     testing::{FailingAuditSink, FakeModelPort, FakeToolPort, InMemoryAuditSink},
 };
 
 use crate::{
     LoopEffects, LoopEngine, LoopError, LoopFuture, LoopPosition, LoopProgram, LoopState,
-    LoopStepError, ReflectDecision, TerminalLoopDecision, VerificationResult,
+    LoopStepError, ReflectDecision, RestartableLoopProgram, TerminalLoopDecision,
+    VerificationResult,
 };
 
 const PROMPT_SENTINEL: &str = "m2-raw-prompt-sentinel";
@@ -200,6 +202,17 @@ impl LoopProgram for ScriptedProgram {
     }
 }
 
+impl RestartableLoopProgram for ScriptedProgram {
+    const RECOVERY_VERSION: u32 = 1;
+
+    fn restore_working_state(
+        &mut self,
+        _state: &agent_harness::DurableRunState,
+    ) -> Result<Self::WorkingState, LoopStepError> {
+        Ok(WorkingState::new())
+    }
+}
+
 struct RuntimeFixture {
     harness: ExecutionHarness,
     model: Arc<FakeModelPort>,
@@ -279,6 +292,58 @@ fn expected_iteration() -> Vec<LoopPhase> {
         LoopPhase::Verify,
         LoopPhase::Reflect,
     ]
+}
+
+#[tokio::test]
+async fn explicitly_restartable_program_resumes_without_replaying_effects() {
+    let directory = tempfile::tempdir().expect("temporary directory must be created");
+    let store = Arc::new(
+        agent_persistence_sqlite::SqliteRunPersistence::open(directory.path().join("runs.sqlite3"))
+            .await
+            .expect("store must open"),
+    );
+    let RuntimeFixture {
+        harness,
+        model,
+        tool,
+        call,
+    } = runtime(
+        1,
+        1,
+        1,
+        Duration::from_secs(30),
+        Vec::new(),
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+    );
+    let harness = harness.with_persistence_port(store);
+    let budget = RunBudget::new(1, 1, 1, Duration::from_secs(30)).expect("budget must be valid");
+    let run_id = RunId::new();
+    let session_id = SessionId::new();
+    let mut context = RunContext::new_restartable(
+        run_id,
+        session_id,
+        budget,
+        ScriptedProgram::RECOVERY_VERSION,
+    );
+    let key = agent_harness::RunKey::new(run_id, session_id);
+    harness
+        .start_run(&mut context)
+        .await
+        .expect("run must start");
+    let recovered = harness.recover_run(key).await.expect("run must recover");
+    let RecoveryDisposition::Resumable(recovered) = recovered else {
+        panic!("initial restart boundary must be resumable");
+    };
+    let mut program = ScriptedProgram::new(call, vec![ReflectDecision::Complete]).without_effects();
+    let (summary, _) = LoopEngine::new()
+        .resume(&harness, *recovered, &mut program)
+        .await
+        .expect("restartable program must resume");
+
+    assert_eq!(summary.terminal_decision(), TerminalLoopDecision::Complete);
+    assert_eq!(model.invocation_count(), 0);
+    assert_eq!(tool.invocation_count(), 0);
 }
 
 #[tokio::test]
@@ -642,10 +707,10 @@ async fn fail_closed_iteration_audit_consumes_slot_and_observe_never_runs() {
         .run(&fixture.harness, &mut run, &mut program, &mut working_state)
         .await;
 
-    assert!(matches!(
-        result,
-        Err(LoopError::Harness(HarnessError::Audit { .. }))
-    ));
+    assert!(
+        matches!(result, Err(LoopError::Harness(HarnessError::Audit { .. }))),
+        "unexpected result: {result:?}"
+    );
     assert!(program.phases.is_empty());
     assert_eq!(run.usage().iterations(), 1);
     assert_eq!(
@@ -840,12 +905,15 @@ async fn non_terminal_model_error_remains_typed_and_fails_without_retry() {
         .run(&fixture.harness, &mut run, &mut program, &mut working_state)
         .await;
 
-    assert!(matches!(
-        result,
-        Err(LoopError::Harness(HarnessError::ModelPort(
-            ModelPortError::Rejected
-        )))
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(LoopError::Harness(HarnessError::ModelPort(
+                ModelPortError::Rejected
+            )))
+        ),
+        "unexpected result: {result:?}"
+    );
     assert_eq!(fixture.model.invocation_count(), 1);
     assert_eq!(fixture.tool.invocation_count(), 0);
     assert_eq!(
@@ -1012,7 +1080,7 @@ async fn loop_and_event_ordering_is_deterministic_and_payload_free() {
             .collect::<Vec<_>>(),
         (0..events.len() as u64).collect::<Vec<_>>()
     );
-    assert!(events.iter().all(|event| event.schema_version().get() == 5));
+    assert!(events.iter().all(|event| event.schema_version().get() == 6));
     assert!(matches!(
         events.last().map(agent_core::AgentEvent::kind),
         Some(AgentEventKind::RunFinished {

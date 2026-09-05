@@ -208,8 +208,9 @@ async fn main() -> anyhow::Result<()> {
                     println!("Loop failed in iteration {iteration}: {kind:?}");
                 }
             },
-            AgentEventKind::RunStarted
+            AgentEventKind::RunStarted { .. }
             | AgentEventKind::RunFinished { .. }
+            | AgentEventKind::AuditDegraded
             | AgentEventKind::ModelInvocationCompleted { .. }
             | AgentEventKind::ModelInvocationFailed { .. }
             | AgentEventKind::ActionValidated { .. }

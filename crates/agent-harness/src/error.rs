@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::{
     ApprovalPortError, AuditPortError, BudgetExceeded, ContainmentPortError, ModelPortError,
-    PolicyDenial, RunContextError, ToolPortError,
+    PersistencePortError, PolicyDenial, RecoveryError, RunContextError, ToolPortError,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +91,10 @@ pub enum HarnessError {
     ModelPort(ModelPortError),
     #[error("tool adapter failed")]
     ToolPort(ToolPortError),
+    #[error("durable run persistence failed")]
+    Persistence(PersistencePortError),
+    #[error("durable run recovery failed")]
+    Recovery(RecoveryError),
     #[error(transparent)]
     Context(#[from] RunContextError),
 }

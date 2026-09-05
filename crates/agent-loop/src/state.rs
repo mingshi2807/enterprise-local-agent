@@ -29,6 +29,14 @@ impl LoopState {
         }
     }
 
+    pub(crate) const fn recovered_ready(completed_iterations: u32) -> Self {
+        Self {
+            current_iteration: None,
+            completed_iterations,
+            position: LoopPosition::Ready,
+        }
+    }
+
     #[must_use]
     pub const fn current_iteration(&self) -> Option<u32> {
         self.current_iteration

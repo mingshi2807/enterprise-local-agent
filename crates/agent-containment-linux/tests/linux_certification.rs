@@ -8,7 +8,8 @@ use agent_core::{
 };
 use agent_harness::{
     AuditFailurePolicy, AuditSink, ContainedToolPort, ExecutionHarness, HarnessConfig,
-    M6ApprovalPolicy, ModelPort, RunContext, ToolRegistry,
+    M6ApprovalPolicy, ManualReconciliationReason, ModelPort, RecoveryDisposition, RunContext,
+    RunKey, ToolRegistry,
     testing::{FakeModelPort, InMemoryAuditSink, ScriptedApprovalPort},
 };
 use serde_json::json;
@@ -38,6 +39,7 @@ async fn production_linux_security_certification() {
         .await
         .expect("mandatory M6.1 host capabilities must be available"),
     );
+    eprintln!("M6.1 capabilities: {:?}", tool.capabilities());
     for unsafe_path in ["/tmp/outside", "../outside", "a/../../outside"] {
         let preview = tool.approval_preview(&agent_core::ToolInput::new(json!({
             "relative_path": unsafe_path,
@@ -67,6 +69,14 @@ async fn production_linux_security_certification() {
         .expect("production contained tool must register");
     let audit = Arc::new(InMemoryAuditSink::new());
     let audit_port: Arc<dyn AuditSink> = audit.clone();
+    let persistence_directory = tempfile::tempdir().expect("persistence directory must exist");
+    let persistence = Arc::new(
+        agent_persistence_sqlite::SqliteRunPersistence::open(
+            persistence_directory.path().join("runs.sqlite3"),
+        )
+        .await
+        .expect("SQLite persistence must open"),
+    );
     let harness = ExecutionHarness::new(
         model,
         registry,
@@ -79,11 +89,14 @@ async fn production_linux_security_certification() {
         Ok(true),
         Ok(true),
         Ok(true),
-    ])));
+    ])))
+    .with_persistence_port(persistence);
     let budget = RunBudget::new(3, 3, 1, Duration::from_secs(20))
         .expect("budget must be valid")
         .with_max_approval_requests(3);
-    let mut context = RunContext::new(RunId::new(), SessionId::new(), budget);
+    let run_id = RunId::new();
+    let session_id = SessionId::new();
+    let mut context = RunContext::new(run_id, session_id, budget);
     harness
         .start_run(&mut context)
         .await
@@ -125,6 +138,24 @@ async fn production_linux_security_certification() {
     assert!(!serialized.contains("first"));
     assert!(!serialized.contains("second"));
     assert!(!serialized.contains("blocked"));
+
+    let recovered = harness
+        .recover_run(RunKey::new(run_id, session_id))
+        .await
+        .expect("governed LocalWrite journal must recover");
+    assert!(matches!(
+        recovered,
+        RecoveryDisposition::ManualReconciliationRequired {
+            reason: ManualReconciliationReason::NonRestartableProgram,
+            ..
+        }
+    ));
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("reports/result.txt"))
+            .expect("recovery must not alter the target"),
+        "second"
+    );
+    assert!(!outside.path().join("outside.txt").exists());
 }
 
 async fn execute_action(harness: &ExecutionHarness, context: &mut RunContext) -> ToolResult {

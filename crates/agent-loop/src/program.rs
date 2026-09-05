@@ -70,6 +70,19 @@ pub trait LoopProgram: Send {
     ) -> LoopFuture<'a, Result<ReflectDecision, LoopStepError>>;
 }
 
+/// A loop program that can rebuild its working state from metadata-only M7 state.
+///
+/// Implementations are trusted to perform no I/O or external effects while
+/// restoring. Arbitrary `LoopProgram::WorkingState` is never deserialized.
+pub trait RestartableLoopProgram: LoopProgram {
+    const RECOVERY_VERSION: u32;
+
+    fn restore_working_state(
+        &mut self,
+        state: &agent_harness::DurableRunState,
+    ) -> Result<Self::WorkingState, LoopStepError>;
+}
+
 /// The only enterprise effect surface supplied to a loop program.
 ///
 /// `LoopProgram` is trusted in-process application logic. This type preserves

@@ -7,8 +7,10 @@ mod containment;
 mod context;
 mod error;
 mod execution;
+mod persistence;
 mod policy;
 mod ports;
+mod recovery;
 mod registry;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -30,12 +32,21 @@ pub use containment::{ContainedInvocation, ContainedToolPort, ContainmentPortErr
 pub use context::{BudgetExceeded, RunCancellationHandle, RunContext, RunContextError};
 pub use error::{AuditPhase, ExecutionStage, HarnessError, HarnessOperation, OperationEffect};
 pub use execution::ExecutionHarness;
+pub use persistence::{
+    AppendTransition, CURRENT_CHECKPOINT_SCHEMA_VERSION, CURRENT_STORE_SCHEMA_VERSION,
+    DurableCheckpoint, LoadedRun, PersistenceFuture, PersistencePortError, RecoveryContract,
+    RunKey, RunPersistencePort, RunRecord,
+};
 pub use policy::{
     AuthorizationDecision, CapabilityPolicy, M0ReadOnlyPolicy, M6ApprovalPolicy, PolicyDenial,
     PolicyDenialReason,
 };
 pub use ports::{
     AuditPortError, AuditSink, ModelPort, ModelPortError, PortFuture, ToolPort, ToolPortError,
+};
+pub use recovery::{
+    ContinuationState, DurableLoopPosition, DurableRunState, ManualReconciliationReason,
+    PendingEffect, RecoveredRun, RecoveryDisposition, RecoveryError, TransitionError,
 };
 pub use registry::{ToolBinding, ToolRegistry, ToolRegistryError};
 

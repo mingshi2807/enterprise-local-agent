@@ -15,6 +15,9 @@ pub struct RunContext {
     next_event_sequence: EventSequence,
     runtime: Option<RunRuntime>,
     audit_degraded: bool,
+    recovery_contract: crate::RecoveryContract,
+    durable_state: crate::DurableRunState,
+    persistence_failed: bool,
 }
 
 struct RunRuntime {
@@ -25,7 +28,43 @@ struct RunRuntime {
 
 impl RunContext {
     #[must_use]
-    pub const fn new(run_id: RunId, session_id: SessionId, budget: RunBudget) -> Self {
+    pub fn new(run_id: RunId, session_id: SessionId, budget: RunBudget) -> Self {
+        Self::new_with_recovery_contract(
+            run_id,
+            session_id,
+            budget,
+            crate::RecoveryContract::NonRestartable,
+        )
+    }
+
+    #[must_use]
+    pub fn new_restartable(
+        run_id: RunId,
+        session_id: SessionId,
+        budget: RunBudget,
+        recovery_version: u32,
+    ) -> Self {
+        Self::new_with_recovery_contract(
+            run_id,
+            session_id,
+            budget,
+            crate::RecoveryContract::Restartable {
+                version: recovery_version,
+            },
+        )
+    }
+
+    fn new_with_recovery_contract(
+        run_id: RunId,
+        session_id: SessionId,
+        budget: RunBudget,
+        recovery_contract: crate::RecoveryContract,
+    ) -> Self {
+        let record = crate::RunRecord::new(
+            crate::RunKey::new(run_id, session_id),
+            budget,
+            recovery_contract,
+        );
         Self {
             run_id,
             session_id,
@@ -35,6 +74,9 @@ impl RunContext {
             next_event_sequence: EventSequence::new(0),
             runtime: None,
             audit_degraded: false,
+            recovery_contract,
+            durable_state: crate::DurableRunState::initial(&record),
+            persistence_failed: false,
         }
     }
 
@@ -71,12 +113,19 @@ impl RunContext {
     pub(crate) fn commit_running(
         &mut self,
         started_at: Instant,
+        wall_clock: SystemTime,
     ) -> Result<RunCancellationHandle, RunContextError> {
         let status = self.status.clone().start()?;
         let deadline_at = started_at
             .checked_add(self.budget.max_elapsed())
             .ok_or(RunContextError::DeadlineOutOfRange)?;
         let cancellation = CancellationToken::new();
+        let started_at_unix_millis = wall_clock
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| RunContextError::WallClockOutOfRange)?
+            .as_millis()
+            .try_into()
+            .map_err(|_| RunContextError::WallClockOutOfRange)?;
         let handle = RunCancellationHandle {
             token: cancellation.clone(),
         };
@@ -87,12 +136,19 @@ impl RunContext {
             deadline_at,
             cancellation,
         });
+        self.durable_state.set_started_at(started_at_unix_millis);
         Ok(handle)
     }
 
     pub(crate) fn commit_finished(&mut self, outcome: RunOutcome) -> Result<(), RunContextError> {
         self.status = self.status.clone().finish(outcome)?;
         Ok(())
+    }
+
+    pub(crate) fn started_at_unix_millis(&self) -> Result<u64, RunContextError> {
+        self.durable_state
+            .started_at_unix_millis()
+            .ok_or(RunContextError::WallClockOutOfRange)
     }
 
     pub(crate) fn reserve_model_call(&mut self) -> Result<(), BudgetExceeded> {
@@ -175,6 +231,7 @@ impl RunContext {
 
     pub(crate) fn mark_audit_degraded(&mut self) {
         self.audit_degraded = true;
+        self.durable_state.set_audit_degraded();
     }
 
     pub(crate) fn next_event(
@@ -185,7 +242,74 @@ impl RunContext {
         self.next_event_sequence = sequence
             .checked_next()
             .ok_or(RunContextError::EventSequenceExhausted)?;
-        Ok(AgentEvent::new(self.run_id, sequence, kind))
+        let event = AgentEvent::new(self.run_id, sequence, kind);
+        self.durable_state
+            .apply(&event)
+            .map_err(|_| RunContextError::DurableTransitionInvalid)?;
+        Ok(event)
+    }
+
+    pub(crate) fn run_record(&self) -> crate::RunRecord {
+        crate::RunRecord::new(
+            crate::RunKey::new(self.run_id, self.session_id),
+            self.budget,
+            self.recovery_contract,
+        )
+    }
+
+    pub(crate) fn durable_checkpoint(&self) -> crate::DurableCheckpoint {
+        crate::DurableCheckpoint::new(self.durable_state.clone())
+    }
+
+    pub(crate) const fn durable_state(&self) -> &crate::DurableRunState {
+        &self.durable_state
+    }
+
+    pub(crate) const fn persistence_failed(&self) -> bool {
+        self.persistence_failed
+    }
+
+    pub(crate) fn mark_persistence_failed(&mut self) {
+        self.persistence_failed = true;
+    }
+
+    pub(crate) fn from_recovery(
+        state: &crate::DurableRunState,
+        elapsed: Duration,
+        now: Instant,
+    ) -> Result<Self, RunContextError> {
+        let remaining = state
+            .budget()
+            .max_elapsed()
+            .checked_sub(elapsed)
+            .ok_or(RunContextError::DeadlineOutOfRange)?;
+        let deadline_at = now
+            .checked_add(remaining)
+            .ok_or(RunContextError::DeadlineOutOfRange)?;
+        let next_event_sequence = match state.last_sequence() {
+            Some(sequence) => sequence
+                .checked_next()
+                .ok_or(RunContextError::EventSequenceExhausted)?,
+            None => EventSequence::new(0),
+        };
+        let cancellation = CancellationToken::new();
+        Ok(Self {
+            run_id: state.key().run_id(),
+            session_id: state.key().session_id(),
+            budget: *state.budget(),
+            usage: state.usage(),
+            status: state.status().clone(),
+            next_event_sequence,
+            runtime: matches!(state.status(), RunStatus::Running).then_some(RunRuntime {
+                _started_at: now,
+                deadline_at,
+                cancellation,
+            }),
+            audit_degraded: state.audit_degraded(),
+            recovery_contract: crate::RecoveryContract::NonRestartable,
+            durable_state: state.clone(),
+            persistence_failed: false,
+        })
     }
 
     fn runtime(&self) -> Result<&RunRuntime, RunContextError> {
@@ -235,8 +359,13 @@ pub enum RunContextError {
     InvalidState(#[from] RunStateError),
     #[error("run deadline cannot be represented by the process-local monotonic clock")]
     DeadlineOutOfRange,
+    #[error("trusted wall clock cannot represent the run start")]
+    WallClockOutOfRange,
     #[error("run runtime state is unavailable")]
     RuntimeUnavailable,
     #[error("event sequence is exhausted")]
     EventSequenceExhausted,
+    #[error("durable runtime transition is invalid")]
+    DurableTransitionInvalid,
 }
+use std::time::{Duration, SystemTime, UNIX_EPOCH};

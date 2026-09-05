@@ -5,7 +5,7 @@ use crate::{
     ModelCallId, RunId, RunOutcome, TokenUsage, ToolCallId, ToolDomainFailureKind, ToolName,
 };
 
-pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(5);
+pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(6);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -90,10 +90,17 @@ impl AgentEvent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentEventKind {
-    RunStarted,
+    RunStarted {
+        started_at_unix_millis: u64,
+    },
     RunFinished {
         outcome: RunOutcome,
     },
+    /// The configured audit sink failed and fail-open execution was selected.
+    ///
+    /// The durable journal records this metadata even though the unavailable
+    /// audit sink cannot record it itself.
+    AuditDegraded,
     ModelInvocationStarted {
         model_call_id: ModelCallId,
         usage: u32,
@@ -204,11 +211,13 @@ mod tests {
         let event = AgentEvent::new(
             RunId::new(),
             EventSequence::new(7),
-            AgentEventKind::RunStarted,
+            AgentEventKind::RunStarted {
+                started_at_unix_millis: 1,
+            },
         );
 
         assert_eq!(event.schema_version(), CURRENT_EVENT_SCHEMA_VERSION);
-        assert_eq!(event.schema_version().get(), 5);
+        assert_eq!(event.schema_version().get(), 6);
         assert_eq!(event.sequence().get(), 7);
 
         let json = serde_json::to_string(&event).expect("event must serialize");

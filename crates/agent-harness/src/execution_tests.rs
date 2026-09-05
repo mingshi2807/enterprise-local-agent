@@ -9,16 +9,49 @@ use agent_core::{
 };
 
 use crate::{
-    ApprovalDecision, ApprovalPort, ApprovalPortError, AuditFailurePolicy, AuditPhase, AuditSink,
-    AuthorizationDecision, CapabilityPolicy, ContainedToolPort, ContainmentPortError,
-    ExecutionHarness, ExecutionStage, HarnessConfig, HarnessError, M0ReadOnlyPolicy,
-    M6ApprovalPolicy, ModelPort, ModelPortError, OperationEffect, PolicyDenial, PolicyDenialReason,
-    PortFuture, RunContext, ToolPort, ToolPortError, ToolRegistry,
+    AppendTransition, ApprovalDecision, ApprovalPort, ApprovalPortError, AuditFailurePolicy,
+    AuditPhase, AuditSink, AuthorizationDecision, CapabilityPolicy, ContainedToolPort,
+    ContainmentPortError, DurableCheckpoint, ExecutionHarness, ExecutionStage, HarnessConfig,
+    HarnessError, LoadedRun, M0ReadOnlyPolicy, M6ApprovalPolicy, ModelPort, ModelPortError,
+    OperationEffect, PersistenceFuture, PersistencePortError, PolicyDenial, PolicyDenialReason,
+    PortFuture, RunContext, RunPersistencePort, RunRecord, ToolPort, ToolPortError, ToolRegistry,
     testing::{
         FailingAuditSink, FakeContainedToolPort, FakeInvocation, FakeModelPort, FakeToolPort,
         InMemoryAuditSink, InvocationLog, PendingApprovalPort, ScriptedApprovalPort,
     },
 };
+
+struct RejectEffectStartPersistence;
+
+impl RunPersistencePort for RejectEffectStartPersistence {
+    fn create_run<'a>(
+        &'a self,
+        _record: &'a RunRecord,
+        _initial_checkpoint: &'a DurableCheckpoint,
+    ) -> PersistenceFuture<'a, Result<(), PersistencePortError>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn append_transition<'a>(
+        &'a self,
+        transition: &'a AppendTransition,
+    ) -> PersistenceFuture<'a, Result<(), PersistencePortError>> {
+        Box::pin(std::future::ready(
+            if transition.event().sequence().get() == 0 {
+                Ok(())
+            } else {
+                Err(PersistencePortError::Unavailable)
+            },
+        ))
+    }
+
+    fn load_run<'a>(
+        &'a self,
+        _key: crate::RunKey,
+    ) -> PersistenceFuture<'a, Result<LoadedRun, PersistencePortError>> {
+        Box::pin(std::future::ready(Err(PersistencePortError::Unavailable)))
+    }
+}
 
 fn budget(model_calls: u32, tool_calls: u32, elapsed: Duration) -> RunBudget {
     RunBudget::new(model_calls, tool_calls, 1, elapsed).expect("test budget must be valid")
@@ -125,6 +158,28 @@ fn harness(
         audit,
         config(policy),
     )
+}
+
+#[tokio::test]
+async fn durable_effect_start_failure_invokes_no_external_port() {
+    let model = Arc::new(FakeModelPort::scripted(vec![Ok(response("unused"))]));
+    let runtime = harness(
+        model.clone(),
+        Vec::new(),
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+    )
+    .with_persistence_port(Arc::new(RejectEffectStartPersistence));
+    let mut run = context(1, 0, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run must start");
+
+    assert!(matches!(
+        runtime
+            .invoke_model(&mut run, request("never dispatched"))
+            .await,
+        Err(HarnessError::Persistence(PersistencePortError::Unavailable))
+    ));
+    assert_eq!(model.invocation_count(), 0);
 }
 
 fn harness_with_registry(
@@ -1518,7 +1573,7 @@ async fn fail_open_pre_audit_invokes_adapter_and_marks_audit_degraded() {
             .iter()
             .map(|event| event.sequence().get())
             .collect::<Vec<_>>(),
-        vec![0, 2]
+        vec![0, 3]
     );
 }
 

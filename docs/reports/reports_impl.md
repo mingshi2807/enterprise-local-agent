@@ -1076,3 +1076,62 @@ The enterprise write path is now genuinely closed:
                workspace mutation
 
 That is substantially stronger than most agent runtimes that simply expose a shell or filesystem tool to an LLM.
+
+Retain enterprise-local-agent-m6-cert:2541e5c as the reusable certification environment.
+It occupies about 1.35 GB and contains Bubblewrap 0.11.2 plus the musl build toolchain.
+The commit-specific worker should still be rebuilt for each certification run.
+
+# M7 implementation reporting
+
+1. Changed tree: Added crates/agent-persistence-sqlite; added crates/agent-harness/src/persistence.rs:210 and crates/agent-harness/src/recovery.rs:516; extended harness, loop, event schema, CLI matching, and
+     M6.1 certification tests. docs/reports/reports_impl.md and .codebase-memory/ were pre-existing and untouched. No commit created.
+
+2. Persistence port: ExecutionHarness optionally owns Arc<dyn RunPersistencePort>, exposing create_run, append_transition, and load_run. DTOs contain provider-neutral metadata only.
+3. SQLite schema: Append-only events, one runs record, and one replaceable checkpoints record. Event update/delete triggers enforce append-only behavior. Runs store session identity, expected sequence, and
+     terminal state.
+
+4. Checkpoint model: Stores run/session identity, budget and usage, status, audit degradation, trusted wall-clock start, sequence, SHA-256 event-chain digest, loop position, iteration counters, continuation
+     class, and unresolved-effect metadata. Runtime ports, payloads, approvals, ValidatedAction, futures, and tokens are excluded.
+
+5. Shared reducer: DurableRunState::apply drives both live event emission and recovery replay. Recovery verifies the entire checkpoint against deterministic prefix replay before replaying its tail.
+6. Recovery dispositions: Completed, TerminalFailure, Resumable, or ManualReconciliationRequired. Clock rollback fails closed; elapsed budget is reconstructed conservatively into a fresh process-local
+     RunContext.
+
+7. Durable-before-effect: Model, approval, tool, and contained LocalWrite start events are persisted before required audit and dispatch. A persistence failure blocks dispatch; the dedicated test verifies zero
+     model-port invocations.
+
+8. Unresolved effects: Any model, approval, or tool start without a trustworthy terminal event requires manual reconciliation. LocalWrite is never retried automatically.
+9. Restartable contract: RestartableLoopProgram (crates/agent-loop/src/program.rs:77) requires an explicit version and deterministic metadata-only state reconstruction. Arbitrary LoopProgram::WorkingState is
+     never guessed or deserialized.
+
+10. Transaction guarantees: SQLite uses BEGIN IMMEDIATE, rollback journal, synchronous=FULL, sequence CAS, event append, optional checkpoint, and terminal update in one transaction. Blocking SQLite work uses
+     spawn_blocking behind one per-adapter semaphore permit.
+
+11. Audit interaction: Persistence remains separate from the M6 audit sink. There is no cross-system atomicity claim. Crash windows between durable start, audit, and dispatch recover conservatively.
+12. Tests and crash injection: 189 workspace tests and 4 doctests passed. Coverage includes full/tail replay, identity/version/corruption failures, budgets, audit degradation, terminal restoration, every loop
+     phase, unresolved effects, pure replay, restartable continuation, and transaction rollback injection. The explicit production Linux M6.1 certification also passed, including process-tree reaping and
+     governed LocalWrite recovery without replay.
+
+13. Dependencies: Added rusqlite 0.40.2 with bundled SQLite for deterministic deployment and ABI independence. No distributed persistence framework was introduced. Dependency tree confirms agent-persistence-
+     sqlite -> agent-harness -> agent-core.
+
+14. Guarantees/non-guarantees: Guarantees metadata-only deterministic recovery classification and no replay-driven external invocation. No exactly-once claim, generic working-state recovery, multi-process/
+     distributed coordination, audit/database atomicity, or malicious-database tamper resistance is claimed. SHA-256 checks detect corruption but are not authentication.
+
+15. Deviations: AgentEvent schema advanced from 5 to 6 because replay requires safe RunStarted wall-clock metadata and durable AuditDegraded. M6 governance, approval binding, ActionDigest, budgets,
+     containment, LoopEngine authority, and provider/Rig boundaries remain unchanged. Linux regression used Bubblewrap 0.11.2 on kernel 6.8 with a mode-0555 static PIE worker; Landlock reported
+     PartiallyEnforced.
+
+Verification passed: formatting, strict Clippy, workspace tests, SQLite crash injection, dependency/graph checks, git diff --check, and mandatory Linux certification.
+
+The runtime is now:
+
+M0  contracts
+M1  execution harness
+M2  deterministic loop
+M3  Rig adapter
+M4  real model transport
+M5  typed actions
+M6  approval governance
+M6.1 Linux containment
+M7  durable events + recovery

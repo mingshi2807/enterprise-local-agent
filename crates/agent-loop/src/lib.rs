@@ -21,7 +21,10 @@ mod state;
 
 pub use engine::{LoopEngine, LoopRunSummary, TerminalLoopDecision};
 pub use error::{LoopError, LoopStepError, LoopTransitionError};
-pub use program::{LoopEffects, LoopFuture, LoopProgram, ReflectDecision, VerificationResult};
+pub use program::{
+    LoopEffects, LoopFuture, LoopProgram, ReflectDecision, RestartableLoopProgram,
+    VerificationResult,
+};
 pub use state::{LoopPosition, LoopState, LoopTerminal};
 
 #[cfg(test)]
