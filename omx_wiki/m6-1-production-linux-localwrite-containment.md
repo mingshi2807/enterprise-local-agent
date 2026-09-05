@@ -3,7 +3,7 @@ title: "M6.1 Production Linux LocalWrite Containment"
 tags: ["m6.1", "linux", "bubblewrap", "openat2", "local-write"]
 created: 2026-09-04
 updated: 2026-09-04
-links: ["enterprise-local-agent-milestone-index.md", "m6-approval-and-containment-boundary.md"]
+links: ["enterprise-local-agent-milestone-index.md", "m6-approval-and-containment-boundary.md", "m7-durable-event-persistence-and-recovery.md"]
 category: architecture
 confidence: high
 schemaVersion: 1

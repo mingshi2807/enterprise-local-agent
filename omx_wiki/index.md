@@ -1,6 +1,6 @@
 # Wiki Index
 
-> 8 pages | Last updated: 2026-08-15T15:04:21.299Z
+> 10 pages | Last updated: 2026-09-05T12:08:40Z
 
 ## architecture
 
@@ -11,6 +11,8 @@
 - [M4 OpenAI Compatible Gateway](m4-openai-compatible-gateway.md) — # M4 OpenAI-Compatible Gateway
 - [M5 Typed Action Planning](m5-typed-action-planning.md) — # M5 Typed Action Planning
 - [M6 Approval and Containment Boundary](m6-approval-and-containment-boundary.md) — # M6 Approval and Containment Boundary
+- [M6.1 Production Linux LocalWrite Containment](m6-1-production-linux-localwrite-containment.md) — # M6.1 Production Linux LocalWrite Containment
+- [M7 Durable Event Persistence and Recovery](m7-durable-event-persistence-and-recovery.md) — # M7 Durable Event Persistence and Recovery
 
 ## reference
 
