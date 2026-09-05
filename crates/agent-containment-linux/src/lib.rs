@@ -28,7 +28,7 @@ use serde_json::json;
 use thiserror::Error;
 use tokio::process::Command;
 
-use crate::launcher::SpawnedWorker;
+use crate::launcher::{SpawnedWorker, probe_lifecycle_support};
 use crate::path::{InputError, parse_input, resolve_parent};
 use crate::protocol::{
     LandlockState, NamespaceIds, PROTOCOL_VERSION, WorkerErrorCode, WorkerRequest, WorkerResponse,
@@ -116,6 +116,7 @@ impl LinuxWorkspaceWriteTool {
         let worker =
             open_worker(&config.worker_path).map_err(|_| LinuxContainmentUnavailable::Worker)?;
         verify_self_contained(&worker).map_err(|_| LinuxContainmentUnavailable::Worker)?;
+        probe_lifecycle_support().map_err(|_| LinuxContainmentUnavailable::Probe)?;
 
         let definition =
             workspace_write_definition().map_err(|_| LinuxContainmentUnavailable::Worker)?;
@@ -144,33 +145,45 @@ impl LinuxWorkspaceWriteTool {
     #[cfg(feature = "certification-hooks")]
     pub async fn certify_process_reaping(&self) -> Result<(), LinuxContainmentUnavailable> {
         certify_no_xdev()?;
-        const REPORT: &str = ".ela-m6-1-certification-pids";
+        const READY: &str = ".ela-m6-1-certification-ready";
         let request = WorkerRequest::CertificationHold {
             version: PROTOCOL_VERSION,
         };
         let mut process =
             SpawnedWorker::spawn(&self.bwrap_path, &self.workspace, &self.worker, &request)
                 .map_err(|_| LinuxContainmentUnavailable::Probe)?;
+        process
+            .send_request()
+            .await
+            .map_err(|_| LinuxContainmentUnavailable::Probe)?;
         let bwrap_pid = process.pid().ok_or(LinuxContainmentUnavailable::Probe)?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        let process_pids = loop {
-            if let Some(pids) = read_certification_pids(&self.workspace, REPORT) {
-                break pids;
+        let mut marker_seen = false;
+        let descendants = loop {
+            marker_seen |= certification_marker_exists(&self.workspace, READY);
+            if let Some(descendants) = process_descendants(bwrap_pid)
+                && marker_seen
+                && descendants.len() >= 3
+            {
+                break descendants;
             }
             if tokio::time::Instant::now() >= deadline {
                 let _ = process.terminate_and_reap().await;
+                remove_certification_marker(&self.workspace, READY);
                 return Err(LinuxContainmentUnavailable::Probe);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
+        let bwrap = process_identity(bwrap_pid).ok_or(LinuxContainmentUnavailable::Probe)?;
         process
             .terminate_and_reap()
             .await
             .map_err(|_| LinuxContainmentUnavailable::Probe)?;
-        let _ = rustix::fs::unlinkat(self.workspace.as_fd(), REPORT, rustix::fs::AtFlags::empty());
-        let all_pids = [bwrap_pid, process_pids.0, process_pids.1];
+        remove_certification_marker(&self.workspace, READY);
+        let mut processes = descendants;
+        processes.push(bwrap);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while all_pids.iter().copied().any(process_exists) {
+        while processes.iter().copied().any(process_identity_exists) {
             if tokio::time::Instant::now() >= deadline {
                 return Err(LinuxContainmentUnavailable::Probe);
             }
@@ -422,6 +435,9 @@ fn open_trusted_directory(path: &Path) -> Result<OwnedFd, rustix::io::Errno> {
 }
 
 fn open_worker(path: &Path) -> std::io::Result<OwnedFd> {
+    if !path.is_absolute() {
+        return Err(std::io::Error::other("worker path is not absolute"));
+    }
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
@@ -430,6 +446,7 @@ fn open_worker(path: &Path) -> std::io::Result<OwnedFd> {
     if !metadata.is_file()
         || metadata.permissions().mode() & 0o111 == 0
         || metadata.permissions().mode() & 0o222 != 0
+        || metadata.mode() & (libc::S_ISUID | libc::S_ISGID) != 0
     {
         return Err(std::io::Error::other("worker is not executable"));
     }
@@ -548,24 +565,61 @@ fn host_namespace_ids() -> std::io::Result<NamespaceIds> {
 }
 
 #[cfg(feature = "certification-hooks")]
-fn read_certification_pids(workspace: &OwnedFd, name: &str) -> Option<(u32, u32)> {
-    let fd = rustix::fs::openat2(
+#[derive(Clone, Copy)]
+struct ProcessIdentity {
+    pid: u32,
+    start_time: u64,
+}
+
+#[cfg(feature = "certification-hooks")]
+fn process_descendants(root: u32) -> Option<Vec<ProcessIdentity>> {
+    let mut pending = vec![root];
+    let mut descendants = Vec::new();
+    for _ in 0..32 {
+        let Some(pid) = pending.pop() else {
+            return Some(descendants);
+        };
+        let children = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).ok()?;
+        for child in children.split_whitespace() {
+            let child = child.parse().ok()?;
+            if descendants.iter().any(|identity| identity.pid == child) {
+                continue;
+            }
+            descendants.push(process_identity(child)?);
+            pending.push(child);
+        }
+    }
+    None
+}
+
+#[cfg(feature = "certification-hooks")]
+fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat.rsplit_once(") ")?.1;
+    let start_time = fields.split_whitespace().nth(19)?.parse().ok()?;
+    Some(ProcessIdentity { pid, start_time })
+}
+
+#[cfg(feature = "certification-hooks")]
+fn process_identity_exists(expected: ProcessIdentity) -> bool {
+    process_identity(expected.pid).is_some_and(|current| current.start_time == expected.start_time)
+}
+
+#[cfg(feature = "certification-hooks")]
+fn certification_marker_exists(workspace: &OwnedFd, name: &str) -> bool {
+    rustix::fs::openat2(
         workspace.as_fd(),
         name,
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::empty(),
         crate::path::resolve_flags(),
     )
-    .ok()?;
-    let mut report = String::new();
-    File::from(fd).read_to_string(&mut report).ok()?;
-    let mut pids = report.split_whitespace();
-    Some((pids.next()?.parse().ok()?, pids.next()?.parse().ok()?))
+    .is_ok()
 }
 
 #[cfg(feature = "certification-hooks")]
-fn process_exists(pid: u32) -> bool {
-    std::path::Path::new("/proc").join(pid.to_string()).exists()
+fn remove_certification_marker(workspace: &OwnedFd, name: &str) {
+    let _ = rustix::fs::unlinkat(workspace.as_fd(), name, rustix::fs::AtFlags::empty());
 }
 
 #[cfg(test)]
@@ -599,6 +653,26 @@ mod tests {
         registry
             .register_contained(port)
             .expect("M5 must accept the bounded production schema");
+    }
+
+    #[test]
+    fn worker_trust_checks_reject_relative_writable_and_setid_artifacts() {
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let worker = directory.path().join("worker");
+        std::fs::write(&worker, b"worker").expect("worker fixture must be written");
+
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o555))
+            .expect("worker mode must be set");
+        assert!(open_worker(&worker).is_ok());
+        assert!(open_worker(Path::new("relative-worker")).is_err());
+
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755))
+            .expect("worker mode must be set");
+        assert!(open_worker(&worker).is_err());
+
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o4555))
+            .expect("worker mode must be set");
+        assert!(open_worker(&worker).is_err());
     }
 
     struct TestPreviewTool {

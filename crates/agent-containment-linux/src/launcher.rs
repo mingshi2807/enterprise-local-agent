@@ -1,7 +1,9 @@
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::process::Stdio;
+use std::time::Duration;
 
+use rustix::process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
@@ -11,6 +13,7 @@ use crate::protocol::{
 };
 
 const MAX_STDERR_BYTES: usize = 4 * 1024;
+const TERMINATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) struct SpawnedWorker {
     child: Option<Child>,
@@ -142,19 +145,32 @@ impl SpawnedWorker {
         decode_response(&output)
     }
 
+    #[cfg(feature = "certification-hooks")]
+    pub(crate) async fn send_request(&mut self) -> io::Result<()> {
+        let mut stdin = self.stdin.take().ok_or_else(pipe_error)?;
+        let request = std::mem::take(&mut self.request);
+        stdin.write_all(&request).await?;
+        stdin.shutdown().await
+    }
+
     pub(crate) async fn terminate_and_reap(&mut self) -> io::Result<()> {
         self.stdin.take();
         self.stdout.take();
         self.stderr.take();
         if let Some(mut child) = self.child.take() {
-            let signal_result = child.start_kill();
-            let wait_result = child.wait().await;
-            if let Err(error) = signal_result
-                && error.kind() != io::ErrorKind::InvalidInput
-            {
-                return Err(error);
-            }
-            wait_result?;
+            let signal_result = signal_sandbox_tree(&mut child);
+            let wait_result = match tokio::time::timeout(TERMINATION_TIMEOUT, child.wait()).await {
+                Ok(result) => result.map(|_| ()),
+                Err(_) => {
+                    let fallback = signal_child(&mut child);
+                    let wait = tokio::time::timeout(TERMINATION_TIMEOUT, child.wait())
+                        .await
+                        .map_err(|_| io::Error::other("contained process did not terminate"))?
+                        .map(|_| ());
+                    fallback.and(wait)
+                }
+            };
+            signal_result.and(wait_result)?;
         }
         Ok(())
     }
@@ -163,6 +179,16 @@ impl SpawnedWorker {
     pub(crate) fn pid(&self) -> Option<u32> {
         self.child.as_ref().and_then(Child::id)
     }
+}
+
+pub(crate) fn probe_lifecycle_support() -> io::Result<()> {
+    let raw = i32::try_from(std::process::id())
+        .map_err(|_| io::Error::other("process identifier is unsupported"))?;
+    let pid =
+        Pid::from_raw(raw).ok_or_else(|| io::Error::other("process identifier is unsupported"))?;
+    let _pidfd = pidfd_open(pid, PidfdFlags::empty()).map_err(io::Error::from)?;
+    std::fs::read_to_string(format!("/proc/self/task/{raw}/children"))?;
+    Ok(())
 }
 
 impl Drop for SpawnedWorker {
@@ -204,4 +230,80 @@ fn decode_response(frame: &[u8]) -> io::Result<WorkerResponse> {
 
 fn pipe_error() -> io::Error {
     io::Error::other("contained worker pipe was unavailable")
+}
+
+fn direct_child_pidfds(parent: u32) -> io::Result<Vec<OwnedFd>> {
+    let children = match std::fs::read_to_string(format!("/proc/{parent}/task/{parent}/children")) {
+        Ok(children) => children,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut pidfds = Vec::new();
+    for value in children.split_whitespace() {
+        let raw = value
+            .parse::<i32>()
+            .map_err(|_| io::Error::other("contained process tree was invalid"))?;
+        let pid = Pid::from_raw(raw)
+            .ok_or_else(|| io::Error::other("contained process tree was invalid"))?;
+        match pidfd_open(pid, PidfdFlags::empty()) {
+            Ok(pidfd) => pidfds.push(pidfd),
+            Err(rustix::io::Errno::SRCH) => {}
+            Err(error) => return Err(io::Error::from(error)),
+        }
+    }
+    Ok(pidfds)
+}
+
+fn signal_sandbox_tree(child: &mut Child) -> io::Result<()> {
+    let Some(raw) = child.id().and_then(|pid| i32::try_from(pid).ok()) else {
+        return Ok(());
+    };
+    let pid = Pid::from_raw(raw)
+        .ok_or_else(|| io::Error::other("contained process identifier was invalid"))?;
+    let outer = match pidfd_open(pid, PidfdFlags::empty()) {
+        Ok(outer) => outer,
+        Err(rustix::io::Errno::SRCH) => return Ok(()),
+        Err(error) => return Err(io::Error::from(error)),
+    };
+    if let Err(error) = pidfd_send_signal(&outer, Signal::STOP)
+        && error != rustix::io::Errno::SRCH
+    {
+        return Err(io::Error::from(error));
+    }
+    let supervisors = match direct_child_pidfds(raw as u32) {
+        Ok(supervisors) => supervisors,
+        Err(error) => {
+            let _ = pidfd_send_signal(&outer, Signal::KILL);
+            return Err(error);
+        }
+    };
+    if supervisors.is_empty() {
+        signal_pidfd(&outer, Signal::KILL)
+    } else {
+        let mut result = Ok(());
+        for supervisor in &supervisors {
+            if let Err(error) = signal_pidfd(supervisor, Signal::KILL)
+                && result.is_ok()
+            {
+                result = Err(error);
+            }
+        }
+        let resume = signal_pidfd(&outer, Signal::CONT);
+        result.and(resume)
+    }
+}
+
+fn signal_pidfd(pidfd: &OwnedFd, signal: Signal) -> io::Result<()> {
+    match pidfd_send_signal(pidfd, signal) {
+        Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+        Err(error) => Err(io::Error::from(error)),
+    }
+}
+
+fn signal_child(child: &mut Child) -> io::Result<()> {
+    match child.start_kill() {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
+        Err(error) => Err(error),
+    }
 }

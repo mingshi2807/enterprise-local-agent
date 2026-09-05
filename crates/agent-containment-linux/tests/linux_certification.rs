@@ -75,7 +75,11 @@ async fn production_linux_security_certification() {
         HarnessConfig::new(AuditFailurePolicy::FailClosed, Duration::from_secs(1))
             .expect("harness config must be valid"),
     )
-    .with_approval_port(Arc::new(ScriptedApprovalPort::approve_all()));
+    .with_approval_port(Arc::new(ScriptedApprovalPort::scripted(vec![
+        Ok(true),
+        Ok(true),
+        Ok(true),
+    ])));
     let budget = RunBudget::new(3, 3, 1, Duration::from_secs(20))
         .expect("budget must be valid")
         .with_max_approval_requests(3);

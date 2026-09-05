@@ -11,7 +11,7 @@ agent-core.workspace = true
 agent-harness.workspace = true
 landlock.workspace = true
 libc.workspace = true
-rustix = { workspace = true, features = ["fs", "process", "stdio", "system", "thread"] }
+rustix = { workspace = true, features = ["fs", "process", "std", "stdio", "system", "thread"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

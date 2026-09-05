@@ -143,31 +143,15 @@ fn certification_hold() -> WorkerResponse {
             code: WorkerErrorCode::IoFailure,
         };
     }
-    let worker_host = host_pid_from_status("/proc/self/status");
-    let child_host = host_pid_from_status(&format!("/proc/{child}/status"));
-    if let (Some(worker_host), Some(child_host)) = (worker_host, child_host) {
-        let report = format!("{worker_host} {child_host}");
-        let _ = write_file_inner(
-            "certification",
-            ".ela-m6-1-certification-pids",
-            report.as_bytes(),
-        );
+    if write_file_inner("certification", ".ela-m6-1-certification-ready", b"ready").is_err() {
+        return WorkerResponse::ProtocolError {
+            version: PROTOCOL_VERSION,
+            code: WorkerErrorCode::IoFailure,
+        };
     }
     loop {
         std::thread::sleep(Duration::from_secs(60));
     }
-}
-
-#[cfg(feature = "certification-hooks")]
-fn host_pid_from_status(path: &str) -> Option<u32> {
-    std::fs::read_to_string(path)
-        .ok()?
-        .lines()
-        .find_map(|line| line.strip_prefix("NSpid:\t"))?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
 }
 
 fn probe(host: NamespaceIds, port: u16) -> WorkerResponse {
@@ -184,11 +168,11 @@ fn probe(host: NamespaceIds, port: u16) -> WorkerResponse {
     )
     .is_err();
     let environment: Vec<_> = std::env::vars().collect();
-    let environment_isolated = environment.len() == 2
+    let environment_isolated = environment.len() == 3
         && environment.iter().all(|(name, value)| {
             matches!(
                 (name.as_str(), value.as_str()),
-                ("LANG", "C") | ("TZ", "UTC")
+                ("LANG", "C") | ("TZ", "UTC") | ("PWD", "/workspace")
             )
         });
     let descriptors_isolated = (3..4096).all(|fd| {
