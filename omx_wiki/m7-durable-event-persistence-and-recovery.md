@@ -4,7 +4,7 @@ tags: ["m7", "persistence", "sqlite", "checkpoint", "recovery", "event-journal"]
 created: 2026-09-05
 updated: 2026-09-05
 sources: ["crates/agent-harness/src/persistence.rs", "crates/agent-harness/src/recovery.rs", "crates/agent-persistence-sqlite/src/lib.rs", "M7 approved architecture and implementation"]
-links: ["enterprise-local-agent-milestone-index.md", "m6-1-production-linux-localwrite-containment.md"]
+links: ["enterprise-local-agent-milestone-index.md", "m6-1-production-linux-localwrite-containment.md", "m8-enterprise-knowledge-integration.md"]
 category: architecture
 confidence: high
 schemaVersion: 1
@@ -14,8 +14,8 @@ schemaVersion: 1
 
 ## Status
 
-Implemented and verified in the working tree. No M7 commit or tag has been
-created. M7 provides a durable metadata journal, quiescent checkpoints, recovery
+Completed in commit `6ca12e3` and tagged `m7-durable-recovery`. M7 provides a
+durable metadata journal, quiescent checkpoints, recovery
 classification, and explicitly versioned restart support without replaying
 external effects.
 
@@ -119,6 +119,10 @@ durability claim.
 requires metadata-only `RunStarted` wall-clock data and durable
 `AuditDegraded`. Unsupported versions are rejected; there are no automatic
 migrations or best-effort interpretations.
+
+M8 subsequently advances the event schema to 7 and checkpoint schema to 2 for
+metadata-only knowledge retrieval recovery. The M7 rejection rules remain
+unchanged; older schemas are not silently migrated.
 
 ## Verification
 

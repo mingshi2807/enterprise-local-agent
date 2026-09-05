@@ -1,0 +1,16 @@
+[package]
+name = "agent-knowledge-adapters"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agent-core.workspace = true
+agent-knowledge.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "process"] }
+url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }

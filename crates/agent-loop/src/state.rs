@@ -37,6 +37,17 @@ impl LoopState {
         }
     }
 
+    pub(crate) const fn recovered_retrieve_running(
+        iteration: u32,
+        completed_iterations: u32,
+    ) -> Self {
+        Self {
+            current_iteration: Some(iteration),
+            completed_iterations,
+            position: LoopPosition::PhaseRunning(LoopPhase::Retrieve),
+        }
+    }
+
     #[must_use]
     pub const fn current_iteration(&self) -> Option<u32> {
         self.current_iteration

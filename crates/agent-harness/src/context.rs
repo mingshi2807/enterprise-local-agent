@@ -54,6 +54,25 @@ impl RunContext {
         )
     }
 
+    /// Creates a run whose program explicitly supports reconstructing and
+    /// freshly reissuing an interrupted read-only knowledge retrieval.
+    #[must_use]
+    pub fn new_restartable_retrieval(
+        run_id: RunId,
+        session_id: SessionId,
+        budget: RunBudget,
+        recovery_version: u32,
+    ) -> Self {
+        Self::new_with_recovery_contract(
+            run_id,
+            session_id,
+            budget,
+            crate::RecoveryContract::RestartableRetrieval {
+                version: recovery_version,
+            },
+        )
+    }
+
     fn new_with_recovery_contract(
         run_id: RunId,
         session_id: SessionId,
@@ -277,6 +296,7 @@ impl RunContext {
         state: &crate::DurableRunState,
         elapsed: Duration,
         now: Instant,
+        recovery_contract: crate::RecoveryContract,
     ) -> Result<Self, RunContextError> {
         let remaining = state
             .budget()
@@ -306,7 +326,7 @@ impl RunContext {
                 cancellation,
             }),
             audit_degraded: state.audit_degraded(),
-            recovery_contract: crate::RecoveryContract::NonRestartable,
+            recovery_contract,
             durable_state: state.clone(),
             persistence_failed: false,
         })

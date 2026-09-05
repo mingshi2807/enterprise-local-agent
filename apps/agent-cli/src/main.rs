@@ -219,7 +219,12 @@ async fn main() -> anyhow::Result<()> {
             | AgentEventKind::ToolInvocationCompleted { .. }
             | AgentEventKind::ToolInvocationDomainFailed { .. }
             | AgentEventKind::ToolInvocationAdapterFailed { .. }
-            | AgentEventKind::ToolPolicyDenied { .. } => {}
+            | AgentEventKind::ToolPolicyDenied { .. }
+            | AgentEventKind::KnowledgeRetrievalStarted { .. }
+            | AgentEventKind::KnowledgeRetrievalRestarted { .. }
+            | AgentEventKind::KnowledgeRetrievalCompleted { .. }
+            | AgentEventKind::KnowledgeRetrievalFailed { .. }
+            | AgentEventKind::ModelGroundingBound { .. } => {}
         }
     }
     println!("Final status: {:?}", context.status());

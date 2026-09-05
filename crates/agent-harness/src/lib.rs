@@ -31,7 +31,7 @@ pub use audit::{AuditFailurePolicy, HarnessConfig, HarnessConfigError};
 pub use containment::{ContainedInvocation, ContainedToolPort, ContainmentPortError};
 pub use context::{BudgetExceeded, RunCancellationHandle, RunContext, RunContextError};
 pub use error::{AuditPhase, ExecutionStage, HarnessError, HarnessOperation, OperationEffect};
-pub use execution::ExecutionHarness;
+pub use execution::{CompletedKnowledgeRetrieval, ExecutionHarness};
 pub use persistence::{
     AppendTransition, CURRENT_CHECKPOINT_SCHEMA_VERSION, CURRENT_STORE_SCHEMA_VERSION,
     DurableCheckpoint, LoadedRun, PersistenceFuture, PersistencePortError, RecoveryContract,
@@ -46,7 +46,8 @@ pub use ports::{
 };
 pub use recovery::{
     ContinuationState, DurableLoopPosition, DurableRunState, ManualReconciliationReason,
-    PendingEffect, RecoveredRun, RecoveryDisposition, RecoveryError, TransitionError,
+    PendingEffect, PendingKnowledgeRetrieval, RecoveredRun, RecoveryDisposition, RecoveryError,
+    TransitionError,
 };
 pub use registry::{ToolBinding, ToolRegistry, ToolRegistryError};
 
@@ -54,3 +55,5 @@ pub use registry::{ToolBinding, ToolRegistry, ToolRegistryError};
 mod action_tests;
 #[cfg(test)]
 mod execution_tests;
+#[cfg(test)]
+mod knowledge_tests;

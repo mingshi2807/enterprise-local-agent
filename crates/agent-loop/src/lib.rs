@@ -29,3 +29,5 @@ pub use state::{LoopPosition, LoopState, LoopTerminal};
 
 #[cfg(test)]
 mod engine_tests;
+#[cfg(test)]
+mod knowledge_tests;

@@ -2,9 +2,10 @@ use std::{future::Future, pin::Pin};
 
 use agent_core::{LoopFailureKind, ModelRequest, ModelResponse, ToolCall, ToolResult};
 use agent_harness::{
-    ActionPreparationError, CompletedModelInvocation, ExecutionHarness, HarnessError, RunContext,
-    ValidatedAction,
+    ActionPreparationError, CompletedKnowledgeRetrieval, CompletedModelInvocation,
+    ExecutionHarness, HarnessError, RunContext, ValidatedAction,
 };
+use agent_knowledge::{GroundedModelRequest, KnowledgeRequest};
 
 use crate::LoopStepError;
 
@@ -76,6 +77,7 @@ pub trait LoopProgram: Send {
 /// restoring. Arbitrary `LoopProgram::WorkingState` is never deserialized.
 pub trait RestartableLoopProgram: LoopProgram {
     const RECOVERY_VERSION: u32;
+    const RESTART_INTERRUPTED_RETRIEVAL: bool = false;
 
     fn restore_working_state(
         &mut self,
@@ -112,6 +114,23 @@ impl<'a> LoopEffects<'a> {
     ) -> Result<CompletedModelInvocation, HarnessError> {
         self.harness
             .invoke_model_tracked(self.context, request)
+            .await
+    }
+
+    pub async fn retrieve_knowledge(
+        &mut self,
+        request: KnowledgeRequest,
+    ) -> Result<CompletedKnowledgeRetrieval, HarnessError> {
+        self.harness.retrieve_knowledge(self.context, request).await
+    }
+
+    pub async fn invoke_grounded_model(
+        &mut self,
+        retrieval: &CompletedKnowledgeRetrieval,
+        request: GroundedModelRequest,
+    ) -> Result<CompletedModelInvocation, HarnessError> {
+        self.harness
+            .invoke_grounded_model(self.context, retrieval, request)
             .await
     }
 

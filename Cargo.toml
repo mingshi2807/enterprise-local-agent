@@ -4,6 +4,8 @@ members = [
     "crates/agent-containment-linux",
     "crates/agent-core",
     "crates/agent-harness",
+    "crates/agent-knowledge",
+    "crates/agent-knowledge-adapters",
     "crates/agent-loop",
     "crates/agent-persistence-sqlite",
     "crates/agent-provider-rig",
@@ -18,11 +20,15 @@ edition = "2024"
 agent-core = { path = "crates/agent-core" }
 agent-containment-linux = { path = "crates/agent-containment-linux" }
 agent-harness = { path = "crates/agent-harness" }
+agent-knowledge = { path = "crates/agent-knowledge" }
+agent-knowledge-adapters = { path = "crates/agent-knowledge-adapters" }
 agent-loop = { path = "crates/agent-loop" }
 agent-persistence-sqlite = { path = "crates/agent-persistence-sqlite" }
 agent-provider-rig = { path = "crates/agent-provider-rig" }
 anyhow = "1.0"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 jsonschema = { version = "=0.49.2", default-features = false }
+reqwest = { version = "=0.13.4", default-features = false }
 landlock = { version = "=0.4.7", default-features = false }
 libc = "0.2"
 rig-core = { version = "=0.41.0", default-features = false, features = ["rustls"] }

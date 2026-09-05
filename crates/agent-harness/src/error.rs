@@ -5,6 +5,7 @@ use crate::{
     ApprovalPortError, AuditPortError, BudgetExceeded, ContainmentPortError, ModelPortError,
     PersistencePortError, PolicyDenial, RecoveryError, RunContextError, ToolPortError,
 };
+use agent_knowledge::KnowledgeError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HarnessOperation {
@@ -13,6 +14,8 @@ pub enum HarnessOperation {
     BeginIteration,
     RecordLoopProgress,
     InvokeModel,
+    RetrieveKnowledge,
+    BindModelGrounding,
     PrepareAction,
     InvokeValidatedAction,
     InvokeTool,
@@ -89,6 +92,10 @@ pub enum HarnessError {
     },
     #[error("model adapter failed")]
     ModelPort(ModelPortError),
+    #[error("knowledge adapter failed")]
+    KnowledgePort(KnowledgeError),
+    #[error("grounded model request does not match the completed retrieval")]
+    GroundingMismatch,
     #[error("tool adapter failed")]
     ToolPort(ToolPortError),
     #[error("durable run persistence failed")]

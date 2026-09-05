@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use agent_core::{
     AgentEvent, AgentEventKind, ApprovalRequestId, BudgetUsage, CURRENT_EVENT_SCHEMA_VERSION,
-    CapabilityKind, EventSequence, LoopDecisionKind, LoopEventKind, LoopPhase, ModelCallId,
-    RunOutcome, RunStatus, ToolCallId,
+    CapabilityKind, EventSequence, KnowledgeRetrievalId, KnowledgeRouteMetadata, LoopDecisionKind,
+    LoopEventKind, LoopPhase, MAX_DURABLE_EVIDENCE_REFERENCES, MAX_DURABLE_KNOWLEDGE_BACKENDS,
+    ModelCallId, RunOutcome, RunStatus, ToolCallId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -52,6 +53,54 @@ pub enum PendingEffect {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PendingKnowledgeRetrieval {
+    retrieval_id: KnowledgeRetrievalId,
+    route: KnowledgeRouteMetadata,
+    query_digest: [u8; 32],
+    query_bytes: u16,
+}
+
+impl PendingKnowledgeRetrieval {
+    #[must_use]
+    pub const fn retrieval_id(&self) -> KnowledgeRetrievalId {
+        self.retrieval_id
+    }
+
+    #[must_use]
+    pub const fn route(&self) -> &KnowledgeRouteMetadata {
+        &self.route
+    }
+
+    #[must_use]
+    pub const fn query_digest(&self) -> [u8; 32] {
+        self.query_digest
+    }
+
+    #[must_use]
+    pub const fn query_bytes(&self) -> u16 {
+        self.query_bytes
+    }
+
+    fn matches_request(
+        &self,
+        route: &KnowledgeRouteMetadata,
+        query_digest: [u8; 32],
+        query_bytes: u16,
+    ) -> bool {
+        self.route == *route && self.query_digest == query_digest && self.query_bytes == query_bytes
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableKnowledgeManifest {
+    retrieval_id: KnowledgeRetrievalId,
+    evidence_count: u8,
+    manifest_digest: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DurableRunState {
     context: ContextSnapshot,
     last_sequence: Option<EventSequence>,
@@ -61,6 +110,9 @@ pub struct DurableRunState {
     loop_position: DurableLoopPosition,
     continuation: ContinuationState,
     pending_effects: Vec<PendingEffect>,
+    pending_knowledge_retrieval: Option<PendingKnowledgeRetrieval>,
+    restartable_knowledge_retrieval: Option<PendingKnowledgeRetrieval>,
+    latest_knowledge_manifest: Option<DurableKnowledgeManifest>,
 }
 
 impl DurableRunState {
@@ -82,6 +134,9 @@ impl DurableRunState {
             loop_position: DurableLoopPosition::NotStarted,
             continuation: ContinuationState::InitialBoundary,
             pending_effects: Vec::new(),
+            pending_knowledge_retrieval: None,
+            restartable_knowledge_retrieval: None,
+            latest_knowledge_manifest: None,
         }
     }
 
@@ -237,6 +292,113 @@ impl DurableRunState {
             | AgentEventKind::ToolInvocationAdapterFailed { tool_call_id } => {
                 self.remove_pending(PendingEffectKey::Tool(*tool_call_id))?;
             }
+            AgentEventKind::KnowledgeRetrievalStarted {
+                retrieval_id,
+                route,
+                query_digest,
+                query_bytes,
+            } => {
+                self.start_knowledge_retrieval(
+                    *retrieval_id,
+                    route.clone(),
+                    *query_digest,
+                    *query_bytes,
+                )?;
+            }
+            AgentEventKind::KnowledgeRetrievalRestarted {
+                previous_retrieval_id,
+                retrieval_id,
+                route,
+                query_digest,
+                query_bytes,
+            } => {
+                let pending = self
+                    .pending_knowledge_retrieval
+                    .as_ref()
+                    .ok_or(TransitionError::Effect)?;
+                if pending.retrieval_id != *previous_retrieval_id
+                    || !pending.matches_request(route, *query_digest, *query_bytes)
+                {
+                    return Err(TransitionError::Effect);
+                }
+                self.pending_knowledge_retrieval = None;
+                self.start_knowledge_retrieval(
+                    *retrieval_id,
+                    route.clone(),
+                    *query_digest,
+                    *query_bytes,
+                )?;
+            }
+            AgentEventKind::KnowledgeRetrievalCompleted {
+                retrieval_id,
+                snapshots,
+                evidence_references,
+                evidence_count,
+                manifest_digest,
+                ..
+            } => {
+                let route = self
+                    .restartable_knowledge_retrieval
+                    .as_ref()
+                    .map(|attempt| attempt.route.clone())
+                    .ok_or(TransitionError::Effect)?;
+                if usize::from(*evidence_count) != evidence_references.len()
+                    || evidence_references.len() > MAX_DURABLE_EVIDENCE_REFERENCES
+                    || snapshots.len() > MAX_DURABLE_KNOWLEDGE_BACKENDS
+                    || evidence_references.iter().any(|item| !item.is_valid())
+                    || snapshots.iter().any(|item| !item.is_valid())
+                    || evidence_references
+                        .iter()
+                        .any(|item| !route.backends().contains(&item.backend()))
+                    || snapshots
+                        .iter()
+                        .any(|item| !route.backends().contains(&item.backend()))
+                    || snapshots.iter().enumerate().any(|(index, item)| {
+                        snapshots[..index]
+                            .iter()
+                            .any(|prior| prior.backend() == item.backend())
+                    })
+                {
+                    return Err(TransitionError::Effect);
+                }
+                self.finish_knowledge_retrieval(*retrieval_id)?;
+                self.latest_knowledge_manifest = Some(DurableKnowledgeManifest {
+                    retrieval_id: *retrieval_id,
+                    evidence_count: *evidence_count,
+                    manifest_digest: *manifest_digest,
+                });
+            }
+            AgentEventKind::KnowledgeRetrievalFailed { retrieval_id, .. } => {
+                self.finish_knowledge_retrieval(*retrieval_id)?;
+                self.latest_knowledge_manifest = None;
+            }
+            AgentEventKind::ModelGroundingBound {
+                retrieval_id,
+                model_call_id,
+                evidence_count,
+                manifest_digest,
+                ..
+            } => {
+                let manifest = self
+                    .latest_knowledge_manifest
+                    .as_ref()
+                    .ok_or(TransitionError::Effect)?;
+                if manifest.retrieval_id != *retrieval_id
+                    || manifest.evidence_count != *evidence_count
+                    || manifest.manifest_digest != *manifest_digest
+                    || !self.pending_effects.iter().any(|effect| {
+                        matches!(
+                            effect,
+                            PendingEffect::Model {
+                                model_call_id: pending
+                            } if pending == model_call_id
+                        )
+                    })
+                {
+                    return Err(TransitionError::Effect);
+                }
+                self.continuation = ContinuationState::TransientStateRequired;
+            }
             AgentEventKind::Loop { event } => self.apply_loop(*event)?,
             AgentEventKind::ActionProposed { .. }
             | AgentEventKind::ActionValidated { .. }
@@ -290,6 +452,9 @@ impl DurableRunState {
                 {
                     return Err(TransitionError::Loop);
                 }
+                if phase == LoopPhase::Retrieve && self.pending_knowledge_retrieval.is_some() {
+                    return Err(TransitionError::Effect);
+                }
                 self.loop_position = match phase {
                     LoopPhase::Observe => DurableLoopPosition::PhaseReady(LoopPhase::Retrieve),
                     LoopPhase::Retrieve => DurableLoopPosition::PhaseReady(LoopPhase::Plan),
@@ -298,6 +463,9 @@ impl DurableRunState {
                     LoopPhase::Verify => DurableLoopPosition::PhaseReady(LoopPhase::Reflect),
                     LoopPhase::Reflect => DurableLoopPosition::ReflectCompleted,
                 };
+                if phase == LoopPhase::Retrieve {
+                    self.restartable_knowledge_retrieval = None;
+                }
             }
             LoopEventKind::ReflectDecision {
                 iteration,
@@ -352,6 +520,49 @@ impl DurableRunState {
             .position(|effect| key.matches(*effect))
             .ok_or(TransitionError::Effect)?;
         self.pending_effects.remove(position);
+        Ok(())
+    }
+
+    fn start_knowledge_retrieval(
+        &mut self,
+        retrieval_id: KnowledgeRetrievalId,
+        route: KnowledgeRouteMetadata,
+        query_digest: [u8; 32],
+        query_bytes: u16,
+    ) -> Result<(), TransitionError> {
+        if self.pending_knowledge_retrieval.is_some()
+            || !route.is_valid()
+            || query_bytes == 0
+            || usize::from(query_bytes) > agent_knowledge::MAX_QUERY_BYTES
+            || self.loop_position != DurableLoopPosition::PhaseRunning(LoopPhase::Retrieve)
+        {
+            return Err(TransitionError::Effect);
+        }
+        let pending = PendingKnowledgeRetrieval {
+            retrieval_id,
+            route,
+            query_digest,
+            query_bytes,
+        };
+        self.pending_knowledge_retrieval = Some(pending.clone());
+        self.restartable_knowledge_retrieval = Some(pending);
+        self.latest_knowledge_manifest = None;
+        self.continuation = ContinuationState::TransientStateRequired;
+        Ok(())
+    }
+
+    fn finish_knowledge_retrieval(
+        &mut self,
+        retrieval_id: KnowledgeRetrievalId,
+    ) -> Result<(), TransitionError> {
+        let pending = self
+            .pending_knowledge_retrieval
+            .as_ref()
+            .ok_or(TransitionError::Effect)?;
+        if pending.retrieval_id != retrieval_id {
+            return Err(TransitionError::Effect);
+        }
+        self.pending_knowledge_retrieval = None;
         Ok(())
     }
 
@@ -416,8 +627,18 @@ impl DurableRunState {
     }
 
     #[must_use]
+    pub const fn pending_knowledge_retrieval(&self) -> Option<&PendingKnowledgeRetrieval> {
+        self.pending_knowledge_retrieval.as_ref()
+    }
+
+    #[must_use]
+    pub const fn restartable_knowledge_retrieval(&self) -> Option<&PendingKnowledgeRetrieval> {
+        self.restartable_knowledge_retrieval.as_ref()
+    }
+
+    #[must_use]
     pub const fn is_quiescent(&self) -> bool {
-        self.pending_effects.is_empty()
+        self.pending_effects.is_empty() && self.pending_knowledge_retrieval.is_none()
     }
 }
 
@@ -621,25 +842,31 @@ pub(crate) fn recover_loaded_run(
                     },
                 });
             }
-            if !matches!(
-                record.recovery_contract(),
-                RecoveryContract::Restartable { .. }
-            ) {
+            if matches!(record.recovery_contract(), RecoveryContract::NonRestartable) {
                 return Ok(RecoveryDisposition::ManualReconciliationRequired {
                     state,
                     reason: ManualReconciliationReason::NonRestartableProgram,
                 });
             }
-            if !matches!(
-                state.continuation(),
-                ContinuationState::InitialBoundary | ContinuationState::RestartableBoundary
-            ) {
+            let retrieval_restart = matches!(
+                record.recovery_contract(),
+                RecoveryContract::RestartableRetrieval { .. }
+            ) && state.loop_position()
+                == DurableLoopPosition::PhaseRunning(LoopPhase::Retrieve)
+                && state.restartable_knowledge_retrieval().is_some();
+            if !retrieval_restart
+                && !matches!(
+                    state.continuation(),
+                    ContinuationState::InitialBoundary | ContinuationState::RestartableBoundary
+                )
+            {
                 return Ok(RecoveryDisposition::ManualReconciliationRequired {
                     state,
                     reason: ManualReconciliationReason::TransientStateUnavailable,
                 });
             }
-            let context = RunContext::from_recovery(&state, elapsed, now)?;
+            let context =
+                RunContext::from_recovery(&state, elapsed, now, record.recovery_contract())?;
             Ok(RecoveryDisposition::Resumable(Box::new(RecoveredRun {
                 context,
                 state,
@@ -673,7 +900,10 @@ impl From<crate::RunContextError> for RecoveryError {
 mod tests {
     use std::time::Duration;
 
-    use agent_core::{ActionProposalId, ApprovalRequestId, RunBudget, RunId, SessionId, ToolName};
+    use agent_core::{
+        ActionProposalId, ApprovalRequestId, KnowledgeBackendId, KnowledgeEvidenceReference,
+        KnowledgeFailureKind, KnowledgeRouteMetadata, RunBudget, RunId, SessionId, ToolName,
+    };
 
     use super::*;
     use crate::{DurableCheckpoint, LoadedRun};
@@ -714,6 +944,187 @@ mod tests {
             STARTED_AT + 1,
             Instant::now(),
         )
+    }
+
+    fn retrieval_prefix(record: &RunRecord) -> Vec<AgentEvent> {
+        vec![
+            started(record),
+            event(
+                record,
+                1,
+                AgentEventKind::Loop {
+                    event: LoopEventKind::IterationStarted {
+                        iteration: 1,
+                        usage: 1,
+                        limit: 4,
+                    },
+                },
+            ),
+            event(
+                record,
+                2,
+                AgentEventKind::Loop {
+                    event: LoopEventKind::PhaseEntered {
+                        iteration: 1,
+                        phase: LoopPhase::Observe,
+                    },
+                },
+            ),
+            event(
+                record,
+                3,
+                AgentEventKind::Loop {
+                    event: LoopEventKind::PhaseCompleted {
+                        iteration: 1,
+                        phase: LoopPhase::Observe,
+                    },
+                },
+            ),
+            event(
+                record,
+                4,
+                AgentEventKind::Loop {
+                    event: LoopEventKind::PhaseEntered {
+                        iteration: 1,
+                        phase: LoopPhase::Retrieve,
+                    },
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn interrupted_read_only_retrieval_is_resumable_only_under_explicit_contract() {
+        for (contract, expected_resumable) in [
+            (RecoveryContract::Restartable { version: 7 }, false),
+            (RecoveryContract::RestartableRetrieval { version: 7 }, true),
+        ] {
+            let record = record(contract);
+            let retrieval_id = KnowledgeRetrievalId::new();
+            let mut events = retrieval_prefix(&record);
+            events.push(event(
+                &record,
+                5,
+                AgentEventKind::KnowledgeRetrievalStarted {
+                    retrieval_id,
+                    route: KnowledgeRouteMetadata::Single {
+                        backend: KnowledgeBackendId::StandardsMcp,
+                    },
+                    query_digest: [9; 32],
+                    query_bytes: 12,
+                },
+            ));
+            let disposition = recover(record.clone(), DurableCheckpoint::initial(&record), events)
+                .expect("recovery classification");
+            if expected_resumable {
+                let RecoveryDisposition::Resumable(recovered) = disposition else {
+                    panic!("explicit retrieval recovery must be resumable");
+                };
+                assert_eq!(
+                    recovered
+                        .state()
+                        .pending_knowledge_retrieval()
+                        .map(PendingKnowledgeRetrieval::retrieval_id),
+                    Some(retrieval_id)
+                );
+            } else {
+                assert!(matches!(
+                    disposition,
+                    RecoveryDisposition::ManualReconciliationRequired {
+                        reason: ManualReconciliationReason::TransientStateUnavailable,
+                        ..
+                    }
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn completed_retrieval_with_lost_transient_evidence_can_be_freshly_retrieved() {
+        let record = record(RecoveryContract::RestartableRetrieval { version: 7 });
+        let retrieval_id = KnowledgeRetrievalId::new();
+        let mut events = retrieval_prefix(&record);
+        events.extend([
+            event(
+                &record,
+                5,
+                AgentEventKind::KnowledgeRetrievalStarted {
+                    retrieval_id,
+                    route: KnowledgeRouteMetadata::Single {
+                        backend: KnowledgeBackendId::StandardsMcp,
+                    },
+                    query_digest: [3; 32],
+                    query_bytes: 8,
+                },
+            ),
+            event(
+                &record,
+                6,
+                AgentEventKind::KnowledgeRetrievalCompleted {
+                    retrieval_id,
+                    snapshots: Vec::new(),
+                    evidence_references: vec![
+                        KnowledgeEvidenceReference::new(
+                            KnowledgeBackendId::StandardsMcp,
+                            "ISO15118-20:chunk-1".to_owned(),
+                        )
+                        .expect("reference"),
+                    ],
+                    evidence_count: 1,
+                    truncated: false,
+                    degraded: false,
+                    manifest_digest: [4; 32],
+                },
+            ),
+        ]);
+        let disposition = recover(record.clone(), DurableCheckpoint::initial(&record), events)
+            .expect("recovery classification");
+
+        let RecoveryDisposition::Resumable(recovered) = disposition else {
+            panic!("completed retrieval at an unfinished Retrieve phase must be resumable");
+        };
+        assert!(recovered.state().pending_knowledge_retrieval().is_none());
+        assert!(
+            recovered
+                .state()
+                .restartable_knowledge_retrieval()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn retrieval_failure_is_terminal_metadata_not_an_unresolved_effect() {
+        let record = record(RecoveryContract::RestartableRetrieval { version: 7 });
+        let retrieval_id = KnowledgeRetrievalId::new();
+        let mut events = retrieval_prefix(&record);
+        events.extend([
+            event(
+                &record,
+                5,
+                AgentEventKind::KnowledgeRetrievalStarted {
+                    retrieval_id,
+                    route: KnowledgeRouteMetadata::Single {
+                        backend: KnowledgeBackendId::OcppRagKag,
+                    },
+                    query_digest: [1; 32],
+                    query_bytes: 4,
+                },
+            ),
+            event(
+                &record,
+                6,
+                AgentEventKind::KnowledgeRetrievalFailed {
+                    retrieval_id,
+                    kind: KnowledgeFailureKind::Unavailable,
+                },
+            ),
+        ]);
+
+        assert!(matches!(
+            recover(record.clone(), DurableCheckpoint::initial(&record), events)
+                .expect("recovery classification"),
+            RecoveryDisposition::Resumable(_)
+        ));
     }
 
     #[test]

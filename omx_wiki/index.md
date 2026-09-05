@@ -1,6 +1,6 @@
 # Wiki Index
 
-> 10 pages | Last updated: 2026-09-05T12:08:40Z
+> 11 pages | Last updated: 2026-09-05
 
 ## architecture
 
@@ -13,6 +13,7 @@
 - [M6 Approval and Containment Boundary](m6-approval-and-containment-boundary.md) — # M6 Approval and Containment Boundary
 - [M6.1 Production Linux LocalWrite Containment](m6-1-production-linux-localwrite-containment.md) — # M6.1 Production Linux LocalWrite Containment
 - [M7 Durable Event Persistence and Recovery](m7-durable-event-persistence-and-recovery.md) — # M7 Durable Event Persistence and Recovery
+- [M8 Enterprise Knowledge Integration](m8-enterprise-knowledge-integration.md) — # M8 Enterprise Knowledge Integration
 
 ## reference
 

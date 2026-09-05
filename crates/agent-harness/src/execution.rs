@@ -3,8 +3,12 @@ use std::{sync::Arc, time::SystemTime};
 use agent_core::{
     ActionDigest, ActionProposalId, AgentEvent, AgentEventKind, ApprovalFailureKind,
     ApprovalRequestId, BudgetDimension, CapabilityKind, ContainmentFailureKind, EventSequence,
-    LoopEventKind, LoopProgressEvent, ModelCallId, ModelRequest, ModelResponse, RunFailureKind,
-    RunOutcome, RunStatus, ToolCall, ToolCallId, ToolName, ToolResult,
+    KnowledgeFailureKind, KnowledgeRetrievalId, LoopEventKind, LoopProgressEvent, ModelCallId,
+    ModelRequest, ModelResponse, RunFailureKind, RunOutcome, RunStatus, ToolCall, ToolCallId,
+    ToolName, ToolResult,
+};
+use agent_knowledge::{
+    EvidenceSet, GroundedModelRequest, KnowledgeError, KnowledgePort, KnowledgeRequest,
 };
 use tokio::time::{Instant, sleep_until, timeout};
 
@@ -38,7 +42,33 @@ pub struct ExecutionHarness {
     approval: Option<Arc<dyn ApprovalPort>>,
     audit: Arc<dyn AuditSink>,
     persistence: Option<Arc<dyn RunPersistencePort>>,
+    knowledge: Option<Arc<dyn KnowledgePort>>,
     config: HarnessConfig,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompletedKnowledgeRetrieval {
+    retrieval_id: KnowledgeRetrievalId,
+    evidence: EvidenceSet,
+}
+
+impl CompletedKnowledgeRetrieval {
+    #[must_use]
+    pub const fn retrieval_id(&self) -> KnowledgeRetrievalId {
+        self.retrieval_id
+    }
+
+    #[must_use]
+    pub const fn evidence(&self) -> &EvidenceSet {
+        &self.evidence
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GroundingBinding {
+    retrieval_id: KnowledgeRetrievalId,
+    evidence_count: u8,
+    manifest_digest: [u8; 32],
 }
 
 impl ExecutionHarness {
@@ -56,6 +86,7 @@ impl ExecutionHarness {
             approval: None,
             audit,
             persistence: None,
+            knowledge: None,
             config,
         }
     }
@@ -69,6 +100,12 @@ impl ExecutionHarness {
     #[must_use]
     pub fn with_persistence_port(mut self, persistence: Arc<dyn RunPersistencePort>) -> Self {
         self.persistence = Some(persistence);
+        self
+    }
+
+    #[must_use]
+    pub fn with_knowledge_port(mut self, knowledge: Arc<dyn KnowledgePort>) -> Self {
+        self.knowledge = Some(knowledge);
         self
     }
 
@@ -137,6 +174,36 @@ impl ExecutionHarness {
         context: &mut RunContext,
         request: ModelRequest,
     ) -> Result<CompletedModelInvocation, HarnessError> {
+        self.invoke_model_internal(context, request, None).await
+    }
+
+    pub async fn invoke_grounded_model(
+        &self,
+        context: &mut RunContext,
+        retrieval: &CompletedKnowledgeRetrieval,
+        request: GroundedModelRequest,
+    ) -> Result<CompletedModelInvocation, HarnessError> {
+        if request.manifest_digest() != retrieval.evidence.manifest_digest()
+            || request.evidence_count()
+                != u8::try_from(retrieval.evidence.evidence().len()).unwrap_or(u8::MAX)
+        {
+            return Err(HarnessError::GroundingMismatch);
+        }
+        let binding = GroundingBinding {
+            retrieval_id: retrieval.retrieval_id,
+            evidence_count: request.evidence_count(),
+            manifest_digest: request.manifest_digest(),
+        };
+        self.invoke_model_internal(context, request.into_request(), Some(binding))
+            .await
+    }
+
+    async fn invoke_model_internal(
+        &self,
+        context: &mut RunContext,
+        request: ModelRequest,
+        grounding: Option<GroundingBinding>,
+    ) -> Result<CompletedModelInvocation, HarnessError> {
         self.preflight(context, HarnessOperation::InvokeModel)
             .await?;
 
@@ -162,6 +229,22 @@ impl ExecutionHarness {
             OperationEffect::NotInvoked,
         )
         .await?;
+        if let Some(grounding) = grounding {
+            let event = context.next_event(AgentEventKind::ModelGroundingBound {
+                retrieval_id: grounding.retrieval_id,
+                model_call_id,
+                evidence_count: grounding.evidence_count,
+                manifest_digest: grounding.manifest_digest,
+            })?;
+            self.audit_invocation(
+                context,
+                &event,
+                HarnessOperation::BindModelGrounding,
+                AuditPhase::Lifecycle,
+                OperationEffect::NotInvoked,
+            )
+            .await?;
+        }
 
         let result = self.invoke_model_port(context, request).await;
         match result {
@@ -194,6 +277,136 @@ impl ExecutionHarness {
                 Err(HarnessError::ModelPort(error))
             }
             Err(error) => Err(error),
+        }
+    }
+
+    pub async fn retrieve_knowledge(
+        &self,
+        context: &mut RunContext,
+        request: KnowledgeRequest,
+    ) -> Result<CompletedKnowledgeRetrieval, HarnessError> {
+        self.preflight(context, HarnessOperation::RetrieveKnowledge)
+            .await?;
+        let knowledge = self.knowledge.as_ref().ok_or(HarnessError::KnowledgePort(
+            KnowledgeError::Unavailable(request.route().backends()[0]),
+        ))?;
+        let retrieval_id = KnowledgeRetrievalId::new();
+        let route = request.route().metadata();
+        let query_digest = request.query().digest();
+        let query_bytes = u16::try_from(request.query().as_str().len())
+            .map_err(|_| HarnessError::KnowledgePort(KnowledgeError::MalformedResponse))?;
+        let event_kind = match context.durable_state().pending_knowledge_retrieval() {
+            Some(previous) => {
+                if previous.route() != &route
+                    || previous.query_digest() != query_digest
+                    || previous.query_bytes() != query_bytes
+                {
+                    return Err(HarnessError::KnowledgePort(KnowledgeError::Rejected(
+                        request.route().backends()[0],
+                    )));
+                }
+                AgentEventKind::KnowledgeRetrievalRestarted {
+                    previous_retrieval_id: previous.retrieval_id(),
+                    retrieval_id,
+                    route,
+                    query_digest,
+                    query_bytes,
+                }
+            }
+            None => AgentEventKind::KnowledgeRetrievalStarted {
+                retrieval_id,
+                route,
+                query_digest,
+                query_bytes,
+            },
+        };
+        let event = context.next_event(event_kind)?;
+        self.audit_invocation(
+            context,
+            &event,
+            HarnessOperation::RetrieveKnowledge,
+            AuditPhase::BeforeInvocation,
+            OperationEffect::NotInvoked,
+        )
+        .await?;
+
+        let cancellation = context.cancellation()?;
+        let deadline = context.deadline_at()?;
+        let outcome = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => KnowledgeWaitOutcome::Cancelled,
+            () = sleep_until(deadline) => KnowledgeWaitOutcome::DeadlineExceeded,
+            result = knowledge.retrieve(request) => KnowledgeWaitOutcome::Result(result),
+        };
+        match outcome {
+            KnowledgeWaitOutcome::Result(Ok(evidence)) => {
+                let references = evidence
+                    .evidence()
+                    .iter()
+                    .map(agent_knowledge::Evidence::durable_reference)
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or(HarnessError::KnowledgePort(
+                        KnowledgeError::MalformedResponse,
+                    ))?;
+                let evidence_count = u8::try_from(references.len())
+                    .map_err(|_| HarnessError::KnowledgePort(KnowledgeError::MalformedResponse))?;
+                let event = context.next_event(AgentEventKind::KnowledgeRetrievalCompleted {
+                    retrieval_id,
+                    snapshots: evidence.snapshots().to_vec(),
+                    evidence_references: references,
+                    evidence_count,
+                    truncated: evidence.truncated(),
+                    degraded: evidence.degraded(),
+                    manifest_digest: evidence.manifest_digest(),
+                })?;
+                self.audit_invocation(
+                    context,
+                    &event,
+                    HarnessOperation::RetrieveKnowledge,
+                    AuditPhase::AfterInvocation,
+                    OperationEffect::InvocationStarted,
+                )
+                .await?;
+                Ok(CompletedKnowledgeRetrieval {
+                    retrieval_id,
+                    evidence,
+                })
+            }
+            KnowledgeWaitOutcome::Result(Err(error)) => {
+                self.record_knowledge_failure(context, retrieval_id, knowledge_failure_kind(error))
+                    .await?;
+                Err(HarnessError::KnowledgePort(error))
+            }
+            KnowledgeWaitOutcome::Cancelled => {
+                let result = self
+                    .record_knowledge_interruption(
+                        context,
+                        retrieval_id,
+                        KnowledgeFailureKind::Cancelled,
+                    )
+                    .await;
+                result?;
+                self.terminalize_safety(context, SafetyTerminalization::Cancelled)
+                    .await;
+                Err(HarnessError::Cancelled {
+                    stage: ExecutionStage::Invocation,
+                })
+            }
+            KnowledgeWaitOutcome::DeadlineExceeded => {
+                let result = self
+                    .record_knowledge_interruption(
+                        context,
+                        retrieval_id,
+                        KnowledgeFailureKind::DeadlineExceeded,
+                    )
+                    .await;
+                result?;
+                self.terminalize_safety(context, SafetyTerminalization::DeadlineExceeded)
+                    .await;
+                Err(HarnessError::DeadlineExceeded {
+                    stage: ExecutionStage::Invocation,
+                })
+            }
         }
     }
 
@@ -1073,6 +1286,42 @@ impl ExecutionHarness {
         }
     }
 
+    async fn record_knowledge_failure(
+        &self,
+        context: &mut RunContext,
+        retrieval_id: KnowledgeRetrievalId,
+        kind: KnowledgeFailureKind,
+    ) -> Result<(), HarnessError> {
+        let event =
+            context.next_event(AgentEventKind::KnowledgeRetrievalFailed { retrieval_id, kind })?;
+        self.audit_invocation(
+            context,
+            &event,
+            HarnessOperation::RetrieveKnowledge,
+            AuditPhase::AfterInvocation,
+            OperationEffect::InvocationStarted,
+        )
+        .await
+    }
+
+    async fn record_knowledge_interruption(
+        &self,
+        context: &mut RunContext,
+        retrieval_id: KnowledgeRetrievalId,
+        kind: KnowledgeFailureKind,
+    ) -> Result<(), HarnessError> {
+        let event =
+            context.next_event(AgentEventKind::KnowledgeRetrievalFailed { retrieval_id, kind })?;
+        self.persist_transition(context, &event).await?;
+        if !matches!(
+            timeout(self.config.audit_timeout(), self.audit.record(&event)).await,
+            Ok(Ok(()))
+        ) {
+            context.mark_audit_degraded();
+        }
+        Ok(())
+    }
+
     async fn record_policy_denied(
         &self,
         context: &mut RunContext,
@@ -1460,6 +1709,24 @@ enum AuditOutcome {
     Failed(AuditPortError),
     Cancelled,
     DeadlineExceeded,
+}
+
+enum KnowledgeWaitOutcome {
+    Result(Result<EvidenceSet, KnowledgeError>),
+    Cancelled,
+    DeadlineExceeded,
+}
+
+const fn knowledge_failure_kind(error: KnowledgeError) -> KnowledgeFailureKind {
+    match error {
+        KnowledgeError::Unavailable(_) => KnowledgeFailureKind::Unavailable,
+        KnowledgeError::Rejected(_) => KnowledgeFailureKind::Rejected,
+        KnowledgeError::MalformedResponse => KnowledgeFailureKind::MalformedResponse,
+        KnowledgeError::SnapshotMismatch => KnowledgeFailureKind::SnapshotMismatch,
+        KnowledgeError::Failed(_) | KnowledgeError::AllBackendsFailed => {
+            KnowledgeFailureKind::Failed
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

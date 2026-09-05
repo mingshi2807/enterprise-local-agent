@@ -15,9 +15,15 @@ pub use budget::{BudgetDimension, BudgetError, BudgetUsage, RunBudget};
 pub use capability::CapabilityKind;
 pub use event::{
     AgentEvent, AgentEventKind, ApprovalFailureKind, CURRENT_EVENT_SCHEMA_VERSION,
-    ContainmentFailureKind, EventSchemaVersion, EventSequence,
+    ContainmentFailureKind, EventSchemaVersion, EventSequence, KnowledgeBackendId,
+    KnowledgeEvidenceReference, KnowledgeFailureKind, KnowledgeRouteMetadata,
+    KnowledgeSnapshotMetadata, MAX_DURABLE_EVIDENCE_REFERENCES, MAX_DURABLE_KNOWLEDGE_BACKENDS,
+    MAX_DURABLE_KNOWLEDGE_ID_BYTES,
 };
-pub use ids::{ActionProposalId, ApprovalRequestId, ModelCallId, RunId, SessionId, ToolCallId};
+pub use ids::{
+    ActionProposalId, ApprovalRequestId, KnowledgeRetrievalId, ModelCallId, RunId, SessionId,
+    ToolCallId,
+};
 pub use loop_control::{
     LoopDecisionKind, LoopEventKind, LoopFailureKind, LoopPhase, LoopProgressEvent,
 };

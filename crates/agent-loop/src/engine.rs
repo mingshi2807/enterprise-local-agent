@@ -77,17 +77,33 @@ impl LoopEngine {
         program: &mut P,
     ) -> Result<(LoopRunSummary, P::WorkingState), LoopError> {
         let (mut context, durable, contract) = recovered.into_parts();
-        if contract
-            != (agent_harness::RecoveryContract::Restartable {
-                version: P::RECOVERY_VERSION,
-            })
-        {
+        let contract_matches = match contract {
+            agent_harness::RecoveryContract::Restartable { version } => {
+                version == P::RECOVERY_VERSION
+            }
+            agent_harness::RecoveryContract::RestartableRetrieval { version } => {
+                version == P::RECOVERY_VERSION && P::RESTART_INTERRUPTED_RETRIEVAL
+            }
+            agent_harness::RecoveryContract::NonRestartable => false,
+        };
+        if !contract_matches {
             return Err(LoopError::RecoveryContractMismatch);
         }
         let loop_state = match durable.loop_position() {
             agent_harness::DurableLoopPosition::NotStarted => LoopState::new(),
             agent_harness::DurableLoopPosition::Ready => {
                 LoopState::recovered_ready(durable.completed_iterations())
+            }
+            agent_harness::DurableLoopPosition::PhaseRunning(LoopPhase::Retrieve)
+                if P::RESTART_INTERRUPTED_RETRIEVAL
+                    && durable.restartable_knowledge_retrieval().is_some() =>
+            {
+                LoopState::recovered_retrieve_running(
+                    durable
+                        .current_iteration()
+                        .ok_or(LoopError::RecoveryStateInvalid)?,
+                    durable.completed_iterations(),
+                )
             }
             _ => return Err(LoopError::RecoveryStateInvalid),
         };
@@ -117,40 +133,60 @@ impl LoopEngine {
         self.checkpoint(harness, context).await?;
 
         loop {
-            let iteration = match harness.begin_iteration(context).await {
-                Ok(iteration) => iteration,
-                Err(error) => {
-                    return Err(self
-                        .terminalize_harness_error(harness, context, error)
-                        .await);
-                }
-            };
-            self.apply_transition(
-                harness,
-                context,
-                iteration,
-                state.begin_iteration(iteration),
-            )
-            .await?;
+            let iteration = if matches!(
+                state.position(),
+                crate::LoopPosition::PhaseRunning(LoopPhase::Retrieve)
+            ) {
+                let iteration = state
+                    .current_iteration()
+                    .ok_or(LoopError::RecoveryStateInvalid)?;
+                self.continue_retrieve(
+                    harness,
+                    context,
+                    program,
+                    working_state,
+                    &mut state,
+                    iteration,
+                )
+                .await?;
+                iteration
+            } else {
+                let iteration = match harness.begin_iteration(context).await {
+                    Ok(iteration) => iteration,
+                    Err(error) => {
+                        return Err(self
+                            .terminalize_harness_error(harness, context, error)
+                            .await);
+                    }
+                };
+                self.apply_transition(
+                    harness,
+                    context,
+                    iteration,
+                    state.begin_iteration(iteration),
+                )
+                .await?;
 
-            self.run_observe(
-                harness,
-                context,
-                program,
-                working_state,
-                &mut state,
-                iteration,
-            )
-            .await?;
-            self.run_retrieve(
-                harness,
-                context,
-                program,
-                working_state,
-                &mut state,
-                iteration,
-            )
-            .await?;
+                self.run_observe(
+                    harness,
+                    context,
+                    program,
+                    working_state,
+                    &mut state,
+                    iteration,
+                )
+                .await?;
+                self.run_retrieve(
+                    harness,
+                    context,
+                    program,
+                    working_state,
+                    &mut state,
+                    iteration,
+                )
+                .await?;
+                iteration
+            };
             self.run_plan(
                 harness,
                 context,
@@ -279,6 +315,19 @@ impl LoopEngine {
     ) -> Result<(), LoopError> {
         self.enter_phase(harness, context, state, iteration, LoopPhase::Retrieve)
             .await?;
+        self.continue_retrieve(harness, context, program, working_state, state, iteration)
+            .await
+    }
+
+    async fn continue_retrieve<P: LoopProgram>(
+        &self,
+        harness: &ExecutionHarness,
+        context: &mut RunContext,
+        program: &mut P,
+        working_state: &mut P::WorkingState,
+        state: &mut LoopState,
+        iteration: u32,
+    ) -> Result<(), LoopError> {
         let result = program
             .retrieve(iteration, working_state, LoopEffects::new(harness, context))
             .await;
@@ -676,7 +725,9 @@ fn failure_kind_for_harness_error(error: &HarnessError) -> RunFailureKind {
         | HarnessError::DeadlineExceeded { .. }
         | HarnessError::Persistence(_)
         | HarnessError::Recovery(_)
-        | HarnessError::Context(_) => RunFailureKind::Internal,
+        | HarnessError::Context(_)
+        | HarnessError::KnowledgePort(_)
+        | HarnessError::GroundingMismatch => RunFailureKind::Internal,
     }
 }
 

@@ -1135,3 +1135,57 @@ M5  typed actions
 M6  approval governance
 M6.1 Linux containment
 M7  durable events + recovery
+
+# M8 implementation reporting
+
+1. Changed tree. Added agent-knowledge (crates/agent-knowledge/src/lib.rs) and agent-knowledge-adapters (crates/agent-knowledge-adapters/src/lib.rs). Updated core events/IDs, harness lifecycle/recovery, loop
+     integration, workspace dependencies, CLI event matching, README, wiki, and the Codebase Memory ADR. No commit created; HEAD remains 4b14d15d0e8e23a651f84d1df33b9491f7680509.
+
+2. Exact backend contracts.
+      - OCPP MCP inspection found get_ocpp_evidence_pack and search_ocpp_knowledge, but both return Markdown TextContent and encode backend failures as ordinary text. The adapter therefore uses structured GET /
+        search with fixed q, top_k, max_chars, include_content=true, and include_query=false. It normalizes correlation_id plus ordered chunk IDs, document IDs, content, score, strategy, section/pages, evidence
+        layer, source type, and content hash.
+
+      - Standards uses only MCP search_standards_kag, sending query, limit, include_preview=true, provider=local, model=BAAI/bge-m3, pool_limit=20, graph_weight=0.001, and review_status=null. It consumes
+        structuredContent containing retrieval mode, chunk/source provenance, section, heading, page range, chunk type, combined score, and content preview.
+
+3. KnowledgePort. KnowledgePort (crates/agent-knowledge/src/lib.rs:713) is provider-neutral and read-only. KnowledgeRequest contains a validated query, trusted route, deterministic byte/count limits, and
+     optional snapshot requirements. Transport types do not leak through the port.
+
+4. Evidence model. Evidence, EvidenceSet, EvidenceSource, typed metadata, native score-system IDs, provenance references, and manifest digests are constructor-validated. Payload-bearing values use redacted
+     Debug; evidence is intentionally not deserializable, preventing untrusted deserialization from bypassing bounds.
+
+5. Adapters. OCPP adapter (crates/agent-knowledge-adapters/src/ocpp.rs:36) uses fixed HTTP /search. Standards adapter (crates/agent-knowledge-adapters/src/standards.rs:71) implements a bounded MCP stdio subset
+     with a fixed executable, no shell, env_clear, fixed operation, bounded protocol messages/output, sanitized errors, and direct child termination.
+
+6. Routing and merge. Trusted Single and ordered Federated routes support RequireAll and AllowPartial. Merge ordering is backend rank, configured backend priority, then stable evidence ID. Deduplication uses
+     canonical reference when available, otherwise SHA-256 content digest. Native backend scores are retained but never compared across systems.
+
+7. Bounds and security. Enforced limits are 1 KiB query, 8 results, 256 KiB transport response, 4 KiB per evidence item, and 16 KiB total content. Retrieved content is explicitly labeled untrusted before
+     grounding and receives no tool, policy, approval, or containment authority. Prompt-injection immunity is not claimed.
+
+8. M7 recovery. Replay never invokes KnowledgePort. Interrupted or transiently lost retrieval may be repeated only by an explicitly RestartableRetrieval program with a matching recovery version and
+     deterministic reconstruction of query and route. Neither current backend exposes a trustworthy snapshot identifier, so resumed reads are explicitly fresh, not historical replay.
+
+9. Persistence and events. Event schema is now version 7 and checkpoint schema version 2. Metadata-only events cover retrieval started/restarted/completed/failed and model-grounding binding. Persisted data
+     includes correlation, route, query digest/size, evidence references/count, snapshots when available, truncation/degradation, and manifest digest. Durable start failure results in zero backend calls.
+
+10. Dependencies. agent-knowledge uses futures-util, sha2, and thiserror. Adapters use pinned reqwest 0.13.4 without default features, serde, serde_json, Tokio, and url. No rmcp, database, embedding, indexing,
+     vector-store, or provider dependency was added.
+
+11. Verification.
+      - cargo fmt --all -- --check: passed.
+      - Strict workspace Clippy with all targets/features: passed.
+      - Workspace tests: 216 unit/integration tests and 4 doctests passed.
+      - Explicit M6.1 certification: 1 passed in enterprise-local-agent-m6-cert:2541e5c; no relevant containment changes followed.
+      - Cargo dependency scan confirms the approved inward boundaries.
+      - Codebase Memory reports no recorded coverage gaps and a 36-symbol inbound blast radius across the expected integration modules.
+      - ADR headings remain PURPOSE, STACK, ARCHITECTURE, PATTERNS, TRADEOFFS, and PHILOSOPHY.
+
+12. Guarantees/non-guarantees. M8 guarantees bounded fixed-operation retrieval, provenance preservation, deterministic federation, inert replay, metadata-only persistence, and unchanged M5-M7 execution
+     authority. It does not guarantee backend availability, cross-backend score comparability, stable historical retrieval without snapshots, prompt-injection immunity, or cancellation of work already running
+     inside a remote HTTP service.
+
+13. Deviations. OCPP uses its structured API instead of its weaker Markdown MCP contract. The standards adapter uses a small fixed-operation MCP client rather than a generic MCP SDK. Backend adapters are not
+     wired into the default CLI because endpoints/process configuration are deployment-specific. Standards subprocess cancellation kills the directly owned process; descendant process-tree containment is not
+     claimed. Pre-existing untracked .codebase-memory/ and knowledge/ directories remain excluded from the M8 deliverable.

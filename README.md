@@ -56,6 +56,37 @@ cargo test -p agent-containment-linux --all-features \
 The probe tests required behavior and does not trust the version string alone.
 Invoking certification on an unsupported host is a test failure, not a skip.
 
+## M7 durable recovery
+
+M7 journals metadata-only events and quiescent checkpoints through the
+provider-neutral `RunPersistencePort`. The SQLite adapter remains outside the
+harness. Recovery validates identity, versions, sequence continuity, checksums,
+and the event-chain digest, then replays the same deterministic reducer used at
+runtime. Replay never invokes model, approval, tool, containment, or other
+external ports.
+
+## M8 enterprise knowledge integration
+
+M8 integrates the existing OCPP RAG/KAG and standards-mcp backends behind the
+provider-neutral `KnowledgePort`. It does not add ingestion, embeddings,
+indexing, or vector storage. Trusted configuration selects one backend or a
+deterministic federation; model text cannot select endpoints, processes, or MCP
+operations.
+
+The OCPP adapter uses its structured read-only `GET /search` API. The inspected
+OCPP MCP tool returns Markdown-only results and does not provide reliable
+structured error signaling. The standards adapter uses only the fixed
+`search_standards_kag` MCP operation over bounded stdio JSON-RPC. Evidence is
+bounded, provenance-preserving, and explicitly supplied to models as untrusted
+data. It receives no policy, approval, tool, or containment authority.
+
+M8 recovery persists only retrieval correlation, route, query digest/size,
+evidence references/counts, available snapshot metadata, truncation/degradation,
+and a manifest digest. Replay is inert. An explicitly retrieval-restartable
+program may reconstruct the same query and route and perform a new read after
+restart; without a backend snapshot this is fresh retrieval, not historical
+replay.
+
 ## Deterministic demonstration
 
 The default CLI path is network-free. It uses `RigModelAdapter<FakeRigModel>`

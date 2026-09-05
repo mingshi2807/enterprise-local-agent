@@ -1,11 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActionProposalId, ActionRejectionReason, ApprovalRequestId, CapabilityKind, LoopEventKind,
-    ModelCallId, RunId, RunOutcome, TokenUsage, ToolCallId, ToolDomainFailureKind, ToolName,
+    ActionProposalId, ActionRejectionReason, ApprovalRequestId, CapabilityKind,
+    KnowledgeRetrievalId, LoopEventKind, ModelCallId, RunId, RunOutcome, TokenUsage, ToolCallId,
+    ToolDomainFailureKind, ToolName,
 };
 
-pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(6);
+pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(7);
+
+pub const MAX_DURABLE_KNOWLEDGE_BACKENDS: usize = 2;
+pub const MAX_DURABLE_EVIDENCE_REFERENCES: usize = 8;
+pub const MAX_DURABLE_KNOWLEDGE_ID_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -181,9 +186,171 @@ pub enum AgentEventKind {
         capability: CapabilityKind,
         kind: ContainmentFailureKind,
     },
+    KnowledgeRetrievalStarted {
+        retrieval_id: KnowledgeRetrievalId,
+        route: KnowledgeRouteMetadata,
+        query_digest: [u8; 32],
+        query_bytes: u16,
+    },
+    KnowledgeRetrievalRestarted {
+        previous_retrieval_id: KnowledgeRetrievalId,
+        retrieval_id: KnowledgeRetrievalId,
+        route: KnowledgeRouteMetadata,
+        query_digest: [u8; 32],
+        query_bytes: u16,
+    },
+    KnowledgeRetrievalCompleted {
+        retrieval_id: KnowledgeRetrievalId,
+        snapshots: Vec<KnowledgeSnapshotMetadata>,
+        evidence_references: Vec<KnowledgeEvidenceReference>,
+        evidence_count: u8,
+        truncated: bool,
+        degraded: bool,
+        manifest_digest: [u8; 32],
+    },
+    KnowledgeRetrievalFailed {
+        retrieval_id: KnowledgeRetrievalId,
+        kind: KnowledgeFailureKind,
+    },
+    ModelGroundingBound {
+        retrieval_id: KnowledgeRetrievalId,
+        model_call_id: ModelCallId,
+        evidence_count: u8,
+        manifest_digest: [u8; 32],
+    },
     Loop {
         event: LoopEventKind,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeBackendId {
+    OcppRagKag,
+    StandardsMcp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum KnowledgeRouteMetadata {
+    Single {
+        backend: KnowledgeBackendId,
+    },
+    Federated {
+        backends: Vec<KnowledgeBackendId>,
+        allow_partial: bool,
+    },
+}
+
+impl KnowledgeRouteMetadata {
+    #[must_use]
+    pub fn backends(&self) -> &[KnowledgeBackendId] {
+        match self {
+            Self::Single { backend } => std::slice::from_ref(backend),
+            Self::Federated { backends, .. } => backends,
+        }
+    }
+
+    #[must_use]
+    pub const fn allow_partial(&self) -> bool {
+        matches!(
+            self,
+            Self::Federated {
+                allow_partial: true,
+                ..
+            }
+        )
+    }
+
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        let backends = self.backends();
+        !backends.is_empty()
+            && backends.len() <= MAX_DURABLE_KNOWLEDGE_BACKENDS
+            && backends
+                .iter()
+                .enumerate()
+                .all(|(index, backend)| !backends[..index].contains(backend))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeEvidenceReference {
+    backend: KnowledgeBackendId,
+    reference_id: String,
+}
+
+impl KnowledgeEvidenceReference {
+    #[must_use]
+    pub fn new(backend: KnowledgeBackendId, reference_id: String) -> Option<Self> {
+        (!reference_id.is_empty()
+            && reference_id.len() <= MAX_DURABLE_KNOWLEDGE_ID_BYTES
+            && !reference_id.chars().any(char::is_control))
+        .then_some(Self {
+            backend,
+            reference_id,
+        })
+    }
+
+    #[must_use]
+    pub const fn backend(&self) -> KnowledgeBackendId {
+        self.backend
+    }
+
+    #[must_use]
+    pub fn reference_id(&self) -> &str {
+        &self.reference_id
+    }
+
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        Self::new(self.backend, self.reference_id.clone()).is_some()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeSnapshotMetadata {
+    backend: KnowledgeBackendId,
+    version: String,
+}
+
+impl KnowledgeSnapshotMetadata {
+    #[must_use]
+    pub fn new(backend: KnowledgeBackendId, version: String) -> Option<Self> {
+        (!version.is_empty()
+            && version.len() <= MAX_DURABLE_KNOWLEDGE_ID_BYTES
+            && !version.chars().any(char::is_control))
+        .then_some(Self { backend, version })
+    }
+
+    #[must_use]
+    pub const fn backend(&self) -> KnowledgeBackendId {
+        self.backend
+    }
+
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        Self::new(self.backend, self.version.clone()).is_some()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeFailureKind {
+    Unavailable,
+    Rejected,
+    MalformedResponse,
+    SnapshotMismatch,
+    Failed,
+    Cancelled,
+    DeadlineExceeded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,7 +384,7 @@ mod tests {
         );
 
         assert_eq!(event.schema_version(), CURRENT_EVENT_SCHEMA_VERSION);
-        assert_eq!(event.schema_version().get(), 6);
+        assert_eq!(event.schema_version().get(), 7);
         assert_eq!(event.sequence().get(), 7);
 
         let json = serde_json::to_string(&event).expect("event must serialize");
