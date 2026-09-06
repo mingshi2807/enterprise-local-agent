@@ -2,9 +2,9 @@
 title: "Enterprise Local Agent Milestone Index"
 tags: ["enterprise-local-agent", "milestones", "roadmap", "index"]
 created: 2026-08-15T13:34:09.996Z
-updated: 2026-09-05T12:08:40Z
+updated: 2026-09-06
 sources: ["docs/proposal/proposal.md", "docs/reports/reports_impl.md", "git history"]
-links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m6-1-production-linux-localwrite-containment.md", "m7-durable-event-persistence-and-recovery.md", "m8-enterprise-knowledge-integration.md"]
+links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m6-1-production-linux-localwrite-containment.md", "m7-durable-event-persistence-and-recovery.md", "m8-enterprise-knowledge-integration.md", "m9-deterministic-graph-engine-poc.md"]
 category: reference
 confidence: high
 schemaVersion: 1
@@ -25,13 +25,16 @@ This is the durable navigation page for architectural milestones. Git and the im
 | M6 Approval and Containment Boundary | Completed | `m6-approval-containment` | [[m6-approval-and-containment-boundary]] |
 | M6.1 Production Linux LocalWrite Containment | Completed and production-certified | `m6.1-linux-localwrite-containment` | [[m6-1-production-linux-localwrite-containment]] |
 | M7 Durable Event Persistence and Recovery | Completed | `m7-durable-recovery` | [[m7-durable-event-persistence-and-recovery]] |
-| M8 Enterprise Knowledge Integration | Implemented and verified, uncommitted | Not tagged | [[m8-enterprise-knowledge-integration]] |
+| M8 Enterprise Knowledge Integration | Completed | `m8-enterprise-knowledge` | [[m8-enterprise-knowledge-integration]] |
+| M9 Deterministic Graph Engine PoC | Implemented and verified, uncommitted | Not tagged | [[m9-deterministic-graph-engine-poc]] |
 
 ## Stable architecture
 
-Client → Enterprise Harness → Deterministic Loop → future Graph Engine → Model / Tools / Knowledge.
+Client -> Deterministic Loop or Graph Engine -> Enterprise Harness -> Model / Tools / Knowledge.
 
-Provider and framework types remain outside agent-core, agent-harness, and agent-loop. ExecutionHarness remains the authority for lifecycle, budgets, policy, audit, cancellation, deadlines, and external effects.
+Provider and framework types remain outside agent-core, agent-harness, agent-loop,
+and agent-graph. ExecutionHarness remains the authority for lifecycle, budgets,
+policy, audit, cancellation, deadlines, persistence, and external effects.
 
 ## Source-log policy
 

@@ -1202,3 +1202,40 @@ M6   Approval
 M6.1 Linux Containment
 M7   Durable Recovery
 M8   Enterprise Knowledge Integration
+
+# M9 implementation reporting
+
+1. Changed tree: Added agent-graph (crates/agent-graph/src/lib.rs), crates/agent-core/src/graph_control.rs, and the M9 wiki dossier (omx_wiki/m9-deterministic-graph-engine-poc.md). Extended core budgets/
+     events, harness execution/recovery, workspace manifests, README, wiki indexes, CLI exhaustiveness, and one LoopEngine recovery-contract match. No commit was created.
+
+2. Graph domain/validation: Immutable bounded DAG supporting Retrieve, Model, Action, Verify, Decision, Complete, and Fail. Validation rejects cycles, unreachable/unknown nodes, duplicate or invalid
+     transitions, terminal outgoing edges, invalid recovery modes, oversized IDs, more than 64 nodes, and more than 128 edges.
+
+3. Digest: SHA-256 with domain separation, explicit stable tags, length-prefixed identifiers, and sorted nodes, edges, and decision branches. Input/map ordering does not affect the digest.
+4. Effects façades: RetrieveEffects, ModelEffects, and ActionEffects delegate exclusively through ExecutionHarness. VerifyEffects and DecisionContext expose no external effects. Production source scans found
+     no direct ports, registries, policy, approval, containment, provider, Rig, MCP, HTTP, SQLite, or agent-loop access.
+
+5. Execution algorithm: Harness preflight and durable graph-step reservation occur before each callback. Typed outcomes resolve exactly one validated transition. Completion/next-node state is persisted before
+     advancing. Callback or invalid-transition failure terminalizes without retry or fallback.
+
+6. Graph budget: Added independent GraphSteps. RunBudget::new remains unchanged; default is zero. .with_max_graph_steps(n) explicitly enables execution and enforces the ceiling of 64.
+7. Persistence/recovery: Event schema is now 8 and checkpoint schema 3. Metadata-only graph events and checkpoint state record digest, node position, attempt IDs, recovery mode, and step usage. The existing
+     harness reducer remains authoritative for both live transitions and replay.
+
+8. Restart semantics: Retrieve restarts only as a new fresh retrieval. Decision may resume only at a reconstructable deterministic boundary. Model, Action, and Verify are never reconstructed. Unresolved model/
+     approval/tool/containment effects remain ManualReconciliationRequired. Version or digest mismatch fails closed.
+
+9. PoC workflow: Tested Retrieve → grounded Model → Action → Verify → Complete/Fail. A separate LocalWrite graph test proves M5 validation, M6 policy/approval/audit, containment dispatch, budgets, and
+     ToolCallId correlation remain harness-owned.
+
+10. Dependencies: No new third-party dependency. Production agent-graph uses existing agent-core, agent-harness, agent-knowledge, sha2, and thiserror. SQLite, Tokio test runtime, and test fixtures are dev-
+     only.
+
+11. Tests: Formatting, strict Clippy, dependency/boundary scans, git diff --check, and all 241 workspace tests plus four compile-fail doctests passed. SQLite transaction fault injection passed. M6.1
+     certification passed without skips using Bubblewrap 0.11.2 and static PIE mode-0555 worker 227c6c8a...; Landlock reported PartiallyEnforced. Process-tree reaping was exercised by certification.
+
+12. Guarantees/non-guarantees: Routing is deterministic from typed outcomes; callbacks are trusted code and are not claimed pure or deterministic. No exactly-once effects, arbitrary state recovery, historical
+     evidence reconstruction, dynamic graphs, cycles, parallel branches, or implicit retries are claimed.
+
+13. Deviations: The PoC application composition is represented by comprehensive integration tests rather than a new CLI mode. The existing immutable M6.1 worker artifact was reused because M9 did not modify
+     worker or containment code. Codebase Memory ADR and wiki were updated and verified. The pre-existing untracked .codebase-memory/ directory remains outside the deliverable.

@@ -2,9 +2,11 @@ use std::time::Duration;
 
 use agent_core::{
     AgentEvent, AgentEventKind, ApprovalRequestId, BudgetUsage, CURRENT_EVENT_SCHEMA_VERSION,
-    CapabilityKind, EventSequence, KnowledgeRetrievalId, KnowledgeRouteMetadata, LoopDecisionKind,
-    LoopEventKind, LoopPhase, MAX_DURABLE_EVIDENCE_REFERENCES, MAX_DURABLE_KNOWLEDGE_BACKENDS,
-    ModelCallId, RunOutcome, RunStatus, ToolCallId,
+    CapabilityKind, EventSequence, GraphNodeAttemptId, GraphNodeId, GraphNodeKind,
+    GraphProgressEvent, GraphRecoveryMode, KnowledgeRetrievalId, KnowledgeRouteMetadata,
+    LoopDecisionKind, LoopEventKind, LoopPhase, MAX_DURABLE_EVIDENCE_REFERENCES,
+    MAX_DURABLE_KNOWLEDGE_BACKENDS, MAX_GRAPH_STEPS, ModelCallId, RunOutcome, RunStatus,
+    ToolCallId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -100,9 +102,97 @@ struct DurableKnowledgeManifest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum DurableGraphPosition {
+    NotStarted,
+    Ready {
+        node_id: GraphNodeId,
+        node_kind: GraphNodeKind,
+        recovery: GraphRecoveryMode,
+    },
+    Running {
+        attempt_id: GraphNodeAttemptId,
+        node_id: GraphNodeId,
+        node_kind: GraphNodeKind,
+        recovery: GraphRecoveryMode,
+    },
+    Finished,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphRestartAnchor {
+    node_id: GraphNodeId,
+    attempt_id: GraphNodeAttemptId,
+}
+
+impl GraphRestartAnchor {
+    #[must_use]
+    pub const fn node_id(&self) -> &GraphNodeId {
+        &self.node_id
+    }
+
+    #[must_use]
+    pub const fn attempt_id(&self) -> GraphNodeAttemptId {
+        self.attempt_id
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableGraphState {
+    definition_digest: [u8; 32],
+    position: DurableGraphPosition,
+    steps: u32,
+    restart_anchor: Option<GraphRestartAnchor>,
+}
+
+impl DurableGraphState {
+    #[must_use]
+    pub const fn definition_digest(&self) -> [u8; 32] {
+        self.definition_digest
+    }
+
+    #[must_use]
+    pub const fn position(&self) -> &DurableGraphPosition {
+        &self.position
+    }
+
+    #[must_use]
+    pub const fn steps(&self) -> u32 {
+        self.steps
+    }
+
+    #[must_use]
+    pub const fn restart_anchor(&self) -> Option<&GraphRestartAnchor> {
+        self.restart_anchor.as_ref()
+    }
+
+    #[must_use]
+    pub fn can_resume(&self) -> bool {
+        if self.restart_anchor.is_some() {
+            return true;
+        }
+        matches!(
+            self.position,
+            DurableGraphPosition::Ready {
+                recovery: GraphRecoveryMode::FreshRetrieval
+                    | GraphRecoveryMode::DeterministicBoundary,
+                ..
+            } | DurableGraphPosition::Running {
+                recovery: GraphRecoveryMode::FreshRetrieval
+                    | GraphRecoveryMode::DeterministicBoundary,
+                ..
+            }
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DurableRunState {
     context: ContextSnapshot,
+    recovery_contract: RecoveryContract,
     last_sequence: Option<EventSequence>,
     event_chain_digest: [u8; 32],
     current_iteration: Option<u32>,
@@ -113,6 +203,7 @@ pub struct DurableRunState {
     pending_knowledge_retrieval: Option<PendingKnowledgeRetrieval>,
     restartable_knowledge_retrieval: Option<PendingKnowledgeRetrieval>,
     latest_knowledge_manifest: Option<DurableKnowledgeManifest>,
+    graph: Option<DurableGraphState>,
 }
 
 impl DurableRunState {
@@ -127,6 +218,7 @@ impl DurableRunState {
                 audit_degraded: false,
                 started_at_unix_millis: None,
             },
+            recovery_contract: record.recovery_contract(),
             last_sequence: None,
             event_chain_digest: [0; 32],
             current_iteration: None,
@@ -137,6 +229,7 @@ impl DurableRunState {
             pending_knowledge_retrieval: None,
             restartable_knowledge_retrieval: None,
             latest_knowledge_manifest: None,
+            graph: None,
         }
     }
 
@@ -221,7 +314,14 @@ impl DurableRunState {
                     self.context.usage.tool_calls(),
                     self.context.usage.iterations(),
                     self.context.usage.approval_requests(),
-                );
+                )
+                .with_graph_steps(self.context.usage.graph_steps());
+                if self.graph.is_some() {
+                    if let Some(graph) = &mut self.graph {
+                        graph.restart_anchor = None;
+                    }
+                    self.restartable_knowledge_retrieval = None;
+                }
                 self.pending_effects.push(PendingEffect::Model {
                     model_call_id: *model_call_id,
                 });
@@ -247,7 +347,8 @@ impl DurableRunState {
                     self.context.usage.tool_calls(),
                     self.context.usage.iterations(),
                     *usage,
-                );
+                )
+                .with_graph_steps(self.context.usage.graph_steps());
                 self.pending_effects.push(PendingEffect::Approval {
                     approval_request_id: *approval_request_id,
                 });
@@ -280,7 +381,8 @@ impl DurableRunState {
                     *usage,
                     self.context.usage.iterations(),
                     self.context.usage.approval_requests(),
-                );
+                )
+                .with_graph_steps(self.context.usage.graph_steps());
                 self.pending_effects.push(PendingEffect::Tool {
                     tool_call_id: *tool_call_id,
                     capability: *capability,
@@ -371,6 +473,9 @@ impl DurableRunState {
             AgentEventKind::KnowledgeRetrievalFailed { retrieval_id, .. } => {
                 self.finish_knowledge_retrieval(*retrieval_id)?;
                 self.latest_knowledge_manifest = None;
+                if let Some(graph) = &mut self.graph {
+                    graph.restart_anchor = None;
+                }
             }
             AgentEventKind::ModelGroundingBound {
                 retrieval_id,
@@ -400,6 +505,7 @@ impl DurableRunState {
                 self.continuation = ContinuationState::TransientStateRequired;
             }
             AgentEventKind::Loop { event } => self.apply_loop(*event)?,
+            AgentEventKind::Graph { event } => self.apply_graph(event)?,
             AgentEventKind::ActionProposed { .. }
             | AgentEventKind::ActionValidated { .. }
             | AgentEventKind::ActionRejected { .. }
@@ -433,7 +539,8 @@ impl DurableRunState {
                     self.context.usage.tool_calls(),
                     usage,
                     self.context.usage.approval_requests(),
-                );
+                )
+                .with_graph_steps(self.context.usage.graph_steps());
                 self.current_iteration = Some(iteration);
                 self.loop_position = DurableLoopPosition::PhaseReady(LoopPhase::Observe);
                 self.continuation = ContinuationState::TransientStateRequired;
@@ -513,6 +620,247 @@ impl DurableRunState {
         Ok(())
     }
 
+    fn apply_graph(&mut self, event: &GraphProgressEvent) -> Result<(), TransitionError> {
+        match event {
+            GraphProgressEvent::GraphStarted {
+                definition_digest,
+                start_node,
+                start_kind,
+                start_recovery,
+            } => {
+                if self.graph.is_some()
+                    || self.loop_position != DurableLoopPosition::NotStarted
+                    || !matches!(self.context.status, RunStatus::Running)
+                    || !matches!(
+                        self.recovery_contract,
+                        RecoveryContract::Graph {
+                            definition_digest: expected,
+                            ..
+                        } if expected == *definition_digest
+                    )
+                    || !valid_recovery_mode(*start_kind, *start_recovery)
+                {
+                    return Err(TransitionError::Graph);
+                }
+                self.graph = Some(DurableGraphState {
+                    definition_digest: *definition_digest,
+                    position: DurableGraphPosition::Ready {
+                        node_id: start_node.clone(),
+                        node_kind: *start_kind,
+                        recovery: *start_recovery,
+                    },
+                    steps: 0,
+                    restart_anchor: None,
+                });
+                self.continuation = continuation_for(*start_recovery);
+            }
+            GraphProgressEvent::GraphNodeEntered {
+                attempt_id,
+                node_id,
+                node_kind,
+                recovery,
+                step,
+                limit,
+            } => {
+                let graph = self.graph.as_mut().ok_or(TransitionError::Graph)?;
+                if graph.position
+                    != (DurableGraphPosition::Ready {
+                        node_id: node_id.clone(),
+                        node_kind: *node_kind,
+                        recovery: *recovery,
+                    })
+                    || *limit != self.context.budget.max_graph_steps()
+                    || *limit == 0
+                    || *limit > MAX_GRAPH_STEPS
+                    || *step != graph.steps.saturating_add(1)
+                    || *step != self.context.usage.graph_steps().saturating_add(1)
+                    || !valid_recovery_mode(*node_kind, *recovery)
+                {
+                    return Err(TransitionError::Graph);
+                }
+                graph.steps = *step;
+                graph.position = DurableGraphPosition::Running {
+                    attempt_id: *attempt_id,
+                    node_id: node_id.clone(),
+                    node_kind: *node_kind,
+                    recovery: *recovery,
+                };
+                if *recovery == GraphRecoveryMode::FreshRetrieval {
+                    graph.restart_anchor = Some(GraphRestartAnchor {
+                        node_id: node_id.clone(),
+                        attempt_id: *attempt_id,
+                    });
+                }
+                self.context.usage = self.context.usage.with_graph_steps(*step);
+                self.continuation = ContinuationState::TransientStateRequired;
+            }
+            GraphProgressEvent::GraphNodeRestarted {
+                previous_attempt_id,
+                attempt_id,
+                node_id,
+                node_kind,
+                recovery,
+                step,
+                limit,
+            } => {
+                let graph = self.graph.as_mut().ok_or(TransitionError::Graph)?;
+                let direct_restart = match &graph.position {
+                    DurableGraphPosition::Ready {
+                        node_id: current_id,
+                        node_kind: current_kind,
+                        recovery: current_recovery,
+                    } => {
+                        current_id == node_id
+                            && current_kind == node_kind
+                            && current_recovery == recovery
+                            && previous_attempt_id.is_none()
+                            && *recovery != GraphRecoveryMode::Never
+                    }
+                    DurableGraphPosition::Running {
+                        attempt_id: current_attempt,
+                        node_id: current_id,
+                        node_kind: current_kind,
+                        recovery: current_recovery,
+                    } => {
+                        current_id == node_id
+                            && current_kind == node_kind
+                            && current_recovery == recovery
+                            && previous_attempt_id == &Some(*current_attempt)
+                            && *recovery != GraphRecoveryMode::Never
+                    }
+                    DurableGraphPosition::NotStarted | DurableGraphPosition::Finished => false,
+                };
+                let anchor_matches = graph.restart_anchor.as_ref().is_some_and(|anchor| {
+                    anchor.node_id == *node_id
+                        && *recovery == GraphRecoveryMode::FreshRetrieval
+                        && previous_attempt_id == &Some(anchor.attempt_id)
+                });
+                if (!direct_restart && !anchor_matches)
+                    || *limit != self.context.budget.max_graph_steps()
+                    || *limit == 0
+                    || *limit > MAX_GRAPH_STEPS
+                    || *step != graph.steps.saturating_add(1)
+                    || *step != self.context.usage.graph_steps().saturating_add(1)
+                    || !valid_recovery_mode(*node_kind, *recovery)
+                {
+                    return Err(TransitionError::Graph);
+                }
+                graph.steps = *step;
+                graph.position = DurableGraphPosition::Running {
+                    attempt_id: *attempt_id,
+                    node_id: node_id.clone(),
+                    node_kind: *node_kind,
+                    recovery: *recovery,
+                };
+                if *recovery == GraphRecoveryMode::FreshRetrieval {
+                    graph.restart_anchor = Some(GraphRestartAnchor {
+                        node_id: node_id.clone(),
+                        attempt_id: *attempt_id,
+                    });
+                }
+                self.context.usage = self.context.usage.with_graph_steps(*step);
+                self.continuation = ContinuationState::TransientStateRequired;
+            }
+            GraphProgressEvent::GraphNodeCompleted {
+                attempt_id,
+                node_id,
+                next_node,
+                next_kind,
+                next_recovery,
+                ..
+            } => {
+                let graph = self.graph.as_mut().ok_or(TransitionError::Graph)?;
+                if graph.position
+                    != (DurableGraphPosition::Running {
+                        attempt_id: *attempt_id,
+                        node_id: node_id.clone(),
+                        node_kind: graph_node_kind(&graph.position)?,
+                        recovery: graph_recovery_mode(&graph.position)?,
+                    })
+                    || !self.pending_effects.is_empty()
+                    || self.pending_knowledge_retrieval.is_some()
+                    || !valid_recovery_mode(*next_kind, *next_recovery)
+                {
+                    return Err(TransitionError::Graph);
+                }
+                graph.position = DurableGraphPosition::Ready {
+                    node_id: next_node.clone(),
+                    node_kind: *next_kind,
+                    recovery: *next_recovery,
+                };
+                self.continuation = continuation_for(*next_recovery);
+            }
+            GraphProgressEvent::GraphCompleted {
+                attempt_id,
+                node_id,
+                steps,
+            } => {
+                self.finish_graph_terminal(
+                    *attempt_id,
+                    node_id,
+                    *steps,
+                    Some(GraphNodeKind::Complete),
+                    RunOutcome::Completed,
+                )?;
+            }
+            GraphProgressEvent::GraphFailed {
+                attempt_id,
+                node_id,
+                steps,
+                failure,
+                run_failure,
+            } => {
+                if *run_failure != (agent_core::RunFailureKind::Graph { kind: *failure }) {
+                    return Err(TransitionError::Graph);
+                }
+                self.finish_graph_terminal(
+                    *attempt_id,
+                    node_id,
+                    *steps,
+                    None,
+                    RunOutcome::Failed { kind: *run_failure },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_graph_terminal(
+        &mut self,
+        attempt_id: GraphNodeAttemptId,
+        node_id: &GraphNodeId,
+        steps: u32,
+        expected_kind: Option<GraphNodeKind>,
+        outcome: RunOutcome,
+    ) -> Result<(), TransitionError> {
+        let graph = self.graph.as_mut().ok_or(TransitionError::Graph)?;
+        let position_matches = matches!(
+            &graph.position,
+            DurableGraphPosition::Running {
+                attempt_id: current_attempt,
+                node_id: current_node,
+                node_kind,
+                recovery,
+            } if *current_attempt == attempt_id
+                && current_node == node_id
+                && expected_kind.is_none_or(|expected| *node_kind == expected)
+                && (expected_kind.is_none() || *recovery == GraphRecoveryMode::Never)
+        );
+        if graph.steps != steps
+            || !position_matches
+            || !self.pending_effects.is_empty()
+            || self.pending_knowledge_retrieval.is_some()
+            || !matches!(self.context.status, RunStatus::Running)
+        {
+            return Err(TransitionError::Graph);
+        }
+        graph.position = DurableGraphPosition::Finished;
+        graph.restart_anchor = None;
+        self.context.status = RunStatus::Finished(outcome);
+        self.continuation = ContinuationState::TransientStateRequired;
+        Ok(())
+    }
+
     fn remove_pending(&mut self, key: PendingEffectKey) -> Result<(), TransitionError> {
         let position = self
             .pending_effects
@@ -534,7 +882,15 @@ impl DurableRunState {
             || !route.is_valid()
             || query_bytes == 0
             || usize::from(query_bytes) > agent_knowledge::MAX_QUERY_BYTES
-            || self.loop_position != DurableLoopPosition::PhaseRunning(LoopPhase::Retrieve)
+            || (self.loop_position != DurableLoopPosition::PhaseRunning(LoopPhase::Retrieve)
+                && !matches!(
+                    self.graph.as_ref().map(DurableGraphState::position),
+                    Some(DurableGraphPosition::Running {
+                        node_kind: GraphNodeKind::Retrieve,
+                        recovery: GraphRecoveryMode::FreshRetrieval,
+                        ..
+                    })
+                ))
         {
             return Err(TransitionError::Effect);
         }
@@ -637,6 +993,11 @@ impl DurableRunState {
     }
 
     #[must_use]
+    pub const fn graph(&self) -> Option<&DurableGraphState> {
+        self.graph.as_ref()
+    }
+
+    #[must_use]
     pub const fn is_quiescent(&self) -> bool {
         self.pending_effects.is_empty() && self.pending_knowledge_retrieval.is_none()
     }
@@ -688,10 +1049,56 @@ pub enum TransitionError {
     Budget,
     #[error("event loop transition is invalid")]
     Loop,
+    #[error("event graph transition is invalid")]
+    Graph,
     #[error("event effect transition is invalid")]
     Effect,
     #[error("event encoding failed")]
     Encoding,
+}
+
+fn valid_recovery_mode(kind: GraphNodeKind, recovery: GraphRecoveryMode) -> bool {
+    matches!(
+        (kind, recovery),
+        (GraphNodeKind::Retrieve, GraphRecoveryMode::FreshRetrieval)
+            | (
+                GraphNodeKind::Decision,
+                GraphRecoveryMode::DeterministicBoundary
+            )
+            | (
+                GraphNodeKind::Model
+                    | GraphNodeKind::Action
+                    | GraphNodeKind::Verify
+                    | GraphNodeKind::Complete
+                    | GraphNodeKind::Fail,
+                GraphRecoveryMode::Never
+            )
+    )
+}
+
+const fn continuation_for(recovery: GraphRecoveryMode) -> ContinuationState {
+    match recovery {
+        GraphRecoveryMode::Never => ContinuationState::TransientStateRequired,
+        GraphRecoveryMode::FreshRetrieval | GraphRecoveryMode::DeterministicBoundary => {
+            ContinuationState::RestartableBoundary
+        }
+    }
+}
+
+fn graph_node_kind(position: &DurableGraphPosition) -> Result<GraphNodeKind, TransitionError> {
+    match position {
+        DurableGraphPosition::Running { node_kind, .. } => Ok(*node_kind),
+        _ => Err(TransitionError::Graph),
+    }
+}
+
+fn graph_recovery_mode(
+    position: &DurableGraphPosition,
+) -> Result<GraphRecoveryMode, TransitionError> {
+    match position {
+        DurableGraphPosition::Running { recovery, .. } => Ok(*recovery),
+        _ => Err(TransitionError::Graph),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -854,7 +1261,17 @@ pub(crate) fn recover_loaded_run(
             ) && state.loop_position()
                 == DurableLoopPosition::PhaseRunning(LoopPhase::Retrieve)
                 && state.restartable_knowledge_retrieval().is_some();
+            let graph_restart = matches!(
+                record.recovery_contract(),
+                RecoveryContract::Graph {
+                    definition_digest,
+                    ..
+                } if state.graph().is_some_and(|graph| {
+                    graph.definition_digest() == definition_digest && graph.can_resume()
+                })
+            );
             if !retrieval_restart
+                && !graph_restart
                 && !matches!(
                     state.continuation(),
                     ContinuationState::InitialBoundary | ContinuationState::RestartableBoundary
@@ -901,8 +1318,9 @@ mod tests {
     use std::time::Duration;
 
     use agent_core::{
-        ActionProposalId, ApprovalRequestId, KnowledgeBackendId, KnowledgeEvidenceReference,
-        KnowledgeFailureKind, KnowledgeRouteMetadata, RunBudget, RunId, SessionId, ToolName,
+        ActionProposalId, ApprovalRequestId, GraphTransitionKey, KnowledgeBackendId,
+        KnowledgeEvidenceReference, KnowledgeFailureKind, KnowledgeRouteMetadata, RunBudget, RunId,
+        SessionId, ToolName,
     };
 
     use super::*;
@@ -915,7 +1333,9 @@ mod tests {
             RunKey::new(RunId::new(), SessionId::new()),
             RunBudget::new(4, 4, 4, Duration::from_secs(60))
                 .expect("budget must be valid")
-                .with_max_approval_requests(4),
+                .with_max_approval_requests(4)
+                .with_max_graph_steps(8)
+                .expect("graph budget must be valid"),
             contract,
         )
     }
@@ -1090,6 +1510,444 @@ mod tests {
                 .restartable_knowledge_retrieval()
                 .is_some()
         );
+    }
+
+    fn graph_record() -> RunRecord {
+        record(RecoveryContract::Graph {
+            program_version: 9,
+            definition_digest: [7; 32],
+        })
+    }
+
+    fn graph_prefix(record: &RunRecord) -> (Vec<AgentEvent>, GraphNodeAttemptId) {
+        let attempt_id = GraphNodeAttemptId::new();
+        (
+            vec![
+                started(record),
+                event(
+                    record,
+                    1,
+                    AgentEventKind::Graph {
+                        event: GraphProgressEvent::GraphStarted {
+                            definition_digest: [7; 32],
+                            start_node: GraphNodeId::new("retrieve").expect("node"),
+                            start_kind: GraphNodeKind::Retrieve,
+                            start_recovery: GraphRecoveryMode::FreshRetrieval,
+                        },
+                    },
+                ),
+                event(
+                    record,
+                    2,
+                    AgentEventKind::Graph {
+                        event: GraphProgressEvent::GraphNodeEntered {
+                            attempt_id,
+                            node_id: GraphNodeId::new("retrieve").expect("node"),
+                            node_kind: GraphNodeKind::Retrieve,
+                            recovery: GraphRecoveryMode::FreshRetrieval,
+                            step: 1,
+                            limit: 8,
+                        },
+                    },
+                ),
+            ],
+            attempt_id,
+        )
+    }
+
+    #[test]
+    fn graph_retrieve_recovery_is_fresh_and_lost_evidence_is_not_reconstructed() {
+        for complete_retrieval in [false, true] {
+            let record = graph_record();
+            let (mut events, _) = graph_prefix(&record);
+            let retrieval_id = KnowledgeRetrievalId::new();
+            events.push(event(
+                &record,
+                3,
+                AgentEventKind::KnowledgeRetrievalStarted {
+                    retrieval_id,
+                    route: KnowledgeRouteMetadata::Single {
+                        backend: KnowledgeBackendId::StandardsMcp,
+                    },
+                    query_digest: [3; 32],
+                    query_bytes: 8,
+                },
+            ));
+            if complete_retrieval {
+                events.push(event(
+                    &record,
+                    4,
+                    AgentEventKind::KnowledgeRetrievalCompleted {
+                        retrieval_id,
+                        snapshots: Vec::new(),
+                        evidence_references: Vec::new(),
+                        evidence_count: 0,
+                        truncated: false,
+                        degraded: false,
+                        manifest_digest: [4; 32],
+                    },
+                ));
+            }
+
+            let disposition = recover(record.clone(), DurableCheckpoint::initial(&record), events)
+                .expect("classification");
+            let RecoveryDisposition::Resumable(recovered) = disposition else {
+                panic!("Retrieve must recover only as a fresh-retrieval boundary");
+            };
+            let anchor = recovered
+                .state()
+                .graph()
+                .and_then(DurableGraphState::restart_anchor)
+                .expect("fresh retrieval anchor");
+            assert_eq!(anchor.node_id().as_str(), "retrieve");
+        }
+    }
+
+    #[test]
+    fn model_action_and_verify_positions_are_never_falsely_reconstructed() {
+        let record = graph_record();
+        let (mut events, retrieve_attempt) = graph_prefix(&record);
+        events.extend([
+            event(
+                &record,
+                3,
+                AgentEventKind::Graph {
+                    event: GraphProgressEvent::GraphNodeCompleted {
+                        attempt_id: retrieve_attempt,
+                        node_id: GraphNodeId::new("retrieve").expect("node"),
+                        transition: GraphTransitionKey::Succeeded,
+                        next_node: GraphNodeId::new("model").expect("node"),
+                        next_kind: GraphNodeKind::Model,
+                        next_recovery: GraphRecoveryMode::Never,
+                    },
+                },
+            ),
+            event(
+                &record,
+                4,
+                AgentEventKind::Graph {
+                    event: GraphProgressEvent::GraphNodeEntered {
+                        attempt_id: GraphNodeAttemptId::new(),
+                        node_id: GraphNodeId::new("model").expect("node"),
+                        node_kind: GraphNodeKind::Model,
+                        recovery: GraphRecoveryMode::Never,
+                        step: 2,
+                        limit: 8,
+                    },
+                },
+            ),
+        ]);
+        let disposition = recover(record.clone(), DurableCheckpoint::initial(&record), events)
+            .expect("classification");
+        let RecoveryDisposition::Resumable(recovered) = disposition else {
+            panic!("pre-dispatch Model position must rewind through fresh Retrieve");
+        };
+        assert_eq!(
+            recovered
+                .state()
+                .graph()
+                .and_then(DurableGraphState::restart_anchor)
+                .map(GraphRestartAnchor::node_id)
+                .map(GraphNodeId::as_str),
+            Some("retrieve")
+        );
+
+        for stop_at_verify in [false, true] {
+            let record = graph_record();
+            let (mut events, retrieve_attempt) = graph_prefix(&record);
+            let model_attempt = GraphNodeAttemptId::new();
+            let action_attempt = GraphNodeAttemptId::new();
+            let model_call_id = ModelCallId::new();
+            events.extend([
+                event(
+                    &record,
+                    3,
+                    AgentEventKind::Graph {
+                        event: GraphProgressEvent::GraphNodeCompleted {
+                            attempt_id: retrieve_attempt,
+                            node_id: GraphNodeId::new("retrieve").expect("node"),
+                            transition: GraphTransitionKey::Succeeded,
+                            next_node: GraphNodeId::new("model").expect("node"),
+                            next_kind: GraphNodeKind::Model,
+                            next_recovery: GraphRecoveryMode::Never,
+                        },
+                    },
+                ),
+                event(
+                    &record,
+                    4,
+                    AgentEventKind::Graph {
+                        event: GraphProgressEvent::GraphNodeEntered {
+                            attempt_id: model_attempt,
+                            node_id: GraphNodeId::new("model").expect("node"),
+                            node_kind: GraphNodeKind::Model,
+                            recovery: GraphRecoveryMode::Never,
+                            step: 2,
+                            limit: 8,
+                        },
+                    },
+                ),
+                event(
+                    &record,
+                    5,
+                    AgentEventKind::ModelInvocationStarted {
+                        model_call_id,
+                        usage: 1,
+                        limit: 4,
+                    },
+                ),
+                event(
+                    &record,
+                    6,
+                    AgentEventKind::ModelInvocationCompleted {
+                        model_call_id,
+                        token_usage: None,
+                    },
+                ),
+                event(
+                    &record,
+                    7,
+                    AgentEventKind::Graph {
+                        event: GraphProgressEvent::GraphNodeCompleted {
+                            attempt_id: model_attempt,
+                            node_id: GraphNodeId::new("model").expect("node"),
+                            transition: GraphTransitionKey::Succeeded,
+                            next_node: GraphNodeId::new("action").expect("node"),
+                            next_kind: GraphNodeKind::Action,
+                            next_recovery: GraphRecoveryMode::Never,
+                        },
+                    },
+                ),
+                event(
+                    &record,
+                    8,
+                    AgentEventKind::Graph {
+                        event: GraphProgressEvent::GraphNodeEntered {
+                            attempt_id: action_attempt,
+                            node_id: GraphNodeId::new("action").expect("node"),
+                            node_kind: GraphNodeKind::Action,
+                            recovery: GraphRecoveryMode::Never,
+                            step: 3,
+                            limit: 8,
+                        },
+                    },
+                ),
+            ]);
+            if stop_at_verify {
+                events.extend([
+                    event(
+                        &record,
+                        9,
+                        AgentEventKind::Graph {
+                            event: GraphProgressEvent::GraphNodeCompleted {
+                                attempt_id: action_attempt,
+                                node_id: GraphNodeId::new("action").expect("node"),
+                                transition: GraphTransitionKey::Succeeded,
+                                next_node: GraphNodeId::new("verify").expect("node"),
+                                next_kind: GraphNodeKind::Verify,
+                                next_recovery: GraphRecoveryMode::Never,
+                            },
+                        },
+                    ),
+                    event(
+                        &record,
+                        10,
+                        AgentEventKind::Graph {
+                            event: GraphProgressEvent::GraphNodeEntered {
+                                attempt_id: GraphNodeAttemptId::new(),
+                                node_id: GraphNodeId::new("verify").expect("node"),
+                                node_kind: GraphNodeKind::Verify,
+                                recovery: GraphRecoveryMode::Never,
+                                step: 4,
+                                limit: 8,
+                            },
+                        },
+                    ),
+                ]);
+            }
+
+            let disposition = recover(record.clone(), DurableCheckpoint::initial(&record), events)
+                .expect("classification");
+            assert!(matches!(
+                disposition,
+                RecoveryDisposition::ManualReconciliationRequired {
+                    reason: ManualReconciliationReason::TransientStateUnavailable,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn unresolved_graph_model_effect_requires_manual_reconciliation() {
+        let record = graph_record();
+        let (mut events, retrieve_attempt) = graph_prefix(&record);
+        let model_attempt = GraphNodeAttemptId::new();
+        let model_call_id = ModelCallId::new();
+        events.extend([
+            event(
+                &record,
+                3,
+                AgentEventKind::Graph {
+                    event: GraphProgressEvent::GraphNodeCompleted {
+                        attempt_id: retrieve_attempt,
+                        node_id: GraphNodeId::new("retrieve").expect("node"),
+                        transition: GraphTransitionKey::Succeeded,
+                        next_node: GraphNodeId::new("model").expect("node"),
+                        next_kind: GraphNodeKind::Model,
+                        next_recovery: GraphRecoveryMode::Never,
+                    },
+                },
+            ),
+            event(
+                &record,
+                4,
+                AgentEventKind::Graph {
+                    event: GraphProgressEvent::GraphNodeEntered {
+                        attempt_id: model_attempt,
+                        node_id: GraphNodeId::new("model").expect("node"),
+                        node_kind: GraphNodeKind::Model,
+                        recovery: GraphRecoveryMode::Never,
+                        step: 2,
+                        limit: 8,
+                    },
+                },
+            ),
+            event(
+                &record,
+                5,
+                AgentEventKind::ModelInvocationStarted {
+                    model_call_id,
+                    usage: 1,
+                    limit: 4,
+                },
+            ),
+        ]);
+
+        let disposition = recover(record.clone(), DurableCheckpoint::initial(&record), events)
+            .expect("classification");
+        assert!(matches!(
+            disposition,
+            RecoveryDisposition::ManualReconciliationRequired {
+                reason: ManualReconciliationReason::UnresolvedEffect(PendingEffect::Model {
+                    model_call_id: pending
+                }),
+                ..
+            } if pending == model_call_id
+        ));
+    }
+
+    #[test]
+    fn graph_definition_digest_mismatch_fails_closed() {
+        let record = graph_record();
+        let events = vec![
+            started(&record),
+            event(
+                &record,
+                1,
+                AgentEventKind::Graph {
+                    event: GraphProgressEvent::GraphStarted {
+                        definition_digest: [8; 32],
+                        start_node: GraphNodeId::new("retrieve").expect("node"),
+                        start_kind: GraphNodeKind::Retrieve,
+                        start_recovery: GraphRecoveryMode::FreshRetrieval,
+                    },
+                },
+            ),
+        ];
+
+        assert!(matches!(
+            recover(record.clone(), DurableCheckpoint::initial(&record), events),
+            Err(RecoveryError::CorruptLog)
+        ));
+    }
+
+    #[test]
+    fn graph_callback_failure_and_completion_restore_terminal_dispositions() {
+        let failed_record = graph_record();
+        let (mut failed_events, attempt_id) = graph_prefix(&failed_record);
+        failed_events.push(event(
+            &failed_record,
+            3,
+            AgentEventKind::Graph {
+                event: GraphProgressEvent::GraphFailed {
+                    attempt_id,
+                    node_id: GraphNodeId::new("retrieve").expect("node"),
+                    steps: 1,
+                    failure: agent_core::GraphFailureKind::Callback,
+                    run_failure: agent_core::RunFailureKind::Graph {
+                        kind: agent_core::GraphFailureKind::Callback,
+                    },
+                },
+            },
+        ));
+        assert!(matches!(
+            recover(
+                failed_record.clone(),
+                DurableCheckpoint::initial(&failed_record),
+                failed_events
+            ),
+            Ok(RecoveryDisposition::TerminalFailure {
+                outcome: RunOutcome::Failed {
+                    kind: agent_core::RunFailureKind::Graph {
+                        kind: agent_core::GraphFailureKind::Callback
+                    }
+                },
+                ..
+            })
+        ));
+
+        let completed_record = graph_record();
+        let completed_attempt = GraphNodeAttemptId::new();
+        let complete_node = GraphNodeId::new("complete").expect("node");
+        let completed_events = vec![
+            started(&completed_record),
+            event(
+                &completed_record,
+                1,
+                AgentEventKind::Graph {
+                    event: GraphProgressEvent::GraphStarted {
+                        definition_digest: [7; 32],
+                        start_node: complete_node.clone(),
+                        start_kind: GraphNodeKind::Complete,
+                        start_recovery: GraphRecoveryMode::Never,
+                    },
+                },
+            ),
+            event(
+                &completed_record,
+                2,
+                AgentEventKind::Graph {
+                    event: GraphProgressEvent::GraphNodeEntered {
+                        attempt_id: completed_attempt,
+                        node_id: complete_node.clone(),
+                        node_kind: GraphNodeKind::Complete,
+                        recovery: GraphRecoveryMode::Never,
+                        step: 1,
+                        limit: 8,
+                    },
+                },
+            ),
+            event(
+                &completed_record,
+                3,
+                AgentEventKind::Graph {
+                    event: GraphProgressEvent::GraphCompleted {
+                        attempt_id: completed_attempt,
+                        node_id: complete_node,
+                        steps: 1,
+                    },
+                },
+            ),
+        ];
+        assert!(matches!(
+            recover(
+                completed_record.clone(),
+                DurableCheckpoint::initial(&completed_record),
+                completed_events
+            ),
+            Ok(RecoveryDisposition::Completed { .. })
+        ));
     }
 
     #[test]

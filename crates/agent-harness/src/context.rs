@@ -73,6 +73,25 @@ impl RunContext {
         )
     }
 
+    #[must_use]
+    pub fn new_graph(
+        run_id: RunId,
+        session_id: SessionId,
+        budget: RunBudget,
+        program_version: u32,
+        definition_digest: [u8; 32],
+    ) -> Self {
+        Self::new_with_recovery_contract(
+            run_id,
+            session_id,
+            budget,
+            crate::RecoveryContract::Graph {
+                program_version,
+                definition_digest,
+            },
+        )
+    }
+
     fn new_with_recovery_contract(
         run_id: RunId,
         session_id: SessionId,
@@ -182,7 +201,8 @@ impl RunContext {
             self.usage.tool_calls(),
             self.usage.iterations(),
             self.usage.approval_requests(),
-        );
+        )
+        .with_graph_steps(self.usage.graph_steps());
         Ok(())
     }
 
@@ -198,7 +218,8 @@ impl RunContext {
             usage + 1,
             self.usage.iterations(),
             self.usage.approval_requests(),
-        );
+        )
+        .with_graph_steps(self.usage.graph_steps());
         Ok(())
     }
 
@@ -215,7 +236,8 @@ impl RunContext {
             self.usage.tool_calls(),
             iteration,
             self.usage.approval_requests(),
-        );
+        )
+        .with_graph_steps(self.usage.graph_steps());
         Ok(iteration)
     }
 
@@ -231,8 +253,27 @@ impl RunContext {
             self.usage.tool_calls(),
             self.usage.iterations(),
             usage + 1,
-        );
+        )
+        .with_graph_steps(self.usage.graph_steps());
         Ok(())
+    }
+
+    pub(crate) fn reserve_graph_step(&mut self) -> Result<u32, BudgetExceeded> {
+        let usage = self.usage.graph_steps();
+        let limit = self.budget.max_graph_steps();
+        if usage >= limit || limit == 0 || limit > agent_core::MAX_GRAPH_STEPS {
+            return Err(BudgetExceeded::new(BudgetDimension::GraphSteps));
+        }
+
+        let step = usage + 1;
+        self.usage = BudgetUsage::with_approval_requests(
+            self.usage.model_calls(),
+            self.usage.tool_calls(),
+            self.usage.iterations(),
+            self.usage.approval_requests(),
+        )
+        .with_graph_steps(step);
+        Ok(step)
     }
 
     pub(crate) fn cancellation(&self) -> Result<CancellationToken, RunContextError> {

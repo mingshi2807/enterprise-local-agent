@@ -85,6 +85,7 @@ impl LoopEngine {
                 version == P::RECOVERY_VERSION && P::RESTART_INTERRUPTED_RETRIEVAL
             }
             agent_harness::RecoveryContract::NonRestartable => false,
+            agent_harness::RecoveryContract::Graph { .. } => false,
         };
         if !contract_matches {
             return Err(LoopError::RecoveryContractMismatch);

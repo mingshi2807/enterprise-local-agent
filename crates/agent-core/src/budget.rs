@@ -9,6 +9,7 @@ pub struct RunBudget {
     max_tool_calls: u32,
     max_iterations: u32,
     max_approval_requests: u32,
+    max_graph_steps: u32,
     max_elapsed: Duration,
 }
 
@@ -28,6 +29,7 @@ impl RunBudget {
             max_tool_calls,
             max_iterations,
             max_approval_requests: 0,
+            max_graph_steps: 0,
             max_elapsed,
         })
     }
@@ -36,6 +38,14 @@ impl RunBudget {
     pub const fn with_max_approval_requests(mut self, max_approval_requests: u32) -> Self {
         self.max_approval_requests = max_approval_requests;
         self
+    }
+
+    pub fn with_max_graph_steps(mut self, max_graph_steps: u32) -> Result<Self, BudgetError> {
+        if max_graph_steps > crate::MAX_GRAPH_STEPS {
+            return Err(BudgetError::GraphStepLimitTooHigh);
+        }
+        self.max_graph_steps = max_graph_steps;
+        Ok(self)
     }
 
     #[must_use]
@@ -59,6 +69,11 @@ impl RunBudget {
     }
 
     #[must_use]
+    pub const fn max_graph_steps(&self) -> u32 {
+        self.max_graph_steps
+    }
+
+    #[must_use]
     pub const fn max_elapsed(&self) -> Duration {
         self.max_elapsed
     }
@@ -76,6 +91,8 @@ impl<'de> Deserialize<'de> for RunBudget {
             max_iterations: u32,
             #[serde(default)]
             max_approval_requests: u32,
+            #[serde(default)]
+            max_graph_steps: u32,
             max_elapsed: Duration,
         }
 
@@ -87,6 +104,7 @@ impl<'de> Deserialize<'de> for RunBudget {
             representation.max_elapsed,
         )
         .map(|budget| budget.with_max_approval_requests(representation.max_approval_requests))
+        .and_then(|budget| budget.with_max_graph_steps(representation.max_graph_steps))
         .map_err(de::Error::custom)
     }
 }
@@ -97,6 +115,7 @@ pub struct BudgetUsage {
     tool_calls: u32,
     iterations: u32,
     approval_requests: u32,
+    graph_steps: u32,
 }
 
 impl BudgetUsage {
@@ -107,6 +126,7 @@ impl BudgetUsage {
             tool_calls,
             iterations,
             approval_requests: 0,
+            graph_steps: 0,
         }
     }
 
@@ -122,7 +142,14 @@ impl BudgetUsage {
             tool_calls,
             iterations,
             approval_requests,
+            graph_steps: 0,
         }
+    }
+
+    #[must_use]
+    pub const fn with_graph_steps(mut self, graph_steps: u32) -> Self {
+        self.graph_steps = graph_steps;
+        self
     }
 
     #[must_use]
@@ -144,6 +171,11 @@ impl BudgetUsage {
     pub const fn approval_requests(&self) -> u32 {
         self.approval_requests
     }
+
+    #[must_use]
+    pub const fn graph_steps(&self) -> u32 {
+        self.graph_steps
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +185,7 @@ pub enum BudgetDimension {
     ToolCalls,
     Iterations,
     ApprovalRequests,
+    GraphSteps,
     Elapsed,
 }
 
@@ -163,6 +196,7 @@ impl std::fmt::Display for BudgetDimension {
             Self::ToolCalls => "tool_calls",
             Self::Iterations => "iterations",
             Self::ApprovalRequests => "approval_requests",
+            Self::GraphSteps => "graph_steps",
             Self::Elapsed => "elapsed",
         };
         formatter.write_str(name)
@@ -173,6 +207,8 @@ impl std::fmt::Display for BudgetDimension {
 pub enum BudgetError {
     #[error("max_elapsed must be non-zero")]
     ZeroMaxElapsed,
+    #[error("max_graph_steps exceeds the implementation ceiling")]
+    GraphStepLimitTooHigh,
 }
 
 #[cfg(test)]
@@ -256,5 +292,30 @@ mod tests {
             BudgetDimension::ApprovalRequests.to_string(),
             "approval_requests"
         );
+    }
+
+    #[test]
+    fn graph_budget_is_additive_bounded_and_defaults_to_disabled() {
+        let budget = RunBudget::new(1, 1, 1, Duration::from_secs(1)).expect("budget");
+        assert_eq!(budget.max_graph_steps(), 0);
+        assert_eq!(
+            budget
+                .with_max_graph_steps(crate::MAX_GRAPH_STEPS)
+                .expect("ceiling")
+                .max_graph_steps(),
+            crate::MAX_GRAPH_STEPS
+        );
+        assert_eq!(
+            budget.with_max_graph_steps(crate::MAX_GRAPH_STEPS + 1),
+            Err(BudgetError::GraphStepLimitTooHigh)
+        );
+    }
+
+    #[test]
+    fn graph_usage_and_dimension_are_independent_from_iterations() {
+        let usage = BudgetUsage::new(1, 2, 3).with_graph_steps(4);
+        assert_eq!(usage.iterations(), 3);
+        assert_eq!(usage.graph_steps(), 4);
+        assert_eq!(BudgetDimension::GraphSteps.to_string(), "graph_steps");
     }
 }

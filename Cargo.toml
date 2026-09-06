@@ -4,6 +4,7 @@ members = [
     "crates/agent-containment-linux",
     "crates/agent-core",
     "crates/agent-harness",
+    "crates/agent-graph",
     "crates/agent-knowledge",
     "crates/agent-knowledge-adapters",
     "crates/agent-loop",
@@ -20,6 +21,7 @@ edition = "2024"
 agent-core = { path = "crates/agent-core" }
 agent-containment-linux = { path = "crates/agent-containment-linux" }
 agent-harness = { path = "crates/agent-harness" }
+agent-graph = { path = "crates/agent-graph" }
 agent-knowledge = { path = "crates/agent-knowledge" }
 agent-knowledge-adapters = { path = "crates/agent-knowledge-adapters" }
 agent-loop = { path = "crates/agent-loop" }

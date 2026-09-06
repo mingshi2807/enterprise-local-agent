@@ -14,8 +14,7 @@ schemaVersion: 1
 
 ## Status
 
-Implemented and verified in the working tree. No M8 commit or tag has been
-created.
+Completed and tagged as `m8-enterprise-knowledge`.
 
 ## Scope
 
@@ -81,6 +80,9 @@ Event schema version 7 adds metadata-only knowledge start, restart, completion,
 failure, and model-grounding events. Checkpoint schema version 2 records only
 replay-critical knowledge metadata. Query and evidence content are absent from
 events and checkpoints.
+
+M9 subsequently advances the event schema to 8 and checkpoint schema to 3 for
+metadata-only graph control. M8 query and evidence content remain excluded.
 
 Replay never calls `KnowledgePort`. An interrupted retrieval is not treated as
 an indeterminate side effect. Only `RestartableRetrieval` programs with a

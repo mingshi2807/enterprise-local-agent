@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{BudgetDimension, LoopFailureKind};
+use crate::{BudgetDimension, GraphFailureKind, LoopFailureKind};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,6 +45,7 @@ pub enum RunFailureKind {
     Containment,
     AuditUnavailable,
     Loop { kind: LoopFailureKind },
+    Graph { kind: GraphFailureKind },
     Internal,
 }
 

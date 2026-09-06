@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActionProposalId, ActionRejectionReason, ApprovalRequestId, CapabilityKind,
+    ActionProposalId, ActionRejectionReason, ApprovalRequestId, CapabilityKind, GraphProgressEvent,
     KnowledgeRetrievalId, LoopEventKind, ModelCallId, RunId, RunOutcome, TokenUsage, ToolCallId,
     ToolDomainFailureKind, ToolName,
 };
 
-pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(7);
+pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(8);
 
 pub const MAX_DURABLE_KNOWLEDGE_BACKENDS: usize = 2;
 pub const MAX_DURABLE_EVIDENCE_REFERENCES: usize = 8;
@@ -221,6 +221,9 @@ pub enum AgentEventKind {
     Loop {
         event: LoopEventKind,
     },
+    Graph {
+        event: GraphProgressEvent,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -384,7 +387,7 @@ mod tests {
         );
 
         assert_eq!(event.schema_version(), CURRENT_EVENT_SCHEMA_VERSION);
-        assert_eq!(event.schema_version().get(), 7);
+        assert_eq!(event.schema_version().get(), 8);
         assert_eq!(event.sequence().get(), 7);
 
         let json = serde_json::to_string(&event).expect("event must serialize");
@@ -418,6 +421,35 @@ mod tests {
             "input_schema",
         ] {
             assert!(!json.contains(sentinel));
+        }
+    }
+
+    #[test]
+    fn graph_events_are_metadata_only() {
+        let event = AgentEvent::new(
+            RunId::new(),
+            EventSequence::new(2),
+            AgentEventKind::Graph {
+                event: GraphProgressEvent::GraphNodeCompleted {
+                    attempt_id: crate::GraphNodeAttemptId::new(),
+                    node_id: crate::GraphNodeId::new("model").expect("node"),
+                    transition: crate::GraphTransitionKey::Succeeded,
+                    next_node: crate::GraphNodeId::new("action").expect("node"),
+                    next_kind: crate::GraphNodeKind::Action,
+                    next_recovery: crate::GraphRecoveryMode::Never,
+                },
+            },
+        );
+        let json = serde_json::to_string(&event).expect("serialize");
+        for forbidden in [
+            "prompt",
+            "arguments",
+            "evidence_content",
+            "model_response",
+            "tool_result",
+            "validated_action",
+        ] {
+            assert!(!json.contains(forbidden), "found {forbidden}");
         }
     }
 

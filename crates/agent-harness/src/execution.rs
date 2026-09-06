@@ -3,9 +3,10 @@ use std::{sync::Arc, time::SystemTime};
 use agent_core::{
     ActionDigest, ActionProposalId, AgentEvent, AgentEventKind, ApprovalFailureKind,
     ApprovalRequestId, BudgetDimension, CapabilityKind, ContainmentFailureKind, EventSequence,
-    KnowledgeFailureKind, KnowledgeRetrievalId, LoopEventKind, LoopProgressEvent, ModelCallId,
-    ModelRequest, ModelResponse, RunFailureKind, RunOutcome, RunStatus, ToolCall, ToolCallId,
-    ToolName, ToolResult,
+    GraphFailureKind, GraphNodeAttemptId, GraphNodeId, GraphNodeKind, GraphProgressEvent,
+    GraphRecoveryMode, GraphTransitionKey, KnowledgeFailureKind, KnowledgeRetrievalId,
+    LoopEventKind, LoopProgressEvent, ModelCallId, ModelRequest, ModelResponse, RunFailureKind,
+    RunOutcome, RunStatus, ToolCall, ToolCallId, ToolName, ToolResult,
 };
 use agent_knowledge::{
     EvidenceSet, GroundedModelRequest, KnowledgeError, KnowledgePort, KnowledgeRequest,
@@ -685,6 +686,197 @@ impl ExecutionHarness {
             OperationEffect::StateCommitted,
         )
         .await
+    }
+
+    pub async fn start_graph(
+        &self,
+        context: &mut RunContext,
+        definition_digest: [u8; 32],
+        start_node: GraphNodeId,
+        start_kind: GraphNodeKind,
+        start_recovery: GraphRecoveryMode,
+    ) -> Result<(), HarnessError> {
+        self.preflight(context, HarnessOperation::StartGraph)
+            .await?;
+        let event = context.next_event(AgentEventKind::Graph {
+            event: GraphProgressEvent::GraphStarted {
+                definition_digest,
+                start_node,
+                start_kind,
+                start_recovery,
+            },
+        })?;
+        self.audit_invocation(
+            context,
+            &event,
+            HarnessOperation::StartGraph,
+            AuditPhase::Lifecycle,
+            OperationEffect::StateCommitted,
+        )
+        .await
+    }
+
+    pub async fn enter_graph_node(
+        &self,
+        context: &mut RunContext,
+        node_id: GraphNodeId,
+        node_kind: GraphNodeKind,
+        recovery: GraphRecoveryMode,
+    ) -> Result<GraphNodeAttemptId, HarnessError> {
+        self.preflight(context, HarnessOperation::EnterGraphNode)
+            .await?;
+        let step = match context.reserve_graph_step() {
+            Ok(step) => step,
+            Err(error) => {
+                self.terminalize_safety(
+                    context,
+                    SafetyTerminalization::BudgetExceeded(error.dimension()),
+                )
+                .await;
+                return Err(error.into());
+            }
+        };
+        let attempt_id = GraphNodeAttemptId::new();
+        let event = context.next_event(AgentEventKind::Graph {
+            event: GraphProgressEvent::GraphNodeEntered {
+                attempt_id,
+                node_id,
+                node_kind,
+                recovery,
+                step,
+                limit: context.budget().max_graph_steps(),
+            },
+        })?;
+        self.audit_invocation(
+            context,
+            &event,
+            HarnessOperation::EnterGraphNode,
+            AuditPhase::Lifecycle,
+            OperationEffect::StateCommitted,
+        )
+        .await?;
+        Ok(attempt_id)
+    }
+
+    pub async fn restart_graph_node(
+        &self,
+        context: &mut RunContext,
+        previous_attempt_id: Option<GraphNodeAttemptId>,
+        node_id: GraphNodeId,
+        node_kind: GraphNodeKind,
+        recovery: GraphRecoveryMode,
+    ) -> Result<GraphNodeAttemptId, HarnessError> {
+        self.preflight(context, HarnessOperation::EnterGraphNode)
+            .await?;
+        let step = match context.reserve_graph_step() {
+            Ok(step) => step,
+            Err(error) => {
+                self.terminalize_safety(
+                    context,
+                    SafetyTerminalization::BudgetExceeded(error.dimension()),
+                )
+                .await;
+                return Err(error.into());
+            }
+        };
+        let attempt_id = GraphNodeAttemptId::new();
+        let event = context.next_event(AgentEventKind::Graph {
+            event: GraphProgressEvent::GraphNodeRestarted {
+                previous_attempt_id,
+                attempt_id,
+                node_id,
+                node_kind,
+                recovery,
+                step,
+                limit: context.budget().max_graph_steps(),
+            },
+        })?;
+        self.audit_invocation(
+            context,
+            &event,
+            HarnessOperation::EnterGraphNode,
+            AuditPhase::Lifecycle,
+            OperationEffect::StateCommitted,
+        )
+        .await?;
+        Ok(attempt_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_graph_node(
+        &self,
+        context: &mut RunContext,
+        attempt_id: GraphNodeAttemptId,
+        node_id: GraphNodeId,
+        transition: GraphTransitionKey,
+        next_node: GraphNodeId,
+        next_kind: GraphNodeKind,
+        next_recovery: GraphRecoveryMode,
+    ) -> Result<(), HarnessError> {
+        self.preflight(context, HarnessOperation::CompleteGraphNode)
+            .await?;
+        let event = context.next_event(AgentEventKind::Graph {
+            event: GraphProgressEvent::GraphNodeCompleted {
+                attempt_id,
+                node_id,
+                transition,
+                next_node,
+                next_kind,
+                next_recovery,
+            },
+        })?;
+        self.audit_invocation(
+            context,
+            &event,
+            HarnessOperation::CompleteGraphNode,
+            AuditPhase::Lifecycle,
+            OperationEffect::StateCommitted,
+        )
+        .await
+    }
+
+    pub async fn complete_graph(
+        &self,
+        context: &mut RunContext,
+        attempt_id: GraphNodeAttemptId,
+        node_id: GraphNodeId,
+    ) -> Result<(), HarnessError> {
+        self.preflight(context, HarnessOperation::FinishGraph)
+            .await?;
+        context.commit_finished(RunOutcome::Completed)?;
+        let event = context.next_event(AgentEventKind::Graph {
+            event: GraphProgressEvent::GraphCompleted {
+                attempt_id,
+                node_id,
+                steps: context.usage().graph_steps(),
+            },
+        })?;
+        self.audit_lifecycle(context, &event, HarnessOperation::FinishGraph)
+            .await
+    }
+
+    pub async fn fail_graph(
+        &self,
+        context: &mut RunContext,
+        attempt_id: GraphNodeAttemptId,
+        node_id: GraphNodeId,
+        failure: GraphFailureKind,
+    ) -> Result<(), HarnessError> {
+        self.preflight(context, HarnessOperation::FinishGraph)
+            .await?;
+        let run_failure = RunFailureKind::Graph { kind: failure };
+        context.commit_finished(RunOutcome::Failed { kind: run_failure })?;
+        let event = context.next_event(AgentEventKind::Graph {
+            event: GraphProgressEvent::GraphFailed {
+                attempt_id,
+                node_id,
+                steps: context.usage().graph_steps(),
+                failure,
+                run_failure,
+            },
+        })?;
+        self.audit_lifecycle(context, &event, HarnessOperation::FinishGraph)
+            .await
     }
 
     pub async fn invoke_tool(

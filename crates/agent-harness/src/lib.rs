@@ -45,9 +45,9 @@ pub use ports::{
     AuditPortError, AuditSink, ModelPort, ModelPortError, PortFuture, ToolPort, ToolPortError,
 };
 pub use recovery::{
-    ContinuationState, DurableLoopPosition, DurableRunState, ManualReconciliationReason,
-    PendingEffect, PendingKnowledgeRetrieval, RecoveredRun, RecoveryDisposition, RecoveryError,
-    TransitionError,
+    ContinuationState, DurableGraphPosition, DurableGraphState, DurableLoopPosition,
+    DurableRunState, GraphRestartAnchor, ManualReconciliationReason, PendingEffect,
+    PendingKnowledgeRetrieval, RecoveredRun, RecoveryDisposition, RecoveryError, TransitionError,
 };
 pub use registry::{ToolBinding, ToolRegistry, ToolRegistryError};
 

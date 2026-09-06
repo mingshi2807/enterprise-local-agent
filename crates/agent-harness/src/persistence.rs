@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const CURRENT_STORE_SCHEMA_VERSION: u16 = 1;
-pub const CURRENT_CHECKPOINT_SCHEMA_VERSION: u16 = 2;
+pub const CURRENT_CHECKPOINT_SCHEMA_VERSION: u16 = 3;
 
 pub type PersistenceFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -37,8 +37,16 @@ impl RunKey {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum RecoveryContract {
     NonRestartable,
-    Restartable { version: u32 },
-    RestartableRetrieval { version: u32 },
+    Restartable {
+        version: u32,
+    },
+    RestartableRetrieval {
+        version: u32,
+    },
+    Graph {
+        program_version: u32,
+        definition_digest: [u8; 32],
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

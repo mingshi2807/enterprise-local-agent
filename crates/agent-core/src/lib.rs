@@ -4,6 +4,7 @@ mod action;
 mod budget;
 mod capability;
 mod event;
+mod graph_control;
 mod ids;
 mod loop_control;
 mod model;
@@ -20,9 +21,14 @@ pub use event::{
     KnowledgeSnapshotMetadata, MAX_DURABLE_EVIDENCE_REFERENCES, MAX_DURABLE_KNOWLEDGE_BACKENDS,
     MAX_DURABLE_KNOWLEDGE_ID_BYTES,
 };
+pub use graph_control::{
+    GraphBranchId, GraphBranchIdError, GraphFailureKind, GraphNodeId, GraphNodeIdError,
+    GraphNodeKind, GraphProgressEvent, GraphRecoveryMode, GraphTransitionKey,
+    MAX_GRAPH_BRANCH_ID_BYTES, MAX_GRAPH_NODE_ID_BYTES, MAX_GRAPH_STEPS,
+};
 pub use ids::{
-    ActionProposalId, ApprovalRequestId, KnowledgeRetrievalId, ModelCallId, RunId, SessionId,
-    ToolCallId,
+    ActionProposalId, ApprovalRequestId, GraphNodeAttemptId, KnowledgeRetrievalId, ModelCallId,
+    RunId, SessionId, ToolCallId,
 };
 pub use loop_control::{
     LoopDecisionKind, LoopEventKind, LoopFailureKind, LoopPhase, LoopProgressEvent,

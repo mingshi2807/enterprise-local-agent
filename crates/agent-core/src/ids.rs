@@ -60,6 +60,7 @@ define_id!(ActionProposalId);
 define_id!(ToolCallId);
 define_id!(ApprovalRequestId);
 define_id!(KnowledgeRetrievalId);
+define_id!(GraphNodeAttemptId);
 
 #[cfg(test)]
 mod tests {
@@ -92,6 +93,7 @@ mod tests {
         let tool_call_id = ToolCallId::from_uuid(uuid);
         let approval_request_id = ApprovalRequestId::from_uuid(uuid);
         let knowledge_retrieval_id = KnowledgeRetrievalId::from_uuid(uuid);
+        let graph_node_attempt_id = GraphNodeAttemptId::from_uuid(uuid);
 
         assert_eq!(
             serde_json::from_str::<RunId>(
@@ -144,6 +146,14 @@ mod tests {
             )
             .expect("KnowledgeRetrievalId must deserialize"),
             knowledge_retrieval_id
+        );
+        assert_eq!(
+            serde_json::from_str::<GraphNodeAttemptId>(
+                &serde_json::to_string(&graph_node_attempt_id)
+                    .expect("GraphNodeAttemptId must serialize")
+            )
+            .expect("GraphNodeAttemptId must deserialize"),
+            graph_node_attempt_id
         );
     }
 }

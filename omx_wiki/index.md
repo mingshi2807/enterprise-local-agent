@@ -1,6 +1,6 @@
 # Wiki Index
 
-> 11 pages | Last updated: 2026-09-05
+> 12 pages | Last updated: 2026-09-06
 
 ## architecture
 
@@ -14,6 +14,7 @@
 - [M6.1 Production Linux LocalWrite Containment](m6-1-production-linux-localwrite-containment.md) — # M6.1 Production Linux LocalWrite Containment
 - [M7 Durable Event Persistence and Recovery](m7-durable-event-persistence-and-recovery.md) — # M7 Durable Event Persistence and Recovery
 - [M8 Enterprise Knowledge Integration](m8-enterprise-knowledge-integration.md) — # M8 Enterprise Knowledge Integration
+- [M9 Deterministic Graph Engine PoC](m9-deterministic-graph-engine-poc.md) — # M9 Deterministic Graph Engine PoC
 
 ## reference
 

@@ -124,6 +124,10 @@ M8 subsequently advances the event schema to 7 and checkpoint schema to 2 for
 metadata-only knowledge retrieval recovery. The M7 rejection rules remain
 unchanged; older schemas are not silently migrated.
 
+M9 subsequently advances the event schema to 8 and checkpoint schema to 3 for
+metadata-only graph control and recovery. Unsupported prior schemas remain
+fail-closed with no automatic migration.
+
 ## Verification
 
 Formatting, strict workspace Clippy, dependency checks, graph change detection,

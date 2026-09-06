@@ -224,7 +224,8 @@ async fn main() -> anyhow::Result<()> {
             | AgentEventKind::KnowledgeRetrievalRestarted { .. }
             | AgentEventKind::KnowledgeRetrievalCompleted { .. }
             | AgentEventKind::KnowledgeRetrievalFailed { .. }
-            | AgentEventKind::ModelGroundingBound { .. } => {}
+            | AgentEventKind::ModelGroundingBound { .. }
+            | AgentEventKind::Graph { .. } => {}
         }
     }
     println!("Final status: {:?}", context.status());
