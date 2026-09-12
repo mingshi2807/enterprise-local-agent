@@ -1,8 +1,9 @@
 # Enterprise Local Agent
 
-Local-first Rust agent runtime with an enterprise execution harness, a typed
-deterministic outer loop, replaceable model/provider adapters, and governed
-model-proposed actions.
+Local-first Rust agent runtime with an enterprise execution harness, fixed-loop
+and graph orchestration, replaceable model/provider adapters, governed
+model-proposed actions, durable recovery, enterprise knowledge integration,
+and bounded human-in-the-loop approval.
 
 ## M5 action planning
 
@@ -103,12 +104,52 @@ callback, with an implementation ceiling of 64 and a default budget of zero.
 The PoC flow is `Retrieve -> Model -> Action -> Verify`, ending at `Complete` or
 `Fail`; it reuses M8 retrieval and the existing M5/M6/M6.1 action path.
 
-M9 persists metadata-only graph position, attempt IDs, transitions, program
-version, and graph digest using event schema 8 and checkpoint schema 3. Replay
+M9 introduced metadata-only graph position, attempt IDs, transitions, program
+version, and graph digest in event schema 8 and checkpoint schema 3. M10
+advances the current versions to event schema 9 and checkpoint schema 4. Replay
 never invokes graph callbacks or external ports. Retrieval may restart only as
 a new fresh read under the explicit restart contract. Model, Action, and Verify
 state is never reconstructed; unresolved external effects retain M7 manual-
 reconciliation semantics.
+
+## M10 durable graph pause/resume and HITL
+
+M10 adds intentional quiescent `RecoveryDisposition::Waiting`, distinct from
+both resumable computation and an unresolved external effect. Durable approval
+is an explicit trusted graph/workflow configuration for only the existing
+bounded `workspace_write_file` LocalWrite. Model output cannot select this
+mode, and immediate M6 `ApprovalPort` behavior is unchanged.
+
+Before a wait becomes visible, the harness validates the exact action, reserves
+one ApprovalRequests unit, records the required ApprovalRequested audit, seals
+the action, and atomically persists `GraphSuspended` with a CAS-versioned
+approval row. SQLite stores only ciphertext and bounded correlation metadata;
+events, checkpoints, and audit records contain no action path or content.
+
+`LocalWriteActionCapsuleV1` is encrypted by the harness-owned `ActionSealPort`.
+The local adapter uses XChaCha20-Poly1305 and authenticates the run/session,
+graph version and digest, node attempt and wait, approval/proposal/tool IDs,
+`ActionDigest`, `WorkspaceBindingId`, derived `ToolContractDigest`, and capsule
+version. Deployment supplies key material outside SQLite.
+
+After restart, an explicit approval-view operation decrypts and validates the
+capsule and regenerates a trusted preview containing only the operation,
+relative target, and content byte count. Recording Approve or Deny is a
+persistence-only CAS operation and never executes a tool.
+
+Explicit approval resume constructs a fresh `RunContext`, revalidates every
+binding, performs exact tool lookup and schema validation, recomputes the action
+digest, and rechecks policy, required audit health, containment, and budgets.
+It then dispatches the exact action through the existing M6/M6.1 path. Resume
+does not invoke the model, retrieval, planning, or the graph Action callback,
+and it does not consume another ApprovalRequest or GraphStep. Denial consumes
+zero ToolCalls.
+
+Replay never decrypts capsules. `ToolInvocationStarted` without a trustworthy
+terminal event remains `ManualReconciliationRequired`. A completed write that
+crashes before graph continuation is never repeated; if required transient
+state was lost, recovery remains manual/non-resumable. No exactly-once or
+audit/SQLite cross-system transaction guarantee is claimed.
 
 ## Deterministic demonstration
 
@@ -161,8 +202,10 @@ The live mode uses the same M5 `ActionProgram`; only model composition changes.
 If a live model returns prose, code fences, malformed JSON, or an invalid
 action, preparation fails closed without extraction heuristics.
 
-M4-M6.1 intentionally do not provide readiness calls, retries, proxy settings,
-custom certificate authorities, mTLS, streaming, structured output, model
-fallback, native provider tool calls, provider-driven tool execution,
-enterprise identity, or durable approval. M6.1 containment is Linux-only and
-limited to `workspace_write_file`; it is not an arbitrary tool sandbox.
+The M4-M6.1 layers themselves intentionally do not provide readiness calls,
+retries, proxy settings, custom certificate authorities, mTLS, streaming,
+structured output, model fallback, native provider tool calls, provider-driven
+tool execution, enterprise identity, or durable approval. M10 adds durable
+approval only for its explicitly configured `workspace_write_file` graph node;
+it is not a generic approval queue or workflow engine. M6.1 containment remains
+Linux-only and is not an arbitrary tool sandbox.
