@@ -2,8 +2,9 @@ use agent_core::{BudgetDimension, CapabilityKind, RunStatus, ToolName};
 use thiserror::Error;
 
 use crate::{
-    ApprovalPortError, AuditPortError, BudgetExceeded, ContainmentPortError, ModelPortError,
-    PersistencePortError, PolicyDenial, RecoveryError, RunContextError, ToolPortError,
+    ActionSealError, ApprovalPortError, AuditPortError, BudgetExceeded, ContainmentPortError,
+    ModelPortError, PersistencePortError, PolicyDenial, RecoveryError, RunContextError,
+    ToolPortError,
 };
 use agent_knowledge::KnowledgeError;
 
@@ -83,6 +84,10 @@ pub enum HarnessError {
     ApprovalPort(ApprovalPortError),
     #[error("approval decision did not match the requested action")]
     ApprovalDecisionMismatch,
+    #[error("durable approval state or binding did not match")]
+    DurableApprovalMismatch,
+    #[error(transparent)]
+    ActionSeal(#[from] ActionSealError),
     #[error("approval decision denied the action")]
     ApprovalDenied,
     #[error("contained executor failed")]

@@ -61,6 +61,8 @@ define_id!(ToolCallId);
 define_id!(ApprovalRequestId);
 define_id!(KnowledgeRetrievalId);
 define_id!(GraphNodeAttemptId);
+define_id!(DurableApprovalWaitId);
+define_id!(WorkspaceBindingId);
 
 #[cfg(test)]
 mod tests {
@@ -94,6 +96,8 @@ mod tests {
         let approval_request_id = ApprovalRequestId::from_uuid(uuid);
         let knowledge_retrieval_id = KnowledgeRetrievalId::from_uuid(uuid);
         let graph_node_attempt_id = GraphNodeAttemptId::from_uuid(uuid);
+        let durable_approval_wait_id = DurableApprovalWaitId::from_uuid(uuid);
+        let workspace_binding_id = WorkspaceBindingId::from_uuid(uuid);
 
         assert_eq!(
             serde_json::from_str::<RunId>(
@@ -154,6 +158,22 @@ mod tests {
             )
             .expect("GraphNodeAttemptId must deserialize"),
             graph_node_attempt_id
+        );
+        assert_eq!(
+            serde_json::from_str::<DurableApprovalWaitId>(
+                &serde_json::to_string(&durable_approval_wait_id)
+                    .expect("DurableApprovalWaitId must serialize")
+            )
+            .expect("DurableApprovalWaitId must deserialize"),
+            durable_approval_wait_id
+        );
+        assert_eq!(
+            serde_json::from_str::<WorkspaceBindingId>(
+                &serde_json::to_string(&workspace_binding_id)
+                    .expect("WorkspaceBindingId must serialize")
+            )
+            .expect("WorkspaceBindingId must deserialize"),
+            workspace_binding_id
         );
     }
 }

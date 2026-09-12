@@ -5,6 +5,7 @@ mod approval;
 mod audit;
 mod containment;
 mod context;
+mod durable_approval;
 mod error;
 mod execution;
 mod persistence;
@@ -30,11 +31,20 @@ pub use approval::{
 pub use audit::{AuditFailurePolicy, HarnessConfig, HarnessConfigError};
 pub use containment::{ContainedInvocation, ContainedToolPort, ContainmentPortError};
 pub use context::{BudgetExceeded, RunCancellationHandle, RunContext, RunContextError};
+pub use durable_approval::{
+    ActionSealBinding, ActionSealError, ActionSealPort, DurableActionContext,
+    DurableApprovalDecisionCommand, DurableApprovalRecord, DurableApprovalStatus,
+    DurableApprovalView, DurableApprovalWait, DurableLocalWriteResume, GraphDefinitionDigest,
+    LOCAL_WRITE_CAPSULE_VERSION, LocalWriteActionCapsuleV1, MAX_DURABLE_CONTENT_BYTES,
+    MAX_DURABLE_RELATIVE_PATH_BYTES, MAX_SEAL_KEY_ID_BYTES, MAX_SEALED_CAPSULE_BYTES,
+    SealedLocalWriteAction,
+};
 pub use error::{AuditPhase, ExecutionStage, HarnessError, HarnessOperation, OperationEffect};
 pub use execution::{CompletedKnowledgeRetrieval, ExecutionHarness};
 pub use persistence::{
     AppendTransition, CURRENT_CHECKPOINT_SCHEMA_VERSION, CURRENT_STORE_SCHEMA_VERSION,
-    DurableCheckpoint, LoadedRun, PersistenceFuture, PersistencePortError, RecoveryContract,
+    CreateDurableApprovalWait, DurableApprovalStatusTransition, DurableCheckpoint, LoadedRun,
+    PersistenceFuture, PersistencePortError, RecordDurableApprovalDecision, RecoveryContract,
     RunKey, RunPersistencePort, RunRecord,
 };
 pub use policy::{
@@ -47,7 +57,8 @@ pub use ports::{
 pub use recovery::{
     ContinuationState, DurableGraphPosition, DurableGraphState, DurableLoopPosition,
     DurableRunState, GraphRestartAnchor, ManualReconciliationReason, PendingEffect,
-    PendingKnowledgeRetrieval, RecoveredRun, RecoveryDisposition, RecoveryError, TransitionError,
+    PendingKnowledgeRetrieval, RecoveredRun, RecoveredWaitingRun, RecoveryDisposition,
+    RecoveryError, TransitionError,
 };
 pub use registry::{ToolBinding, ToolRegistry, ToolRegistryError};
 

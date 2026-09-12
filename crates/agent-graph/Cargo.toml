@@ -11,8 +11,10 @@ sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+agent-action-seal-local.workspace = true
 agent-harness = { workspace = true, features = ["test-support"] }
 agent-persistence-sqlite.workspace = true
+rusqlite.workspace = true
 serde_json.workspace = true
 tempfile = "3.10"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

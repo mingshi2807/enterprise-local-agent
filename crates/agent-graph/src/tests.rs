@@ -4,16 +4,22 @@ use crate::{
     GraphTerminalOutcome, GraphTransitionKey, MAX_GRAPH_NODES, ModelEffects, NodeDefinition,
     NodeKind, RestartableGraphProgram, RetrieveEffects, VerificationOutcome, VerifyEffects,
 };
+use agent_action_seal_local::LocalActionSealer;
 use agent_core::{
-    AgentEventKind, BudgetDimension, CapabilityKind, KnowledgeBackendId, ModelMessage,
-    ModelOutputPart, ModelResponse, ModelRole, RunBudget, RunId, RunOutcome, RunStatus, SessionId,
-    ToolDefinition, ToolName, ToolOutput, ToolResult, ToolSchema,
+    ActionDigest, ActionProposalId, AgentEventKind, ApprovalRequestId, BudgetDimension,
+    CapabilityKind, DurableApprovalOutcome, KnowledgeBackendId, ModelMessage, ModelOutputPart,
+    ModelRequest, ModelResponse, ModelRole, RunBudget, RunId, RunOutcome, RunStatus, SessionId,
+    ToolCall, ToolCallId, ToolDefinition, ToolName, ToolOutput, ToolResult, ToolSchema,
+    WorkspaceBindingId,
 };
 use agent_harness::{
-    AppendTransition, AuditFailurePolicy, CompletedKnowledgeRetrieval, CompletedModelInvocation,
-    ContainedToolPort, DurableCheckpoint, ExecutionHarness, HarnessConfig, LoadedRun,
+    ActionSealBinding, ActionSealError, ActionSealPort, AppendTransition, ApprovalPreview,
+    AuditFailurePolicy, CompletedKnowledgeRetrieval, CompletedModelInvocation, ContainedInvocation,
+    ContainedToolPort, ContainmentPortError, DurableApprovalDecisionCommand, DurableApprovalWait,
+    DurableCheckpoint, ExecutionHarness, HarnessConfig, LoadedRun, LocalWriteActionCapsuleV1,
     M0ReadOnlyPolicy, M6ApprovalPolicy, ModelPort, PersistenceFuture, PersistencePortError,
-    RecoveryDisposition, RunContext, RunKey, RunPersistencePort, RunRecord, ToolPort, ToolRegistry,
+    RecoveryDisposition, RunContext, RunKey, RunPersistencePort, RunRecord, SealedLocalWriteAction,
+    ToolPort, ToolRegistry,
     testing::{
         FakeContainedToolPort, FakeModelPort, FakeToolPort, InMemoryAuditSink, ScriptedApprovalPort,
     },
@@ -1085,4 +1091,693 @@ fn graph_crate_does_not_depend_on_direct_authority_or_provider_crates() {
     for forbidden in ["agent-loop", "agent-provider-rig", "rmcp", "reqwest"] {
         assert!(!manifest.contains(forbidden), "found {forbidden}");
     }
+}
+
+struct CountingSeal {
+    inner: LocalActionSealer,
+    seals: AtomicUsize,
+    opens: AtomicUsize,
+}
+
+impl CountingSeal {
+    fn new() -> Self {
+        Self {
+            inner: LocalActionSealer::new("m10-key", [9; 32]).expect("sealer"),
+            seals: AtomicUsize::new(0),
+            opens: AtomicUsize::new(0),
+        }
+    }
+
+    fn opens(&self) -> usize {
+        self.opens.load(Ordering::SeqCst)
+    }
+}
+
+impl ActionSealPort for CountingSeal {
+    fn seal_local_write(
+        &self,
+        binding: &ActionSealBinding,
+        action: &LocalWriteActionCapsuleV1,
+    ) -> Result<SealedLocalWriteAction, ActionSealError> {
+        self.seals.fetch_add(1, Ordering::SeqCst);
+        self.inner.seal_local_write(binding, action)
+    }
+
+    fn open_local_write(
+        &self,
+        binding: &ActionSealBinding,
+        sealed: &SealedLocalWriteAction,
+    ) -> Result<LocalWriteActionCapsuleV1, ActionSealError> {
+        self.opens.fetch_add(1, Ordering::SeqCst);
+        self.inner.open_local_write(binding, sealed)
+    }
+}
+
+struct DurablePreviewTool {
+    inner: FakeContainedToolPort,
+}
+
+impl DurablePreviewTool {
+    fn new(definition: ToolDefinition) -> Self {
+        Self {
+            inner: FakeContainedToolPort::succeeding(
+                definition,
+                ToolOutput::new(serde_json::json!({"written": true})),
+            ),
+        }
+    }
+
+    fn invocation_count(&self) -> usize {
+        self.inner.invocation_count()
+    }
+}
+
+impl ContainedToolPort for DurablePreviewTool {
+    fn definition(&self) -> &ToolDefinition {
+        self.inner.definition()
+    }
+
+    fn approval_preview(
+        &self,
+        input: &agent_core::ToolInput,
+    ) -> Result<ApprovalPreview, ContainmentPortError> {
+        let object = input
+            .as_value()
+            .as_object()
+            .ok_or(ContainmentPortError::PreviewRejected)?;
+        let path = object
+            .get("relative_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ContainmentPortError::PreviewRejected)?;
+        let content = object
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ContainmentPortError::PreviewRejected)?;
+        ApprovalPreview::new(
+            format!("workspace_write_file ({} bytes)", content.len()),
+            path,
+        )
+        .map_err(ContainmentPortError::from)
+    }
+
+    fn start_contained(
+        &self,
+        call: ToolCall,
+    ) -> Result<Box<dyn ContainedInvocation>, ContainmentPortError> {
+        self.inner.start_contained(call)
+    }
+}
+
+#[derive(Default)]
+struct DurableState {
+    model: Option<CompletedModelInvocation>,
+}
+
+struct DurableProgram {
+    action_callbacks: Arc<AtomicUsize>,
+}
+
+impl GraphProgram for DurableProgram {
+    type WorkingState = DurableState;
+
+    fn retrieve<'a>(
+        &'a mut self,
+        _node_id: &'a GraphNodeId,
+        _state: &'a mut Self::WorkingState,
+        _effects: RetrieveEffects<'a>,
+    ) -> GraphFuture<'a, Result<(), GraphProgramError>> {
+        Box::pin(std::future::ready(Err(GraphProgramError::Failed)))
+    }
+
+    fn model<'a>(
+        &'a mut self,
+        _node_id: &'a GraphNodeId,
+        state: &'a mut Self::WorkingState,
+        mut effects: ModelEffects<'a>,
+    ) -> GraphFuture<'a, Result<(), GraphProgramError>> {
+        Box::pin(async move {
+            state.model = Some(
+                effects
+                    .invoke_model(ModelRequest::new(vec![ModelMessage::new(
+                        ModelRole::User,
+                        "prepare local write",
+                    )]))
+                    .await
+                    .map_err(|_| GraphProgramError::Failed)?,
+            );
+            Ok(())
+        })
+    }
+
+    fn action<'a>(
+        &'a mut self,
+        _node_id: &'a GraphNodeId,
+        _state: &'a mut Self::WorkingState,
+        _effects: ActionEffects<'a>,
+    ) -> GraphFuture<'a, Result<(), GraphProgramError>> {
+        Box::pin(std::future::ready(Err(GraphProgramError::Failed)))
+    }
+
+    fn durable_local_write_action<'a>(
+        &'a mut self,
+        _node_id: &'a GraphNodeId,
+        state: &'a mut Self::WorkingState,
+        mut effects: ActionEffects<'a>,
+    ) -> GraphFuture<'a, Result<DurableApprovalWait, GraphProgramError>> {
+        self.action_callbacks.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            let model = state.model.take().ok_or(GraphProgramError::Failed)?;
+            let action = effects
+                .prepare_action(model)
+                .await
+                .map_err(|_| GraphProgramError::Failed)?;
+            effects
+                .suspend_local_write(action)
+                .await
+                .map_err(|_| GraphProgramError::Failed)
+        })
+    }
+
+    fn verify<'a>(
+        &'a mut self,
+        _node_id: &'a GraphNodeId,
+        _state: &'a mut Self::WorkingState,
+        _effects: VerifyEffects<'a>,
+    ) -> GraphFuture<'a, Result<VerificationOutcome, GraphProgramError>> {
+        Box::pin(std::future::ready(Ok(VerificationOutcome::Passed)))
+    }
+
+    fn decide<'a>(
+        &'a mut self,
+        _node_id: &'a GraphNodeId,
+        _state: &'a mut Self::WorkingState,
+        _context: DecisionContext<'a>,
+    ) -> GraphFuture<'a, Result<GraphBranchId, GraphProgramError>> {
+        Box::pin(std::future::ready(Err(GraphProgramError::Failed)))
+    }
+}
+
+impl RestartableGraphProgram for DurableProgram {
+    const RECOVERY_VERSION: u32 = 10;
+
+    fn restore_working_state(
+        &mut self,
+        _state: &agent_harness::DurableRunState,
+    ) -> Result<Self::WorkingState, GraphProgramError> {
+        Ok(DurableState::default())
+    }
+}
+
+fn durable_definition() -> GraphDefinition {
+    GraphDefinition::new(
+        id("model"),
+        vec![
+            node("model", NodeKind::Model),
+            node("action", NodeKind::DurableLocalWriteAction),
+            node("verify", NodeKind::Verify),
+            node("complete", NodeKind::Complete),
+            node("denied", NodeKind::Fail),
+        ],
+        vec![
+            edge("model", GraphTransitionKey::Succeeded, "action"),
+            edge("action", GraphTransitionKey::Succeeded, "verify"),
+            edge("action", GraphTransitionKey::ApprovalDenied, "denied"),
+            edge("verify", GraphTransitionKey::VerificationPassed, "complete"),
+            edge("verify", GraphTransitionKey::VerificationFailed, "denied"),
+        ],
+    )
+    .expect("durable graph")
+}
+
+fn durable_tool_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        ToolName::new("workspace_write_file").expect("tool name"),
+        "write one bounded UTF-8 file beneath the configured workspace",
+        CapabilityKind::LocalWrite,
+        ToolSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "relative_path": {"type": "string", "maxLength": 240},
+                "content": {"type": "string", "maxLength": 4096}
+            },
+            "required": ["relative_path", "content"],
+            "additionalProperties": false
+        }))
+        .expect("schema"),
+    )
+    .expect("definition")
+}
+
+fn durable_harness(
+    model: Arc<FakeModelPort>,
+    tool: Arc<DurablePreviewTool>,
+    store: Arc<agent_persistence_sqlite::SqliteRunPersistence>,
+    seal: Arc<dyn ActionSealPort>,
+    workspace: WorkspaceBindingId,
+    audit: Arc<InMemoryAuditSink>,
+) -> ExecutionHarness {
+    let mut registry = ToolRegistry::new();
+    let contained: Arc<dyn ContainedToolPort> = tool;
+    registry.register_contained(contained).expect("register");
+    let model: Arc<dyn ModelPort> = model;
+    ExecutionHarness::new(
+        model,
+        registry,
+        Arc::new(M6ApprovalPolicy),
+        audit,
+        HarnessConfig::new(AuditFailurePolicy::FailClosed, Duration::from_secs(1)).expect("config"),
+    )
+    .with_persistence_port(store)
+    .with_durable_local_write_approval(seal, workspace)
+}
+
+#[tokio::test]
+async fn durable_local_write_waits_restarts_previews_and_resumes_once() {
+    let definition = durable_definition();
+    let directory = tempfile::tempdir().expect("directory");
+    let store = Arc::new(
+        agent_persistence_sqlite::SqliteRunPersistence::open(directory.path().join("m10.sqlite3"))
+            .await
+            .expect("store"),
+    );
+    let counting_seal = Arc::new(CountingSeal::new());
+    let sealer: Arc<dyn ActionSealPort> = counting_seal.clone();
+    let workspace = WorkspaceBindingId::new();
+    let tool = Arc::new(DurablePreviewTool::new(durable_tool_definition()));
+    let first_model = Arc::new(FakeModelPort::scripted(vec![Ok(ModelResponse::new(
+        vec![ModelOutputPart::Text(
+            r#"{"action":{"tool":"workspace_write_file","arguments":{"relative_path":"report.txt","content":"private-content"}}}"#.to_owned(),
+        )],
+        None,
+    ))]));
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let first = durable_harness(
+        first_model.clone(),
+        tool.clone(),
+        store.clone(),
+        sealer.clone(),
+        workspace,
+        audit.clone(),
+    );
+    let run_id = RunId::new();
+    let session_id = SessionId::new();
+    let budget = RunBudget::new(1, 1, 0, Duration::from_secs(30))
+        .expect("budget")
+        .with_max_approval_requests(1)
+        .with_max_graph_steps(4)
+        .expect("steps");
+    let mut context = RunContext::new_graph(
+        run_id,
+        session_id,
+        budget,
+        DurableProgram::RECOVERY_VERSION,
+        definition.digest(),
+    );
+    first.start_run(&mut context).await.expect("start");
+    let action_callbacks = Arc::new(AtomicUsize::new(0));
+    let mut program = DurableProgram {
+        action_callbacks: action_callbacks.clone(),
+    };
+    let waiting = crate::GraphEngine::new(&definition)
+        .run(
+            &first,
+            &mut context,
+            &mut program,
+            &mut DurableState::default(),
+        )
+        .await
+        .expect("suspend");
+    assert_eq!(waiting.terminal(), GraphTerminalOutcome::Waiting);
+    let wait = waiting.waiting().expect("wait handle");
+    assert_eq!(context.usage().approval_requests(), 1);
+    assert_eq!(context.usage().tool_calls(), 0);
+    assert_eq!(tool.invocation_count(), 0);
+    assert_eq!(action_callbacks.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store
+            .load_pending_approval_requests(RunKey::new(run_id, session_id))
+            .await
+            .expect("pending waits")
+            .len(),
+        1
+    );
+    let database_bytes = std::fs::read(store.path()).expect("read SQLite database");
+    assert!(
+        !database_bytes
+            .windows(b"private-content".len())
+            .any(|window| window == b"private-content")
+    );
+    assert!(
+        !database_bytes
+            .windows(b"report.txt".len())
+            .any(|window| window == b"report.txt")
+    );
+
+    let wrong_workspace = durable_harness(
+        Arc::new(FakeModelPort::scripted(Vec::new())),
+        tool.clone(),
+        store.clone(),
+        sealer.clone(),
+        WorkspaceBindingId::new(),
+        audit.clone(),
+    );
+    assert!(
+        wrong_workspace
+            .durable_approval_view(RunKey::new(run_id, session_id), wait.wait_id())
+            .await
+            .is_err()
+    );
+    assert_eq!(counting_seal.opens(), 0);
+
+    let mismatched_definition = ToolDefinition::new(
+        ToolName::new("workspace_write_file").expect("tool name"),
+        "changed trusted contract",
+        CapabilityKind::LocalWrite,
+        durable_tool_definition().input_schema().clone(),
+    )
+    .expect("mismatched definition");
+    let wrong_contract = durable_harness(
+        Arc::new(FakeModelPort::scripted(Vec::new())),
+        Arc::new(DurablePreviewTool::new(mismatched_definition)),
+        store.clone(),
+        sealer.clone(),
+        workspace,
+        audit.clone(),
+    );
+    assert!(
+        wrong_contract
+            .durable_approval_view(RunKey::new(run_id, session_id), wait.wait_id())
+            .await
+            .is_err()
+    );
+    assert_eq!(counting_seal.opens(), 0);
+
+    let second_model = Arc::new(FakeModelPort::scripted(Vec::new()));
+    let second = durable_harness(
+        second_model.clone(),
+        tool.clone(),
+        store.clone(),
+        sealer,
+        workspace,
+        audit.clone(),
+    );
+    let key = RunKey::new(run_id, session_id);
+    let disposition = second.recover_run(key).await.expect("recover waiting");
+    assert!(matches!(disposition, RecoveryDisposition::Waiting(_)));
+    assert_eq!(counting_seal.opens(), 0);
+    assert_eq!(second_model.invocation_count(), 0);
+    assert_eq!(tool.invocation_count(), 0);
+
+    let view = second
+        .durable_approval_view(key, wait.wait_id())
+        .await
+        .expect("preview");
+    assert_eq!(view.preview().target_label(), "report.txt");
+    assert_eq!(view.preview().summary(), "workspace_write_file (15 bytes)");
+    assert!(!view.preview().summary().contains("private-content"));
+    assert_eq!(counting_seal.opens(), 1);
+    let wrong = second
+        .record_durable_approval_decision(DurableApprovalDecisionCommand {
+            key,
+            wait_id: wait.wait_id(),
+            approval_request_id: wait.approval_request_id(),
+            action_proposal_id: wait.action_proposal_id(),
+            tool_call_id: wait.tool_call_id(),
+            action_digest: ActionDigest::from_bytes([0; 32]),
+            expected_row_version: view.row_version(),
+            outcome: DurableApprovalOutcome::Approve,
+        })
+        .await;
+    assert!(wrong.is_err());
+    let command = DurableApprovalDecisionCommand {
+        key,
+        wait_id: wait.wait_id(),
+        approval_request_id: wait.approval_request_id(),
+        action_proposal_id: wait.action_proposal_id(),
+        tool_call_id: wait.tool_call_id(),
+        action_digest: wait.action_digest(),
+        expected_row_version: view.row_version(),
+        outcome: DurableApprovalOutcome::Approve,
+    };
+    for wrong in [
+        DurableApprovalDecisionCommand {
+            approval_request_id: ApprovalRequestId::new(),
+            ..command
+        },
+        DurableApprovalDecisionCommand {
+            action_proposal_id: ActionProposalId::new(),
+            ..command
+        },
+        DurableApprovalDecisionCommand {
+            tool_call_id: ToolCallId::new(),
+            ..command
+        },
+        DurableApprovalDecisionCommand {
+            key: RunKey::new(RunId::new(), session_id),
+            ..command
+        },
+    ] {
+        assert!(
+            second
+                .record_durable_approval_decision(wrong)
+                .await
+                .is_err()
+        );
+    }
+    let (left, right) = tokio::join!(
+        second.record_durable_approval_decision(command),
+        second.record_durable_approval_decision(command),
+    );
+    assert_ne!(left.is_ok(), right.is_ok());
+    let duplicate = second.record_durable_approval_decision(command).await;
+    assert!(duplicate.is_err());
+
+    let RecoveryDisposition::Waiting(wrong_recovered) =
+        second.recover_run(key).await.expect("recover decided wait")
+    else {
+        panic!("decision must remain intentional waiting until explicit resume");
+    };
+    let wrong_definition = linear_definition(false);
+    let mismatch = crate::GraphEngine::new(&wrong_definition)
+        .resume_waiting(
+            &second,
+            *wrong_recovered,
+            wait.wait_id(),
+            &mut DurableProgram {
+                action_callbacks: action_callbacks.clone(),
+            },
+        )
+        .await;
+    assert!(matches!(mismatch, Err(crate::GraphError::RecoveryMismatch)));
+    let RecoveryDisposition::Waiting(recovered) = second
+        .recover_run(key)
+        .await
+        .expect("recover after mismatch")
+    else {
+        panic!("mismatch must not consume the wait");
+    };
+    let mut resumed_program = DurableProgram {
+        action_callbacks: action_callbacks.clone(),
+    };
+    let (summary, _) = crate::GraphEngine::new(&definition)
+        .resume_waiting(&second, *recovered, wait.wait_id(), &mut resumed_program)
+        .await
+        .expect("resume exact action");
+    assert_eq!(summary.terminal(), GraphTerminalOutcome::Complete);
+    assert_eq!(summary.steps(), 4);
+    assert_eq!(tool.invocation_count(), 1);
+    assert_eq!(second_model.invocation_count(), 0);
+    assert_eq!(action_callbacks.load(Ordering::SeqCst), 1);
+    assert_eq!(counting_seal.opens(), 2);
+    assert!(
+        store
+            .load_pending_approval_requests(key)
+            .await
+            .expect("consumed waits")
+            .is_empty()
+    );
+    assert!(audit.events().iter().any(|event| matches!(
+        event.kind(),
+        AgentEventKind::ToolInvocationStarted { tool_call_id, .. }
+            if *tool_call_id == wait.tool_call_id()
+    )));
+}
+
+#[tokio::test]
+async fn durable_local_write_denial_after_restart_executes_zero_tools() {
+    let definition = durable_definition();
+    let directory = tempfile::tempdir().expect("directory");
+    let store = Arc::new(
+        agent_persistence_sqlite::SqliteRunPersistence::open(directory.path().join("deny.sqlite3"))
+            .await
+            .expect("store"),
+    );
+    let seal: Arc<dyn ActionSealPort> = Arc::new(CountingSeal::new());
+    let workspace = WorkspaceBindingId::new();
+    let tool = Arc::new(DurablePreviewTool::new(durable_tool_definition()));
+    let model = Arc::new(FakeModelPort::scripted(vec![Ok(ModelResponse::new(
+        vec![ModelOutputPart::Text(
+            r#"{"action":{"tool":"workspace_write_file","arguments":{"relative_path":"denied.txt","content":"no-write"}}}"#.to_owned(),
+        )],
+        None,
+    ))]));
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let first = durable_harness(
+        model,
+        tool.clone(),
+        store.clone(),
+        seal.clone(),
+        workspace,
+        audit.clone(),
+    );
+    let run_id = RunId::new();
+    let session_id = SessionId::new();
+    let mut context = RunContext::new_graph(
+        run_id,
+        session_id,
+        RunBudget::new(1, 1, 0, Duration::from_secs(30))
+            .expect("budget")
+            .with_max_approval_requests(1)
+            .with_max_graph_steps(3)
+            .expect("steps"),
+        DurableProgram::RECOVERY_VERSION,
+        definition.digest(),
+    );
+    first.start_run(&mut context).await.expect("start");
+    let callbacks = Arc::new(AtomicUsize::new(0));
+    let wait = crate::GraphEngine::new(&definition)
+        .run(
+            &first,
+            &mut context,
+            &mut DurableProgram {
+                action_callbacks: callbacks.clone(),
+            },
+            &mut DurableState::default(),
+        )
+        .await
+        .expect("wait")
+        .waiting()
+        .expect("wait handle");
+    let second = durable_harness(
+        Arc::new(FakeModelPort::scripted(Vec::new())),
+        tool.clone(),
+        store,
+        seal,
+        workspace,
+        audit,
+    );
+    let key = RunKey::new(run_id, session_id);
+    let view = second
+        .durable_approval_view(key, wait.wait_id())
+        .await
+        .expect("view");
+    second
+        .record_durable_approval_decision(DurableApprovalDecisionCommand {
+            key,
+            wait_id: wait.wait_id(),
+            approval_request_id: wait.approval_request_id(),
+            action_proposal_id: wait.action_proposal_id(),
+            tool_call_id: wait.tool_call_id(),
+            action_digest: wait.action_digest(),
+            expected_row_version: view.row_version(),
+            outcome: DurableApprovalOutcome::Deny,
+        })
+        .await
+        .expect("deny");
+    let RecoveryDisposition::Waiting(recovered) = second.recover_run(key).await.expect("recover")
+    else {
+        panic!("denied decision remains waiting for explicit resume");
+    };
+    let (summary, _) = crate::GraphEngine::new(&definition)
+        .resume_waiting(
+            &second,
+            *recovered,
+            wait.wait_id(),
+            &mut DurableProgram {
+                action_callbacks: callbacks.clone(),
+            },
+        )
+        .await
+        .expect("resume denial");
+    assert_eq!(summary.terminal(), GraphTerminalOutcome::Fail);
+    assert_eq!(tool.invocation_count(), 0);
+    assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn durable_wait_transaction_failure_publishes_neither_wait_nor_suspension() {
+    let definition = durable_definition();
+    let directory = tempfile::tempdir().expect("directory");
+    let store = Arc::new(
+        agent_persistence_sqlite::SqliteRunPersistence::open(
+            directory.path().join("wait-crash.sqlite3"),
+        )
+        .await
+        .expect("store"),
+    );
+    let connection = rusqlite::Connection::open(store.path()).expect("database");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_wait_insert BEFORE INSERT ON durable_approvals
+             BEGIN SELECT RAISE(ABORT, 'injected crash'); END;",
+        )
+        .expect("failure trigger");
+    drop(connection);
+
+    let tool = Arc::new(DurablePreviewTool::new(durable_tool_definition()));
+    let harness = durable_harness(
+        Arc::new(FakeModelPort::scripted(vec![Ok(ModelResponse::new(
+            vec![ModelOutputPart::Text(
+                r#"{"action":{"tool":"workspace_write_file","arguments":{"relative_path":"report.txt","content":"private-content"}}}"#.to_owned(),
+            )],
+            None,
+        ))])),
+        tool.clone(),
+        store.clone(),
+        Arc::new(CountingSeal::new()),
+        WorkspaceBindingId::new(),
+        Arc::new(InMemoryAuditSink::new()),
+    );
+    let run_id = RunId::new();
+    let session_id = SessionId::new();
+    let mut context = RunContext::new_graph(
+        run_id,
+        session_id,
+        RunBudget::new(1, 1, 0, Duration::from_secs(30))
+            .expect("budget")
+            .with_max_approval_requests(1)
+            .with_max_graph_steps(3)
+            .expect("steps"),
+        DurableProgram::RECOVERY_VERSION,
+        definition.digest(),
+    );
+    harness.start_run(&mut context).await.expect("start");
+    let result = crate::GraphEngine::new(&definition)
+        .run(
+            &harness,
+            &mut context,
+            &mut DurableProgram {
+                action_callbacks: Arc::new(AtomicUsize::new(0)),
+            },
+            &mut DurableState::default(),
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(tool.invocation_count(), 0);
+
+    let key = RunKey::new(run_id, session_id);
+    assert!(
+        store
+            .load_pending_approval_requests(key)
+            .await
+            .expect("pending waits")
+            .is_empty()
+    );
+    let loaded = store.load_run(key).await.expect("durable run");
+    assert!(!loaded.events().iter().any(|event| matches!(
+        event.kind(),
+        AgentEventKind::Graph {
+            event: agent_core::GraphProgressEvent::GraphSuspended { .. }
+        }
+    )));
 }

@@ -2,6 +2,7 @@
 members = [
     "apps/agent-cli",
     "crates/agent-containment-linux",
+    "crates/agent-action-seal-local",
     "crates/agent-core",
     "crates/agent-harness",
     "crates/agent-graph",
@@ -19,6 +20,7 @@ edition = "2024"
 
 [workspace.dependencies]
 agent-core = { path = "crates/agent-core" }
+agent-action-seal-local = { path = "crates/agent-action-seal-local" }
 agent-containment-linux = { path = "crates/agent-containment-linux" }
 agent-harness = { path = "crates/agent-harness" }
 agent-graph = { path = "crates/agent-graph" }
@@ -28,6 +30,7 @@ agent-loop = { path = "crates/agent-loop" }
 agent-persistence-sqlite = { path = "crates/agent-persistence-sqlite" }
 agent-provider-rig = { path = "crates/agent-provider-rig" }
 anyhow = "1.0"
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 jsonschema = { version = "=0.49.2", default-features = false }
 reqwest = { version = "=0.13.4", default-features = false }
@@ -46,3 +49,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 url = "2.5"
 uuid = { version = "1.0", features = ["serde", "v4"] }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }

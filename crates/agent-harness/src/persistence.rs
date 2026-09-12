@@ -5,8 +5,12 @@ use agent_core::{AgentEvent, BudgetUsage, EventSequence, RunBudget, RunId, RunSt
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const CURRENT_STORE_SCHEMA_VERSION: u16 = 1;
-pub const CURRENT_CHECKPOINT_SCHEMA_VERSION: u16 = 3;
+use agent_core::DurableApprovalWaitId;
+
+use crate::{DurableApprovalDecisionCommand, DurableApprovalRecord, DurableApprovalStatus};
+
+pub const CURRENT_STORE_SCHEMA_VERSION: u16 = 2;
+pub const CURRENT_CHECKPOINT_SCHEMA_VERSION: u16 = 4;
 
 pub type PersistenceFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -186,6 +190,109 @@ pub struct LoadedRun {
     events: Vec<AgentEvent>,
 }
 
+#[derive(Clone, Debug)]
+pub struct CreateDurableApprovalWait {
+    transition: AppendTransition,
+    record: DurableApprovalRecord,
+}
+
+impl CreateDurableApprovalWait {
+    #[must_use]
+    pub const fn new(transition: AppendTransition, record: DurableApprovalRecord) -> Self {
+        Self { transition, record }
+    }
+    #[must_use]
+    pub const fn transition(&self) -> &AppendTransition {
+        &self.transition
+    }
+    #[must_use]
+    pub const fn record(&self) -> &DurableApprovalRecord {
+        &self.record
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordDurableApprovalDecision {
+    transition: AppendTransition,
+    command: DurableApprovalDecisionCommand,
+}
+
+impl RecordDurableApprovalDecision {
+    #[must_use]
+    pub const fn new(
+        transition: AppendTransition,
+        command: DurableApprovalDecisionCommand,
+    ) -> Self {
+        Self {
+            transition,
+            command,
+        }
+    }
+    #[must_use]
+    pub const fn transition(&self) -> &AppendTransition {
+        &self.transition
+    }
+    #[must_use]
+    pub const fn command(&self) -> DurableApprovalDecisionCommand {
+        self.command
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DurableApprovalStatusTransition {
+    transition: Option<AppendTransition>,
+    key: RunKey,
+    wait_id: DurableApprovalWaitId,
+    expected_row_version: u64,
+    expected_status: DurableApprovalStatus,
+    next_status: DurableApprovalStatus,
+}
+
+impl DurableApprovalStatusTransition {
+    #[must_use]
+    pub const fn new(
+        transition: Option<AppendTransition>,
+        key: RunKey,
+        wait_id: DurableApprovalWaitId,
+        expected_row_version: u64,
+        expected_status: DurableApprovalStatus,
+        next_status: DurableApprovalStatus,
+    ) -> Self {
+        Self {
+            transition,
+            key,
+            wait_id,
+            expected_row_version,
+            expected_status,
+            next_status,
+        }
+    }
+    #[must_use]
+    pub const fn transition(&self) -> Option<&AppendTransition> {
+        self.transition.as_ref()
+    }
+    #[must_use]
+    pub const fn key(&self) -> RunKey {
+        self.key
+    }
+    #[must_use]
+    pub const fn wait_id(&self) -> DurableApprovalWaitId {
+        self.wait_id
+    }
+    #[must_use]
+    pub const fn expected_row_version(&self) -> u64 {
+        self.expected_row_version
+    }
+    #[must_use]
+    pub const fn expected_status(&self) -> DurableApprovalStatus {
+        self.expected_status
+    }
+    #[must_use]
+    pub const fn next_status(&self) -> DurableApprovalStatus {
+        self.next_status
+    }
+}
+
 impl LoadedRun {
     #[must_use]
     pub const fn new(
@@ -232,6 +339,42 @@ pub trait RunPersistencePort: Send + Sync {
         &'a self,
         key: RunKey,
     ) -> PersistenceFuture<'a, Result<LoadedRun, PersistencePortError>>;
+
+    fn create_durable_approval_wait<'a>(
+        &'a self,
+        _request: &'a CreateDurableApprovalWait,
+    ) -> PersistenceFuture<'a, Result<(), PersistencePortError>> {
+        Box::pin(async { Err(PersistencePortError::Unavailable) })
+    }
+
+    fn load_durable_approval_wait<'a>(
+        &'a self,
+        _key: RunKey,
+        _wait_id: DurableApprovalWaitId,
+    ) -> PersistenceFuture<'a, Result<DurableApprovalRecord, PersistencePortError>> {
+        Box::pin(async { Err(PersistencePortError::Unavailable) })
+    }
+
+    fn load_pending_approval_requests<'a>(
+        &'a self,
+        _key: RunKey,
+    ) -> PersistenceFuture<'a, Result<Vec<DurableApprovalRecord>, PersistencePortError>> {
+        Box::pin(async { Err(PersistencePortError::Unavailable) })
+    }
+
+    fn record_durable_approval_decision<'a>(
+        &'a self,
+        _request: &'a RecordDurableApprovalDecision,
+    ) -> PersistenceFuture<'a, Result<(), PersistencePortError>> {
+        Box::pin(async { Err(PersistencePortError::Unavailable) })
+    }
+
+    fn transition_durable_approval_status<'a>(
+        &'a self,
+        _request: &'a DurableApprovalStatusTransition,
+    ) -> PersistenceFuture<'a, Result<(), PersistencePortError>> {
+        Box::pin(async { Err(PersistencePortError::Unavailable) })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]

@@ -1,7 +1,7 @@
 use std::{future::Future, pin::Pin};
 
 use agent_core::{GraphBranchId, GraphNodeId};
-use agent_harness::DurableRunState;
+use agent_harness::{DurableApprovalWait, DurableRunState};
 
 use crate::{
     ActionEffects, DecisionContext, GraphProgramError, ModelEffects, RetrieveEffects, VerifyEffects,
@@ -38,6 +38,15 @@ pub trait GraphProgram: Send {
         state: &'a mut Self::WorkingState,
         effects: ActionEffects<'a>,
     ) -> GraphFuture<'a, Result<(), GraphProgramError>>;
+
+    fn durable_local_write_action<'a>(
+        &'a mut self,
+        _node_id: &'a GraphNodeId,
+        _state: &'a mut Self::WorkingState,
+        _effects: ActionEffects<'a>,
+    ) -> GraphFuture<'a, Result<DurableApprovalWait, GraphProgramError>> {
+        Box::pin(async { Err(GraphProgramError::Failed) })
+    }
 
     fn verify<'a>(
         &'a mut self,

@@ -3,7 +3,10 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
 
-use crate::{GraphNodeAttemptId, RunFailureKind};
+use crate::{
+    ActionDigest, ActionProposalId, ApprovalRequestId, DurableApprovalWaitId, GraphNodeAttemptId,
+    RunFailureKind, ToolCallId,
+};
 
 pub const MAX_GRAPH_NODE_ID_BYTES: usize = 64;
 pub const MAX_GRAPH_BRANCH_ID_BYTES: usize = 32;
@@ -89,6 +92,7 @@ pub enum GraphRecoveryMode {
 #[serde(rename_all = "snake_case", tag = "kind", content = "branch")]
 pub enum GraphTransitionKey {
     Succeeded,
+    ApprovalDenied,
     VerificationPassed,
     VerificationFailed,
     Branch(GraphBranchId),
@@ -136,6 +140,20 @@ pub enum GraphProgressEvent {
         next_node: GraphNodeId,
         next_kind: GraphNodeKind,
         next_recovery: GraphRecoveryMode,
+    },
+    GraphSuspended {
+        attempt_id: GraphNodeAttemptId,
+        node_id: GraphNodeId,
+        wait_id: DurableApprovalWaitId,
+        approval_request_id: ApprovalRequestId,
+        action_proposal_id: ActionProposalId,
+        tool_call_id: ToolCallId,
+        action_digest: ActionDigest,
+    },
+    GraphResumed {
+        attempt_id: GraphNodeAttemptId,
+        node_id: GraphNodeId,
+        wait_id: DurableApprovalWaitId,
     },
     GraphCompleted {
         attempt_id: GraphNodeAttemptId,

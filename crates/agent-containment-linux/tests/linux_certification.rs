@@ -1,13 +1,21 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_action_seal_local::LocalActionSealer;
 use agent_containment_linux::{LinuxContainmentConfig, LinuxWorkspaceWriteTool};
 use agent_core::{
-    AgentEventKind, ModelMessage, ModelOutputPart, ModelRequest, ModelResponse, ModelRole,
-    RunBudget, RunId, SessionId, ToolResult,
+    AgentEventKind, DurableApprovalOutcome, GraphBranchId, GraphNodeId, GraphRecoveryMode,
+    GraphTransitionKey, ModelMessage, ModelOutputPart, ModelRequest, ModelResponse, ModelRole,
+    RunBudget, RunId, SessionId, ToolResult, WorkspaceBindingId,
+};
+use agent_graph::{
+    ActionEffects, DecisionContext, Edge, GraphDefinition, GraphFuture, GraphProgram,
+    GraphProgramError, GraphTerminalOutcome, ModelEffects, NodeDefinition, NodeKind,
+    RestartableGraphProgram, RetrieveEffects, VerificationOutcome, VerifyEffects,
 };
 use agent_harness::{
-    AuditFailurePolicy, AuditSink, ContainedToolPort, ExecutionHarness, HarnessConfig,
+    ActionSealPort, AuditFailurePolicy, AuditSink, CompletedModelInvocation, ContainedToolPort,
+    DurableApprovalDecisionCommand, DurableApprovalWait, ExecutionHarness, HarnessConfig,
     M6ApprovalPolicy, ManualReconciliationReason, ModelPort, RecoveryDisposition, RunContext,
     RunKey, ToolRegistry,
     testing::{FakeModelPort, InMemoryAuditSink, ScriptedApprovalPort},
@@ -63,7 +71,7 @@ async fn production_linux_security_certification() {
         Ok(response(&escape)),
     ]));
     let mut registry = ToolRegistry::new();
-    let port: Arc<dyn ContainedToolPort> = tool;
+    let port: Arc<dyn ContainedToolPort> = tool.clone();
     registry
         .register_contained(port)
         .expect("production contained tool must register");
@@ -156,6 +164,274 @@ async fn production_linux_security_certification() {
         "second"
     );
     assert!(!outside.path().join("outside.txt").exists());
+
+    certify_durable_local_write(workspace.path(), tool).await;
+}
+
+async fn certify_durable_local_write(
+    workspace: &std::path::Path,
+    tool: Arc<LinuxWorkspaceWriteTool>,
+) {
+    let definition = durable_definition();
+    let persistence_directory = tempfile::tempdir().expect("persistence directory");
+    let persistence = Arc::new(
+        agent_persistence_sqlite::SqliteRunPersistence::open(
+            persistence_directory.path().join("durable.sqlite3"),
+        )
+        .await
+        .expect("SQLite persistence"),
+    );
+    let seal: Arc<dyn ActionSealPort> =
+        Arc::new(LocalActionSealer::new("certification-key", [0x5a; 32]).expect("test key"));
+    let workspace_binding = WorkspaceBindingId::new();
+    let model = Arc::new(FakeModelPort::scripted(vec![Ok(response(&action(
+        "reports/durable.txt",
+        "durable",
+    )))]));
+    let first = durable_harness(
+        model,
+        tool.clone(),
+        persistence.clone(),
+        seal.clone(),
+        workspace_binding,
+    );
+    let run_id = RunId::new();
+    let session_id = SessionId::new();
+    let mut context = RunContext::new_graph(
+        run_id,
+        session_id,
+        RunBudget::new(1, 1, 0, Duration::from_secs(20))
+            .expect("budget")
+            .with_max_approval_requests(1)
+            .with_max_graph_steps(4)
+            .expect("graph budget"),
+        DurableCertificationProgram::RECOVERY_VERSION,
+        definition.digest(),
+    );
+    first
+        .start_run(&mut context)
+        .await
+        .expect("start durable run");
+    let mut program = DurableCertificationProgram::default();
+    let waiting = agent_graph::GraphEngine::new(&definition)
+        .run(
+            &first,
+            &mut context,
+            &mut program,
+            &mut DurableState::default(),
+        )
+        .await
+        .expect("suspend durable action");
+    assert_eq!(waiting.terminal(), GraphTerminalOutcome::Waiting);
+    let wait = waiting.waiting().expect("wait handle");
+    assert_eq!(program.action_calls, 1);
+    assert!(!workspace.join("reports/durable.txt").exists());
+
+    let second = durable_harness(
+        Arc::new(FakeModelPort::scripted(Vec::new())),
+        tool,
+        persistence,
+        seal,
+        workspace_binding,
+    );
+    let key = RunKey::new(run_id, session_id);
+    let view = second
+        .durable_approval_view(key, wait.wait_id())
+        .await
+        .expect("durable preview");
+    assert_eq!(view.preview().target_label(), "reports/durable.txt");
+    assert!(!view.preview().summary().contains("durable"));
+    second
+        .record_durable_approval_decision(DurableApprovalDecisionCommand {
+            key,
+            wait_id: wait.wait_id(),
+            approval_request_id: wait.approval_request_id(),
+            action_proposal_id: wait.action_proposal_id(),
+            tool_call_id: wait.tool_call_id(),
+            action_digest: wait.action_digest(),
+            expected_row_version: view.row_version(),
+            outcome: DurableApprovalOutcome::Approve,
+        })
+        .await
+        .expect("record approval");
+    let RecoveryDisposition::Waiting(recovered) =
+        second.recover_run(key).await.expect("recover waiting run")
+    else {
+        panic!("intentional waiting must recover as Waiting");
+    };
+    let mut resumed_program = DurableCertificationProgram::default();
+    let (summary, _) = agent_graph::GraphEngine::new(&definition)
+        .resume_waiting(&second, *recovered, wait.wait_id(), &mut resumed_program)
+        .await
+        .expect("resume durable write");
+    assert_eq!(summary.terminal(), GraphTerminalOutcome::Complete);
+    assert_eq!(resumed_program.action_calls, 0);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("reports/durable.txt")).expect("durable file"),
+        "durable"
+    );
+}
+
+fn durable_harness(
+    model: Arc<FakeModelPort>,
+    tool: Arc<LinuxWorkspaceWriteTool>,
+    persistence: Arc<agent_persistence_sqlite::SqliteRunPersistence>,
+    seal: Arc<dyn ActionSealPort>,
+    workspace_binding: WorkspaceBindingId,
+) -> ExecutionHarness {
+    let mut registry = ToolRegistry::new();
+    let contained: Arc<dyn ContainedToolPort> = tool;
+    registry
+        .register_contained(contained)
+        .expect("contained tool registration");
+    ExecutionHarness::new(
+        model,
+        registry,
+        Arc::new(M6ApprovalPolicy),
+        Arc::new(InMemoryAuditSink::new()),
+        HarnessConfig::new(AuditFailurePolicy::FailClosed, Duration::from_secs(1))
+            .expect("harness config"),
+    )
+    .with_persistence_port(persistence)
+    .with_durable_local_write_approval(seal, workspace_binding)
+}
+
+#[derive(Default)]
+struct DurableState {
+    model: Option<CompletedModelInvocation>,
+}
+
+#[derive(Default)]
+struct DurableCertificationProgram {
+    action_calls: usize,
+}
+
+impl GraphProgram for DurableCertificationProgram {
+    type WorkingState = DurableState;
+
+    fn retrieve<'a>(
+        &'a mut self,
+        _node_id: &'a GraphNodeId,
+        _state: &'a mut Self::WorkingState,
+        _effects: RetrieveEffects<'a>,
+    ) -> GraphFuture<'a, Result<(), GraphProgramError>> {
+        Box::pin(async { Err(GraphProgramError::Failed) })
+    }
+
+    fn model<'a>(
+        &'a mut self,
+        _node_id: &'a GraphNodeId,
+        state: &'a mut Self::WorkingState,
+        mut effects: ModelEffects<'a>,
+    ) -> GraphFuture<'a, Result<(), GraphProgramError>> {
+        Box::pin(async move {
+            state.model = Some(
+                effects
+                    .invoke_model(ModelRequest::new(vec![ModelMessage::new(
+                        ModelRole::User,
+                        "prepare durable write",
+                    )]))
+                    .await
+                    .map_err(|_| GraphProgramError::Failed)?,
+            );
+            Ok(())
+        })
+    }
+
+    fn action<'a>(
+        &'a mut self,
+        _node_id: &'a GraphNodeId,
+        _state: &'a mut Self::WorkingState,
+        _effects: ActionEffects<'a>,
+    ) -> GraphFuture<'a, Result<(), GraphProgramError>> {
+        Box::pin(async { Err(GraphProgramError::Failed) })
+    }
+
+    fn durable_local_write_action<'a>(
+        &'a mut self,
+        _node_id: &'a GraphNodeId,
+        state: &'a mut Self::WorkingState,
+        mut effects: ActionEffects<'a>,
+    ) -> GraphFuture<'a, Result<DurableApprovalWait, GraphProgramError>> {
+        self.action_calls += 1;
+        Box::pin(async move {
+            let model = state.model.take().ok_or(GraphProgramError::Failed)?;
+            let action = effects
+                .prepare_action(model)
+                .await
+                .map_err(|_| GraphProgramError::Failed)?;
+            effects
+                .suspend_local_write(action)
+                .await
+                .map_err(|_| GraphProgramError::Failed)
+        })
+    }
+
+    fn verify<'a>(
+        &'a mut self,
+        _node_id: &'a GraphNodeId,
+        _state: &'a mut Self::WorkingState,
+        _effects: VerifyEffects<'a>,
+    ) -> GraphFuture<'a, Result<VerificationOutcome, GraphProgramError>> {
+        Box::pin(async { Ok(VerificationOutcome::Passed) })
+    }
+
+    fn decide<'a>(
+        &'a mut self,
+        _node_id: &'a GraphNodeId,
+        _state: &'a mut Self::WorkingState,
+        _context: DecisionContext<'a>,
+    ) -> GraphFuture<'a, Result<GraphBranchId, GraphProgramError>> {
+        Box::pin(async { Err(GraphProgramError::Failed) })
+    }
+}
+
+impl RestartableGraphProgram for DurableCertificationProgram {
+    const RECOVERY_VERSION: u32 = 10;
+
+    fn restore_working_state(
+        &mut self,
+        _state: &agent_harness::DurableRunState,
+    ) -> Result<Self::WorkingState, GraphProgramError> {
+        Ok(DurableState::default())
+    }
+}
+
+fn durable_definition() -> GraphDefinition {
+    let id = |value: &str| GraphNodeId::new(value).expect("node ID");
+    let node = |value: &str, kind: NodeKind| {
+        NodeDefinition::new(id(value), kind, GraphRecoveryMode::Never)
+    };
+    GraphDefinition::new(
+        id("model"),
+        vec![
+            node("model", NodeKind::Model),
+            node("action", NodeKind::DurableLocalWriteAction),
+            node("verify", NodeKind::Verify),
+            node("complete", NodeKind::Complete),
+            node("denied", NodeKind::Fail),
+        ],
+        vec![
+            Edge::new(id("model"), GraphTransitionKey::Succeeded, id("action")),
+            Edge::new(id("action"), GraphTransitionKey::Succeeded, id("verify")),
+            Edge::new(
+                id("action"),
+                GraphTransitionKey::ApprovalDenied,
+                id("denied"),
+            ),
+            Edge::new(
+                id("verify"),
+                GraphTransitionKey::VerificationPassed,
+                id("complete"),
+            ),
+            Edge::new(
+                id("verify"),
+                GraphTransitionKey::VerificationFailed,
+                id("denied"),
+            ),
+        ],
+    )
+    .expect("durable graph")
 }
 
 async fn execute_action(harness: &ExecutionHarness, context: &mut RunContext) -> ToolResult {

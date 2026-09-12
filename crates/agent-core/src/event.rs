@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActionProposalId, ActionRejectionReason, ApprovalRequestId, CapabilityKind, GraphProgressEvent,
-    KnowledgeRetrievalId, LoopEventKind, ModelCallId, RunId, RunOutcome, TokenUsage, ToolCallId,
-    ToolDomainFailureKind, ToolName,
+    ActionDigest, ActionProposalId, ActionRejectionReason, ApprovalRequestId, CapabilityKind,
+    DurableApprovalWaitId, GraphProgressEvent, KnowledgeRetrievalId, LoopEventKind, ModelCallId,
+    RunId, RunOutcome, TokenUsage, ToolCallId, ToolContractDigest, ToolDomainFailureKind, ToolName,
+    WorkspaceBindingId,
 };
 
-pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(8);
+pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(9);
 
 pub const MAX_DURABLE_KNOWLEDGE_BACKENDS: usize = 2;
 pub const MAX_DURABLE_EVIDENCE_REFERENCES: usize = 8;
@@ -180,6 +181,31 @@ pub enum AgentEventKind {
         approval_request_id: ApprovalRequestId,
         kind: ApprovalFailureKind,
     },
+    DurableApprovalPrepared {
+        wait_id: DurableApprovalWaitId,
+        approval_request_id: ApprovalRequestId,
+        action_proposal_id: ActionProposalId,
+        tool_call_id: ToolCallId,
+        action_digest: ActionDigest,
+        workspace_binding_id: WorkspaceBindingId,
+        tool_contract_digest: ToolContractDigest,
+        usage: u32,
+        limit: u32,
+    },
+    DurableApprovalDecisionRecorded {
+        wait_id: DurableApprovalWaitId,
+        approval_request_id: ApprovalRequestId,
+        outcome: DurableApprovalOutcome,
+        row_version: u64,
+    },
+    DurableApprovalGranted {
+        wait_id: DurableApprovalWaitId,
+        approval_request_id: ApprovalRequestId,
+    },
+    DurableApprovalDenied {
+        wait_id: DurableApprovalWaitId,
+        approval_request_id: ApprovalRequestId,
+    },
     ContainmentFailed {
         tool_call_id: ToolCallId,
         tool_name: ToolName,
@@ -224,6 +250,13 @@ pub enum AgentEventKind {
     Graph {
         event: GraphProgressEvent,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurableApprovalOutcome {
+    Approve,
+    Deny,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -387,7 +420,7 @@ mod tests {
         );
 
         assert_eq!(event.schema_version(), CURRENT_EVENT_SCHEMA_VERSION);
-        assert_eq!(event.schema_version().get(), 8);
+        assert_eq!(event.schema_version().get(), 9);
         assert_eq!(event.sequence().get(), 7);
 
         let json = serde_json::to_string(&event).expect("event must serialize");

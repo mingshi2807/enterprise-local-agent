@@ -3,11 +3,15 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agent_core::{AgentEvent, CURRENT_EVENT_SCHEMA_VERSION, EventSequence, RunStatus};
+use agent_core::{
+    AgentEvent, AgentEventKind, CURRENT_EVENT_SCHEMA_VERSION, DurableApprovalOutcome,
+    DurableApprovalWaitId, EventSequence, RunStatus,
+};
 use agent_harness::{
     AppendTransition, CURRENT_CHECKPOINT_SCHEMA_VERSION, CURRENT_STORE_SCHEMA_VERSION,
-    DurableCheckpoint, LoadedRun, PersistenceFuture, PersistencePortError, RunKey,
-    RunPersistencePort, RunRecord,
+    CreateDurableApprovalWait, DurableApprovalRecord, DurableApprovalStatus,
+    DurableApprovalStatusTransition, DurableCheckpoint, LoadedRun, PersistenceFuture,
+    PersistencePortError, RecordDurableApprovalDecision, RunKey, RunPersistencePort, RunRecord,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -15,6 +19,7 @@ use tokio::sync::Semaphore;
 
 const APPLICATION_ID: i32 = 0x454c_4137;
 type StoredRunRow = (String, Vec<u8>, Vec<u8>, Option<Vec<u8>>, i64);
+type StoredApprovalRow = (String, Vec<u8>, Vec<u8>, String, Vec<u8>, i64, i64);
 
 #[derive(Clone, Debug)]
 pub struct SqliteRunPersistence {
@@ -99,6 +104,95 @@ impl RunPersistencePort for SqliteRunPersistence {
                 .map_err(|_| PersistencePortError::Unavailable)?
         })
     }
+
+    fn create_durable_approval_wait<'a>(
+        &'a self,
+        request: &'a CreateDurableApprovalWait,
+    ) -> PersistenceFuture<'a, Result<(), PersistencePortError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        let request = request.clone();
+        Box::pin(async move {
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?;
+            tokio::task::spawn_blocking(move || create_durable_approval_wait(&path, &request))
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?
+        })
+    }
+
+    fn load_durable_approval_wait<'a>(
+        &'a self,
+        key: RunKey,
+        wait_id: DurableApprovalWaitId,
+    ) -> PersistenceFuture<'a, Result<DurableApprovalRecord, PersistencePortError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        Box::pin(async move {
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?;
+            tokio::task::spawn_blocking(move || load_durable_approval_wait(&path, key, wait_id))
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?
+        })
+    }
+
+    fn load_pending_approval_requests<'a>(
+        &'a self,
+        key: RunKey,
+    ) -> PersistenceFuture<'a, Result<Vec<DurableApprovalRecord>, PersistencePortError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        Box::pin(async move {
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?;
+            tokio::task::spawn_blocking(move || load_pending_approval_requests(&path, key))
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?
+        })
+    }
+
+    fn record_durable_approval_decision<'a>(
+        &'a self,
+        request: &'a RecordDurableApprovalDecision,
+    ) -> PersistenceFuture<'a, Result<(), PersistencePortError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        let request = request.clone();
+        Box::pin(async move {
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?;
+            tokio::task::spawn_blocking(move || record_durable_approval_decision(&path, &request))
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?
+        })
+    }
+
+    fn transition_durable_approval_status<'a>(
+        &'a self,
+        request: &'a DurableApprovalStatusTransition,
+    ) -> PersistenceFuture<'a, Result<(), PersistencePortError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        let request = request.clone();
+        Box::pin(async move {
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?;
+            tokio::task::spawn_blocking(move || transition_durable_approval_status(&path, &request))
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?
+        })
+    }
 }
 
 fn initialize(path: &Path) -> Result<(), PersistencePortError> {
@@ -136,6 +230,20 @@ fn initialize(path: &Path) -> Result<(), PersistencePortError> {
                    checkpoint_schema_version INTEGER NOT NULL,
                    payload BLOB NOT NULL,
                    checksum BLOB NOT NULL,
+                   FOREIGN KEY(run_id) REFERENCES runs(run_id)
+                 );
+                 CREATE TABLE durable_approvals(
+                   run_id TEXT NOT NULL,
+                   session_id TEXT NOT NULL,
+                   wait_id TEXT NOT NULL,
+                   record BLOB NOT NULL,
+                   checksum BLOB NOT NULL,
+                   key_id TEXT NOT NULL,
+                   nonce BLOB NOT NULL,
+                   status INTEGER NOT NULL,
+                   row_version INTEGER NOT NULL CHECK(row_version >= 0),
+                   PRIMARY KEY(run_id, wait_id),
+                   UNIQUE(key_id, nonce),
                    FOREIGN KEY(run_id) REFERENCES runs(run_id)
                  );
                  CREATE TRIGGER events_no_update BEFORE UPDATE ON events
@@ -239,6 +347,34 @@ fn append_transition(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(map_failed)?;
+    append_transition_in_transaction(&transaction, transition)?;
+    transaction.commit().map_err(map_failed)
+}
+
+fn append_transition_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    transition: &AppendTransition,
+) -> Result<(), PersistencePortError> {
+    if transition.event().run_id() != transition.key().run_id()
+        || transition.event().schema_version() != CURRENT_EVENT_SCHEMA_VERSION
+        || transition.checkpoint().is_some_and(|checkpoint| {
+            checkpoint.checkpoint_schema_version() != CURRENT_CHECKPOINT_SCHEMA_VERSION
+                || checkpoint.state().key() != transition.key()
+                || checkpoint.state().last_sequence() != Some(transition.event().sequence())
+        })
+    {
+        return Err(PersistencePortError::Conflict);
+    }
+    let expected_next = transition
+        .expected_sequence()
+        .map_or(EventSequence::new(0), |sequence| {
+            sequence
+                .checked_next()
+                .unwrap_or(EventSequence::new(u64::MAX))
+        });
+    if transition.event().sequence() != expected_next {
+        return Err(PersistencePortError::Conflict);
+    }
     let stored: Option<(String, Option<Vec<u8>>)> = transaction
         .query_row(
             "SELECT session_id,last_sequence FROM runs WHERE run_id=?1",
@@ -301,7 +437,240 @@ fn append_transition(
             )
             .map_err(map_failed)?;
     }
+    Ok(())
+}
+
+fn create_durable_approval_wait(
+    path: &Path,
+    request: &CreateDurableApprovalWait,
+) -> Result<(), PersistencePortError> {
+    if request.record().status() != DurableApprovalStatus::Waiting
+        || request.record().row_version() != 0
+        || request.record().binding().key() != request.transition().key()
+        || !matches!(
+            request.transition().event().kind(),
+            AgentEventKind::Graph {
+                event: agent_core::GraphProgressEvent::GraphSuspended { wait_id, .. }
+            } if *wait_id == request.record().binding().wait_id()
+        )
+    {
+        return Err(PersistencePortError::Conflict);
+    }
+    let mut connection = Connection::open(path).map_err(map_unavailable)?;
+    configure(&connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(map_failed)?;
+    append_transition_in_transaction(&transaction, request.transition())?;
+    let bytes = encode(request.record())?;
+    transaction
+        .execute(
+            "INSERT INTO durable_approvals(run_id,session_id,wait_id,record,checksum,key_id,nonce,status,row_version)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0)",
+            params![
+                request.transition().key().run_id().to_string(),
+                request.transition().key().session_id().to_string(),
+                request.record().binding().wait_id().to_string(),
+                bytes,
+                checksum(&bytes),
+                request.record().sealed_action().key_id(),
+                request.record().sealed_action().nonce(),
+                status_code(DurableApprovalStatus::Waiting),
+            ],
+        )
+        .map_err(map_conflict)?;
     transaction.commit().map_err(map_failed)
+}
+
+fn load_durable_approval_wait(
+    path: &Path,
+    key: RunKey,
+    wait_id: DurableApprovalWaitId,
+) -> Result<DurableApprovalRecord, PersistencePortError> {
+    let connection = Connection::open(path).map_err(map_unavailable)?;
+    configure(&connection)?;
+    let stored: Option<StoredApprovalRow> = connection
+        .query_row(
+            "SELECT session_id,record,checksum,key_id,nonce,status,row_version FROM durable_approvals
+             WHERE run_id=?1 AND wait_id=?2",
+            params![key.run_id().to_string(), wait_id.to_string()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(map_failed)?;
+    let Some((session_id, bytes, stored_checksum, key_id, nonce, status, row_version)) = stored
+    else {
+        return Err(PersistencePortError::Unavailable);
+    };
+    if session_id != key.session_id().to_string() || checksum(&bytes) != stored_checksum {
+        return Err(PersistencePortError::Corrupt);
+    }
+    let record: DurableApprovalRecord = decode(&bytes)?;
+    record
+        .sealed_action()
+        .validate()
+        .map_err(|_| PersistencePortError::Corrupt)?;
+    if record.binding().key() != key
+        || record.binding().wait_id() != wait_id
+        || record.sealed_action().key_id() != key_id
+        || record.sealed_action().nonce() != nonce
+    {
+        return Err(PersistencePortError::Corrupt);
+    }
+    let row_version = u64::try_from(row_version).map_err(|_| PersistencePortError::Corrupt)?;
+    Ok(record.restore_store_state(decode_status(status)?, row_version))
+}
+
+fn load_pending_approval_requests(
+    path: &Path,
+    key: RunKey,
+) -> Result<Vec<DurableApprovalRecord>, PersistencePortError> {
+    let connection = Connection::open(path).map_err(map_unavailable)?;
+    configure(&connection)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT wait_id FROM durable_approvals
+             WHERE run_id=?1 AND session_id=?2 AND status<>?3 ORDER BY wait_id",
+        )
+        .map_err(map_failed)?;
+    let ids = statement
+        .query_map(
+            params![
+                key.run_id().to_string(),
+                key.session_id().to_string(),
+                status_code(DurableApprovalStatus::Consumed)
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(map_failed)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_failed)?;
+    ids.into_iter()
+        .map(|id| id.parse().map_err(|_| PersistencePortError::Corrupt))
+        .map(|id| id.and_then(|id| load_durable_approval_wait(path, key, id)))
+        .collect()
+}
+
+fn record_durable_approval_decision(
+    path: &Path,
+    request: &RecordDurableApprovalDecision,
+) -> Result<(), PersistencePortError> {
+    let command = request.command();
+    let record = load_durable_approval_wait(path, command.key, command.wait_id)?;
+    let binding = record.binding();
+    if record.status() != DurableApprovalStatus::Waiting
+        || record.row_version() != command.expected_row_version
+        || binding.approval_request_id() != command.approval_request_id
+        || binding.action_proposal_id() != command.action_proposal_id
+        || binding.tool_call_id() != command.tool_call_id
+        || binding.action_digest() != command.action_digest
+        || !matches!(request.transition().event().kind(), AgentEventKind::DurableApprovalDecisionRecorded {
+            wait_id, approval_request_id, outcome, row_version
+        } if *wait_id == command.wait_id
+            && *approval_request_id == command.approval_request_id
+            && *outcome == command.outcome
+            && *row_version == command.expected_row_version.saturating_add(1))
+    {
+        return Err(PersistencePortError::Conflict);
+    }
+    let next = match command.outcome {
+        DurableApprovalOutcome::Approve => DurableApprovalStatus::DecisionRecordedApprove,
+        DurableApprovalOutcome::Deny => DurableApprovalStatus::DecisionRecordedDeny,
+    };
+    let mut connection = Connection::open(path).map_err(map_unavailable)?;
+    configure(&connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(map_failed)?;
+    append_transition_in_transaction(&transaction, request.transition())?;
+    let changed = transaction
+        .execute(
+            "UPDATE durable_approvals SET status=?1,row_version=row_version+1
+         WHERE run_id=?2 AND wait_id=?3 AND session_id=?4 AND status=?5 AND row_version=?6",
+            params![
+                status_code(next),
+                command.key.run_id().to_string(),
+                command.wait_id.to_string(),
+                command.key.session_id().to_string(),
+                status_code(DurableApprovalStatus::Waiting),
+                i64::try_from(command.expected_row_version)
+                    .map_err(|_| PersistencePortError::Conflict)?
+            ],
+        )
+        .map_err(map_failed)?;
+    if changed != 1 {
+        return Err(PersistencePortError::Conflict);
+    }
+    transaction.commit().map_err(map_failed)
+}
+
+fn transition_durable_approval_status(
+    path: &Path,
+    request: &DurableApprovalStatusTransition,
+) -> Result<(), PersistencePortError> {
+    let mut connection = Connection::open(path).map_err(map_unavailable)?;
+    configure(&connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(map_failed)?;
+    if let Some(transition) = request.transition() {
+        if transition.key() != request.key() {
+            return Err(PersistencePortError::Conflict);
+        }
+        append_transition_in_transaction(&transaction, transition)?;
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE durable_approvals SET status=?1,row_version=row_version+1
+         WHERE run_id=?2 AND wait_id=?3 AND session_id=?4 AND status=?5 AND row_version=?6",
+            params![
+                status_code(request.next_status()),
+                request.key().run_id().to_string(),
+                request.wait_id().to_string(),
+                request.key().session_id().to_string(),
+                status_code(request.expected_status()),
+                i64::try_from(request.expected_row_version())
+                    .map_err(|_| PersistencePortError::Conflict)?
+            ],
+        )
+        .map_err(map_failed)?;
+    if changed != 1 {
+        return Err(PersistencePortError::Conflict);
+    }
+    transaction.commit().map_err(map_failed)
+}
+
+const fn status_code(status: DurableApprovalStatus) -> i64 {
+    match status {
+        DurableApprovalStatus::Waiting => 0,
+        DurableApprovalStatus::DecisionRecordedApprove => 1,
+        DurableApprovalStatus::DecisionRecordedDeny => 2,
+        DurableApprovalStatus::ApprovedReady => 3,
+        DurableApprovalStatus::Executing => 4,
+        DurableApprovalStatus::Consumed => 5,
+    }
+}
+
+fn decode_status(value: i64) -> Result<DurableApprovalStatus, PersistencePortError> {
+    match value {
+        0 => Ok(DurableApprovalStatus::Waiting),
+        1 => Ok(DurableApprovalStatus::DecisionRecordedApprove),
+        2 => Ok(DurableApprovalStatus::DecisionRecordedDeny),
+        3 => Ok(DurableApprovalStatus::ApprovedReady),
+        4 => Ok(DurableApprovalStatus::Executing),
+        5 => Ok(DurableApprovalStatus::Consumed),
+        _ => Err(PersistencePortError::Corrupt),
+    }
 }
 
 fn load_run(path: &Path, key: RunKey) -> Result<LoadedRun, PersistencePortError> {

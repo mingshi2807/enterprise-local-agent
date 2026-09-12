@@ -225,6 +225,10 @@ async fn main() -> anyhow::Result<()> {
             | AgentEventKind::KnowledgeRetrievalCompleted { .. }
             | AgentEventKind::KnowledgeRetrievalFailed { .. }
             | AgentEventKind::ModelGroundingBound { .. }
+            | AgentEventKind::DurableApprovalPrepared { .. }
+            | AgentEventKind::DurableApprovalDecisionRecorded { .. }
+            | AgentEventKind::DurableApprovalGranted { .. }
+            | AgentEventKind::DurableApprovalDenied { .. }
             | AgentEventKind::Graph { .. } => {}
         }
     }

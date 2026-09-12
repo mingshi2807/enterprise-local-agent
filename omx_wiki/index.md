@@ -1,6 +1,6 @@
 # Wiki Index
 
-> 12 pages | Last updated: 2026-09-06
+> 13 pages | Last updated: 2026-09-13
 
 ## architecture
 
@@ -15,6 +15,7 @@
 - [M7 Durable Event Persistence and Recovery](m7-durable-event-persistence-and-recovery.md) — # M7 Durable Event Persistence and Recovery
 - [M8 Enterprise Knowledge Integration](m8-enterprise-knowledge-integration.md) — # M8 Enterprise Knowledge Integration
 - [M9 Deterministic Graph Engine PoC](m9-deterministic-graph-engine-poc.md) — # M9 Deterministic Graph Engine PoC
+- [M10 Durable Graph Pause Resume and HITL](m10-durable-graph-pause-resume-hitl.md) — # M10 Durable Graph Pause Resume and HITL
 
 ## reference
 

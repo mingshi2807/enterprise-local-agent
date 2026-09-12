@@ -325,6 +325,10 @@ impl RunContext {
         &self.durable_state
     }
 
+    pub const fn recovery_contract(&self) -> crate::RecoveryContract {
+        self.recovery_contract
+    }
+
     pub(crate) const fn persistence_failed(&self) -> bool {
         self.persistence_failed
     }

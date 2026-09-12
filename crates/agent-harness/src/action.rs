@@ -2,8 +2,8 @@ use std::{collections::HashSet, fmt, sync::Arc};
 
 use agent_core::{
     ActionDigest, ActionProposal, ActionProposalId, ActionRejectionReason, CapabilityKind,
-    ModelCallId, ModelOutputPart, ModelResponse, ToolCall, ToolCallId, ToolInput, ToolName,
-    ToolSchema,
+    ModelCallId, ModelOutputPart, ModelResponse, ToolCall, ToolCallId, ToolContractDigest,
+    ToolDefinition, ToolInput, ToolName, ToolSchema,
 };
 use jsonschema::Validator;
 use serde::{Deserialize, Deserializer, de};
@@ -150,7 +150,9 @@ mod digest_tests {
 /// requires_serialize::<agent_harness::ValidatedAction>();
 /// ```
 pub struct ValidatedAction {
-    proposal: ActionProposal,
+    proposal_id: ActionProposalId,
+    tool_name: ToolName,
+    arguments: ToolInput,
     capability: CapabilityKind,
     digest: ActionDigest,
 }
@@ -158,12 +160,12 @@ pub struct ValidatedAction {
 impl ValidatedAction {
     #[must_use]
     pub const fn proposal_id(&self) -> ActionProposalId {
-        self.proposal.id()
+        self.proposal_id
     }
 
     #[must_use]
     pub const fn tool_name(&self) -> &ToolName {
-        self.proposal.tool_name()
+        &self.tool_name
     }
 
     #[must_use]
@@ -177,8 +179,41 @@ impl ValidatedAction {
     }
 
     pub(crate) fn into_tool_call(self, tool_call_id: ToolCallId) -> ToolCall {
-        let (_, _, tool_name, arguments) = self.proposal.into_parts();
-        ToolCall::new(tool_call_id, tool_name, arguments)
+        ToolCall::new(tool_call_id, self.tool_name, self.arguments)
+    }
+
+    pub(crate) fn into_durable_parts(
+        self,
+    ) -> (
+        ActionProposalId,
+        ToolName,
+        ToolInput,
+        CapabilityKind,
+        ActionDigest,
+    ) {
+        (
+            self.proposal_id,
+            self.tool_name,
+            self.arguments,
+            self.capability,
+            self.digest,
+        )
+    }
+
+    pub(crate) const fn from_durable_parts(
+        proposal_id: ActionProposalId,
+        tool_name: ToolName,
+        arguments: ToolInput,
+        capability: CapabilityKind,
+        digest: ActionDigest,
+    ) -> Self {
+        Self {
+            proposal_id,
+            tool_name,
+            arguments,
+            capability,
+            digest,
+        }
     }
 }
 
@@ -186,8 +221,8 @@ impl fmt::Debug for ValidatedAction {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ValidatedAction")
-            .field("proposal_id", &self.proposal.id())
-            .field("tool_name", self.proposal.tool_name())
+            .field("proposal_id", &self.proposal_id)
+            .field("tool_name", &self.tool_name)
             .field("capability", &self.capability)
             .field("digest", &"[REDACTED]")
             .field("arguments", &"[REDACTED]")
@@ -366,8 +401,11 @@ impl ActionValidator {
             proposal.arguments().as_value(),
         );
 
+        let (proposal_id, _, tool_name, arguments) = proposal.into_parts();
         Ok(ValidatedAction {
-            proposal,
+            proposal_id,
+            tool_name,
+            arguments,
             capability,
             digest,
         })
@@ -386,6 +424,16 @@ pub(crate) fn compute_action_digest(
     encode_json(&mut hasher, arguments);
     let bytes: [u8; 32] = hasher.finalize().into();
     ActionDigest::from_bytes(bytes)
+}
+
+pub(crate) fn compute_tool_contract_digest(definition: &ToolDefinition) -> ToolContractDigest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"enterprise-local-agent/tool-contract/v1\0");
+    encode_string(&mut hasher, definition.name().as_str());
+    encode_capability(&mut hasher, definition.capability());
+    encode_string(&mut hasher, definition.description());
+    encode_json(&mut hasher, definition.input_schema().as_value());
+    ToolContractDigest::from_bytes(hasher.finalize().into())
 }
 
 fn encode_capability(hasher: &mut Sha256, capability: CapabilityKind) {
@@ -504,7 +552,7 @@ fn decode_envelope(value: Value) -> Result<(ToolName, Value), ActionRejectionRea
     Ok((tool_name, arguments))
 }
 
-fn validate_argument_limits(arguments: &Value) -> Result<(), ActionRejectionReason> {
+pub(crate) fn validate_argument_limits(arguments: &Value) -> Result<(), ActionRejectionReason> {
     let serialized =
         serde_json::to_vec(arguments).map_err(|_| ActionRejectionReason::SecurityLimitExceeded)?;
     if serialized.len() > MAX_ACTION_ARGUMENT_BYTES {

@@ -18,6 +18,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "process", "sync"] }
 
 [dev-dependencies]
+agent-action-seal-local.workspace = true
+agent-graph.workspace = true
 agent-harness = { workspace = true, features = ["test-support"] }
 agent-loop.workspace = true
 agent-persistence-sqlite.workspace = true

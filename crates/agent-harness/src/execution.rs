@@ -2,26 +2,35 @@ use std::{sync::Arc, time::SystemTime};
 
 use agent_core::{
     ActionDigest, ActionProposalId, AgentEvent, AgentEventKind, ApprovalFailureKind,
-    ApprovalRequestId, BudgetDimension, CapabilityKind, ContainmentFailureKind, EventSequence,
-    GraphFailureKind, GraphNodeAttemptId, GraphNodeId, GraphNodeKind, GraphProgressEvent,
-    GraphRecoveryMode, GraphTransitionKey, KnowledgeFailureKind, KnowledgeRetrievalId,
-    LoopEventKind, LoopProgressEvent, ModelCallId, ModelRequest, ModelResponse, RunFailureKind,
-    RunOutcome, RunStatus, ToolCall, ToolCallId, ToolName, ToolResult,
+    ApprovalRequestId, BudgetDimension, CapabilityKind, ContainmentFailureKind,
+    DurableApprovalWaitId, EventSequence, GraphFailureKind, GraphNodeAttemptId, GraphNodeId,
+    GraphNodeKind, GraphProgressEvent, GraphRecoveryMode, GraphTransitionKey, KnowledgeFailureKind,
+    KnowledgeRetrievalId, LoopEventKind, LoopProgressEvent, ModelCallId, ModelRequest,
+    ModelResponse, RunFailureKind, RunOutcome, RunStatus, ToolCall, ToolCallId, ToolName,
+    ToolResult, WorkspaceBindingId,
 };
 use agent_knowledge::{
     EvidenceSet, GroundedModelRequest, KnowledgeError, KnowledgePort, KnowledgeRequest,
 };
+use serde_json::{Value, json};
 use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::{
-    ActionPreparationError, ActionValidationError, ApprovalOutcome, ApprovalPort,
-    ApprovalPortError, ApprovalRequest, AuditFailurePolicy, AuditPhase, AuditPortError, AuditSink,
-    AuthorizationDecision, CapabilityPolicy, CompletedModelInvocation, ContainedToolPort,
-    ExecutionStage, HarnessConfig, HarnessError, HarnessOperation, ModelPort, OperationEffect,
-    PersistencePortError, PolicyDenial, PolicyDenialReason, RecoveryDisposition,
-    RunCancellationHandle, RunContext, RunKey, RunPersistencePort, ToolPort, ToolRegistry,
-    ValidatedAction,
-    action::{ActionValidator, TextActionDecoder},
+    ActionPreparationError, ActionSealBinding, ActionSealPort, ActionValidationError,
+    ApprovalOutcome, ApprovalPort, ApprovalPortError, ApprovalRequest, AuditFailurePolicy,
+    AuditPhase, AuditPortError, AuditSink, AuthorizationDecision, CapabilityPolicy,
+    CompletedModelInvocation, ContainedToolPort, CreateDurableApprovalWait, DurableActionContext,
+    DurableApprovalDecisionCommand, DurableApprovalRecord, DurableApprovalStatus,
+    DurableApprovalStatusTransition, DurableApprovalView, DurableApprovalWait,
+    DurableGraphPosition, DurableLocalWriteResume, ExecutionStage, HarnessConfig, HarnessError,
+    HarnessOperation, ModelPort, OperationEffect, PersistencePortError, PolicyDenial,
+    PolicyDenialReason, RecordDurableApprovalDecision, RecoveredWaitingRun, RecoveryContract,
+    RecoveryDisposition, RunCancellationHandle, RunContext, RunKey, RunPersistencePort, ToolPort,
+    ToolRegistry, ValidatedAction,
+    action::{
+        ActionValidator, TextActionDecoder, compute_action_digest, compute_tool_contract_digest,
+        validate_argument_limits,
+    },
     registry::ExecutionBinding,
 };
 
@@ -44,6 +53,8 @@ pub struct ExecutionHarness {
     audit: Arc<dyn AuditSink>,
     persistence: Option<Arc<dyn RunPersistencePort>>,
     knowledge: Option<Arc<dyn KnowledgePort>>,
+    action_seal: Option<Arc<dyn ActionSealPort>>,
+    workspace_binding_id: Option<WorkspaceBindingId>,
     config: HarnessConfig,
 }
 
@@ -88,6 +99,8 @@ impl ExecutionHarness {
             audit,
             persistence: None,
             knowledge: None,
+            action_seal: None,
+            workspace_binding_id: None,
             config,
         }
     }
@@ -107,6 +120,17 @@ impl ExecutionHarness {
     #[must_use]
     pub fn with_knowledge_port(mut self, knowledge: Arc<dyn KnowledgePort>) -> Self {
         self.knowledge = Some(knowledge);
+        self
+    }
+
+    #[must_use]
+    pub fn with_durable_local_write_approval(
+        mut self,
+        action_seal: Arc<dyn ActionSealPort>,
+        workspace_binding_id: WorkspaceBindingId,
+    ) -> Self {
+        self.action_seal = Some(action_seal);
+        self.workspace_binding_id = Some(workspace_binding_id);
         self
     }
 
@@ -628,6 +652,471 @@ impl ExecutionHarness {
                 Err(HarnessError::CapabilityNotExecutable { capability })
             }
         }
+    }
+
+    pub async fn suspend_durable_local_write(
+        &self,
+        context: &mut RunContext,
+        action: ValidatedAction,
+        durable: DurableActionContext,
+    ) -> Result<DurableApprovalWait, HarnessError> {
+        self.preflight(context, HarnessOperation::RequestApproval)
+            .await?;
+        let persistence = self
+            .persistence
+            .as_ref()
+            .ok_or(HarnessError::Persistence(PersistencePortError::Unavailable))?;
+        let action_seal = self.action_seal.as_ref().ok_or(HarnessError::ActionSeal(
+            crate::ActionSealError::KeyUnavailable,
+        ))?;
+        let workspace_binding_id = self
+            .workspace_binding_id
+            .ok_or(HarnessError::DurableApprovalMismatch)?;
+        if context.recovery_contract()
+            != (RecoveryContract::Graph {
+                program_version: durable.program_version,
+                definition_digest: durable.graph_digest.as_bytes(),
+            })
+            || !matches!(
+                context.durable_state().graph().map(crate::DurableGraphState::position),
+                Some(DurableGraphPosition::Running {
+                    attempt_id,
+                    node_id,
+                    node_kind: GraphNodeKind::Action,
+                    recovery: GraphRecoveryMode::Never,
+                }) if *attempt_id == durable.attempt_id && node_id == &durable.node_id
+            )
+        {
+            return Err(HarnessError::DurableApprovalMismatch);
+        }
+
+        let (action_proposal_id, tool_name, arguments, capability, action_digest) =
+            action.into_durable_parts();
+        if tool_name.as_str() != DURABLE_LOCAL_WRITE_TOOL_NAME
+            || capability != CapabilityKind::LocalWrite
+            || self.capability_policy.authorize(capability)
+                != AuthorizationDecision::RequiresApproval
+        {
+            return Err(HarnessError::DurableApprovalMismatch);
+        }
+        let binding = self
+            .tools
+            .get(&tool_name)
+            .ok_or_else(|| HarnessError::ToolNotFound {
+                name: tool_name.clone(),
+            })?;
+        let ExecutionBinding::Contained(port) = binding.execution().clone() else {
+            return Err(HarnessError::ContainmentUnavailable { name: tool_name });
+        };
+        if context.audit_degraded() {
+            return Err(HarnessError::AuditDegraded);
+        }
+        let preview = port
+            .approval_preview(&arguments)
+            .map_err(HarnessError::ContainmentPort)?;
+        let capsule = local_write_capsule(arguments.as_value())?;
+        let tool_contract_digest = compute_tool_contract_digest(binding.definition());
+        let tool_call_id = ToolCallId::new();
+        let approval_request_id = ApprovalRequestId::new();
+        let wait_id = DurableApprovalWaitId::new();
+
+        let event = context.next_event(AgentEventKind::ActionExecutionBound {
+            action_proposal_id,
+            tool_call_id,
+        })?;
+        self.audit_required(
+            context,
+            &event,
+            HarnessOperation::InvokeValidatedAction,
+            AuditPhase::BeforeInvocation,
+            OperationEffect::NotInvoked,
+        )
+        .await?;
+        if let Err(error) = context.reserve_approval_request() {
+            self.terminalize_safety(
+                context,
+                SafetyTerminalization::BudgetExceeded(error.dimension()),
+            )
+            .await;
+            return Err(error.into());
+        }
+        let seal_binding = ActionSealBinding::new(
+            RunKey::new(context.run_id(), context.session_id()),
+            durable.program_version,
+            durable.graph_digest,
+            durable.node_id.clone(),
+            durable.attempt_id,
+            wait_id,
+            approval_request_id,
+            action_proposal_id,
+            tool_call_id,
+            action_digest,
+            workspace_binding_id,
+            tool_contract_digest,
+        );
+        let event = context.next_event(AgentEventKind::DurableApprovalPrepared {
+            wait_id,
+            approval_request_id,
+            action_proposal_id,
+            tool_call_id,
+            action_digest,
+            workspace_binding_id,
+            tool_contract_digest,
+            usage: context.usage().approval_requests(),
+            limit: context.budget().max_approval_requests(),
+        })?;
+        self.audit_required(
+            context,
+            &event,
+            HarnessOperation::RequestApproval,
+            AuditPhase::BeforeInvocation,
+            OperationEffect::NotInvoked,
+        )
+        .await?;
+
+        let sealed = action_seal.seal_local_write(&seal_binding, &capsule)?;
+        let event = context.next_event(AgentEventKind::Graph {
+            event: GraphProgressEvent::GraphSuspended {
+                attempt_id: durable.attempt_id,
+                node_id: durable.node_id,
+                wait_id,
+                approval_request_id,
+                action_proposal_id,
+                tool_call_id,
+                action_digest,
+            },
+        })?;
+        let transition = self.transition_for_event(context, &event, true);
+        let wait = DurableApprovalWait::new(&seal_binding);
+        if let Err(error) = persistence
+            .create_durable_approval_wait(&CreateDurableApprovalWait::new(
+                transition,
+                DurableApprovalRecord::new(seal_binding, sealed),
+            ))
+            .await
+        {
+            context.mark_persistence_failed();
+            return Err(HarnessError::Persistence(error));
+        }
+        self.audit_already_persisted(
+            context,
+            &event,
+            HarnessOperation::RequestApproval,
+            AuditPhase::Lifecycle,
+            OperationEffect::StateCommitted,
+            false,
+        )
+        .await?;
+        let _ = preview;
+        Ok(wait)
+    }
+
+    pub async fn durable_approval_view(
+        &self,
+        key: RunKey,
+        wait_id: DurableApprovalWaitId,
+    ) -> Result<DurableApprovalView, HarnessError> {
+        let recovered = match self.recover_run(key).await? {
+            RecoveryDisposition::Waiting(recovered) => recovered,
+            _ => return Err(HarnessError::DurableApprovalMismatch),
+        };
+        let persistence = self
+            .persistence
+            .as_ref()
+            .ok_or(HarnessError::Persistence(PersistencePortError::Unavailable))?;
+        let record = persistence
+            .load_durable_approval_wait(key, wait_id)
+            .await
+            .map_err(HarnessError::Persistence)?;
+        let (_, port, preview) = self.restore_local_write(&record, recovered.state())?;
+        let _ = port;
+        Ok(DurableApprovalView::new(
+            wait_id,
+            record.binding().approval_request_id(),
+            record.row_version(),
+            preview,
+        ))
+    }
+
+    pub async fn record_durable_approval_decision(
+        &self,
+        command: DurableApprovalDecisionCommand,
+    ) -> Result<(), HarnessError> {
+        let recovered = match self.recover_run(command.key).await? {
+            RecoveryDisposition::Waiting(recovered) => recovered,
+            _ => return Err(HarnessError::DurableApprovalMismatch),
+        };
+        let (mut context, state, _) = recovered.into_parts();
+        let waiting = waiting_position(&state, command.wait_id)?;
+        if waiting.1 != command.approval_request_id
+            || waiting.2 != command.action_proposal_id
+            || waiting.3 != command.tool_call_id
+            || waiting.4 != command.action_digest
+        {
+            return Err(HarnessError::DurableApprovalMismatch);
+        }
+        let next_version = command
+            .expected_row_version
+            .checked_add(1)
+            .ok_or(HarnessError::DurableApprovalMismatch)?;
+        let event = context.next_event(AgentEventKind::DurableApprovalDecisionRecorded {
+            wait_id: command.wait_id,
+            approval_request_id: command.approval_request_id,
+            outcome: command.outcome,
+            row_version: next_version,
+        })?;
+        let transition = self.transition_for_event(&context, &event, true);
+        if let Err(error) = self
+            .persistence
+            .as_ref()
+            .ok_or(HarnessError::Persistence(PersistencePortError::Unavailable))?
+            .record_durable_approval_decision(&RecordDurableApprovalDecision::new(
+                transition, command,
+            ))
+            .await
+        {
+            context.mark_persistence_failed();
+            return Err(HarnessError::Persistence(error));
+        }
+        self.audit_already_persisted(
+            &mut context,
+            &event,
+            HarnessOperation::RequestApproval,
+            AuditPhase::AfterInvocation,
+            OperationEffect::NotInvoked,
+            false,
+        )
+        .await
+    }
+
+    pub async fn resume_durable_local_write(
+        &self,
+        recovered: RecoveredWaitingRun,
+        wait_id: DurableApprovalWaitId,
+    ) -> Result<DurableLocalWriteResume, HarnessError> {
+        let (mut context, state, _) = recovered.into_parts();
+        let (attempt_id, approval_request_id, _, _, _) = waiting_position(&state, wait_id)?;
+        let node_id = match state.graph().map(crate::DurableGraphState::position) {
+            Some(DurableGraphPosition::Waiting { node_id, .. }) => node_id.clone(),
+            _ => return Err(HarnessError::DurableApprovalMismatch),
+        };
+        let persistence = self
+            .persistence
+            .as_ref()
+            .ok_or(HarnessError::Persistence(PersistencePortError::Unavailable))?;
+        let mut record = persistence
+            .load_durable_approval_wait(
+                RunKey::new(context.run_id(), context.session_id()),
+                wait_id,
+            )
+            .await
+            .map_err(HarnessError::Persistence)?;
+
+        if record.status() == DurableApprovalStatus::DecisionRecordedDeny {
+            let event = context.next_event(AgentEventKind::DurableApprovalDenied {
+                wait_id,
+                approval_request_id,
+            })?;
+            self.audit_required(
+                &mut context,
+                &event,
+                HarnessOperation::RequestApproval,
+                AuditPhase::AfterInvocation,
+                OperationEffect::NotInvoked,
+            )
+            .await?;
+            record = persistence
+                .load_durable_approval_wait(record.binding().key(), wait_id)
+                .await
+                .map_err(HarnessError::Persistence)?;
+            let resume = context.next_event(AgentEventKind::Graph {
+                event: GraphProgressEvent::GraphResumed {
+                    attempt_id,
+                    node_id: node_id.clone(),
+                    wait_id,
+                },
+            })?;
+            if let Err(error) = persistence
+                .transition_durable_approval_status(&DurableApprovalStatusTransition::new(
+                    Some(self.transition_for_event(&context, &resume, false)),
+                    record.binding().key(),
+                    wait_id,
+                    record.row_version(),
+                    DurableApprovalStatus::DecisionRecordedDeny,
+                    DurableApprovalStatus::Consumed,
+                ))
+                .await
+            {
+                context.mark_persistence_failed();
+                return Err(HarnessError::Persistence(error));
+            }
+            self.audit_already_persisted(
+                &mut context,
+                &resume,
+                HarnessOperation::RequestApproval,
+                AuditPhase::Lifecycle,
+                OperationEffect::StateCommitted,
+                false,
+            )
+            .await?;
+            return Ok(DurableLocalWriteResume::Denied {
+                context,
+                attempt_id,
+                node_id,
+            });
+        }
+        if !matches!(
+            record.status(),
+            DurableApprovalStatus::DecisionRecordedApprove | DurableApprovalStatus::ApprovedReady
+        ) {
+            return Err(HarnessError::DurableApprovalMismatch);
+        }
+
+        let (action, port, _) = self.restore_local_write(&record, &state)?;
+        if record.status() == DurableApprovalStatus::DecisionRecordedApprove {
+            let event = context.next_event(AgentEventKind::DurableApprovalGranted {
+                wait_id,
+                approval_request_id,
+            })?;
+            self.audit_required(
+                &mut context,
+                &event,
+                HarnessOperation::RequestApproval,
+                AuditPhase::AfterInvocation,
+                OperationEffect::NotInvoked,
+            )
+            .await?;
+            if let Err(error) = persistence
+                .transition_durable_approval_status(&DurableApprovalStatusTransition::new(
+                    None,
+                    record.binding().key(),
+                    wait_id,
+                    record.row_version(),
+                    DurableApprovalStatus::DecisionRecordedApprove,
+                    DurableApprovalStatus::ApprovedReady,
+                ))
+                .await
+            {
+                context.mark_persistence_failed();
+                return Err(HarnessError::Persistence(error));
+            }
+            record = persistence
+                .load_durable_approval_wait(record.binding().key(), wait_id)
+                .await
+                .map_err(HarnessError::Persistence)?;
+        }
+        let resume = context.next_event(AgentEventKind::Graph {
+            event: GraphProgressEvent::GraphResumed {
+                attempt_id,
+                node_id: node_id.clone(),
+                wait_id,
+            },
+        })?;
+        if let Err(error) = persistence
+            .transition_durable_approval_status(&DurableApprovalStatusTransition::new(
+                Some(self.transition_for_event(&context, &resume, false)),
+                record.binding().key(),
+                wait_id,
+                record.row_version(),
+                DurableApprovalStatus::ApprovedReady,
+                DurableApprovalStatus::ApprovedReady,
+            ))
+            .await
+        {
+            context.mark_persistence_failed();
+            return Err(HarnessError::Persistence(error));
+        }
+        self.audit_already_persisted(
+            &mut context,
+            &resume,
+            HarnessOperation::RequestApproval,
+            AuditPhase::Lifecycle,
+            OperationEffect::StateCommitted,
+            false,
+        )
+        .await?;
+        record = persistence
+            .load_durable_approval_wait(record.binding().key(), wait_id)
+            .await
+            .map_err(HarnessError::Persistence)?;
+
+        self.preflight(&mut context, HarnessOperation::InvokeTool)
+            .await?;
+        if let Err(error) = context.reserve_tool_call() {
+            self.terminalize_safety(
+                &mut context,
+                SafetyTerminalization::BudgetExceeded(error.dimension()),
+            )
+            .await;
+            return Err(error.into());
+        }
+        let event = context.next_event(AgentEventKind::ToolInvocationStarted {
+            tool_call_id: record.binding().tool_call_id(),
+            tool_name: action.tool_name().clone(),
+            capability: action.capability(),
+            usage: context.usage().tool_calls(),
+            limit: context.budget().max_tool_calls(),
+        })?;
+        if let Err(error) = persistence
+            .transition_durable_approval_status(&DurableApprovalStatusTransition::new(
+                Some(self.transition_for_event(&context, &event, false)),
+                record.binding().key(),
+                wait_id,
+                record.row_version(),
+                DurableApprovalStatus::ApprovedReady,
+                DurableApprovalStatus::Executing,
+            ))
+            .await
+        {
+            context.mark_persistence_failed();
+            return Err(HarnessError::Persistence(error));
+        }
+        self.audit_already_persisted(
+            &mut context,
+            &event,
+            HarnessOperation::InvokeTool,
+            AuditPhase::BeforeInvocation,
+            OperationEffect::NotInvoked,
+            true,
+        )
+        .await?;
+        let tool_call_id = record.binding().tool_call_id();
+        let result = self
+            .invoke_contained_tool_port(&mut context, &port, action.into_tool_call(tool_call_id))
+            .await;
+        let result = self
+            .finish_tool_invocation(
+                &mut context,
+                tool_call_id,
+                HarnessOperation::InvokeTool,
+                result,
+                ToolTerminalAudit::Required,
+            )
+            .await?;
+        record = persistence
+            .load_durable_approval_wait(record.binding().key(), wait_id)
+            .await
+            .map_err(HarnessError::Persistence)?;
+        if let Err(error) = persistence
+            .transition_durable_approval_status(&DurableApprovalStatusTransition::new(
+                None,
+                record.binding().key(),
+                wait_id,
+                record.row_version(),
+                DurableApprovalStatus::Executing,
+                DurableApprovalStatus::Consumed,
+            ))
+            .await
+        {
+            context.mark_persistence_failed();
+            return Err(HarnessError::Persistence(error));
+        }
+        Ok(DurableLocalWriteResume::Executed {
+            context,
+            attempt_id,
+            node_id,
+            result,
+        })
     }
 
     pub async fn checkpoint(&self, context: &mut RunContext) -> Result<(), HarnessError> {
@@ -1701,6 +2190,163 @@ impl ExecutionHarness {
         }
     }
 
+    async fn audit_already_persisted(
+        &self,
+        context: &mut RunContext,
+        event: &AgentEvent,
+        operation: HarnessOperation,
+        phase: AuditPhase,
+        effect: OperationEffect,
+        required: bool,
+    ) -> Result<(), HarnessError> {
+        match self.audit_with_run_bounds(context, event).await {
+            AuditOutcome::Recorded => Ok(()),
+            AuditOutcome::Failed(kind) if required => {
+                self.record_audit_degraded(context).await?;
+                Err(HarnessError::Audit {
+                    phase,
+                    operation,
+                    effect,
+                    kind,
+                })
+            }
+            AuditOutcome::Failed(kind) => {
+                self.apply_audit_failure(context, operation, phase, effect, kind)
+                    .await
+            }
+            AuditOutcome::Cancelled => {
+                self.terminalize_safety(context, SafetyTerminalization::Cancelled)
+                    .await;
+                Err(HarnessError::Cancelled {
+                    stage: audit_stage(phase),
+                })
+            }
+            AuditOutcome::DeadlineExceeded => {
+                self.terminalize_safety(context, SafetyTerminalization::DeadlineExceeded)
+                    .await;
+                Err(HarnessError::DeadlineExceeded {
+                    stage: audit_stage(phase),
+                })
+            }
+        }
+    }
+
+    fn transition_for_event(
+        &self,
+        context: &RunContext,
+        event: &AgentEvent,
+        checkpoint: bool,
+    ) -> crate::AppendTransition {
+        let expected_sequence = match event.sequence().get() {
+            0 => None,
+            value => Some(EventSequence::new(value - 1)),
+        };
+        crate::AppendTransition::new(
+            RunKey::new(context.run_id(), context.session_id()),
+            expected_sequence,
+            event.clone(),
+            checkpoint.then(|| context.durable_checkpoint()),
+        )
+    }
+
+    fn restore_local_write(
+        &self,
+        record: &DurableApprovalRecord,
+        state: &crate::DurableRunState,
+    ) -> Result<
+        (
+            ValidatedAction,
+            Arc<dyn ContainedToolPort>,
+            crate::ApprovalPreview,
+        ),
+        HarnessError,
+    > {
+        let seal = self.action_seal.as_ref().ok_or(HarnessError::ActionSeal(
+            crate::ActionSealError::KeyUnavailable,
+        ))?;
+        let workspace_binding_id = self
+            .workspace_binding_id
+            .ok_or(HarnessError::DurableApprovalMismatch)?;
+        let binding = record.binding();
+        if binding.workspace_binding_id() != workspace_binding_id
+            || binding.capsule_version() != crate::LOCAL_WRITE_CAPSULE_VERSION
+            || !matches!(
+                state.graph().map(crate::DurableGraphState::position),
+                Some(DurableGraphPosition::Waiting {
+                    attempt_id,
+                    node_id,
+                    wait_id,
+                    approval_request_id,
+                    action_proposal_id,
+                    tool_call_id,
+                    action_digest,
+                }) if *attempt_id == binding.attempt_id()
+                    && node_id == binding.node_id()
+                    && *wait_id == binding.wait_id()
+                    && *approval_request_id == binding.approval_request_id()
+                    && *action_proposal_id == binding.action_proposal_id()
+                    && *tool_call_id == binding.tool_call_id()
+                    && *action_digest == binding.action_digest()
+            )
+            || !matches!(
+                state.recovery_contract(),
+                RecoveryContract::Graph { program_version, definition_digest }
+                    if program_version == binding.program_version()
+                        && definition_digest == binding.graph_digest().as_bytes()
+            )
+        {
+            return Err(HarnessError::DurableApprovalMismatch);
+        }
+        let tool_name = ToolName::new(DURABLE_LOCAL_WRITE_TOOL_NAME)
+            .map_err(|_| HarnessError::DurableApprovalMismatch)?;
+        let registered = self
+            .tools
+            .get(&tool_name)
+            .ok_or_else(|| HarnessError::ToolNotFound {
+                name: tool_name.clone(),
+            })?;
+        if registered.definition().capability() != CapabilityKind::LocalWrite
+            || compute_tool_contract_digest(registered.definition())
+                != binding.tool_contract_digest()
+            || self.capability_policy.authorize(CapabilityKind::LocalWrite)
+                != AuthorizationDecision::RequiresApproval
+            || state.audit_degraded()
+        {
+            return Err(HarnessError::DurableApprovalMismatch);
+        }
+        let ExecutionBinding::Contained(port) = registered.execution().clone() else {
+            return Err(HarnessError::ContainmentUnavailable { name: tool_name });
+        };
+        let capsule = seal.open_local_write(binding, record.sealed_action())?;
+        let arguments = json!({
+            "relative_path": capsule.relative_path(),
+            "content": capsule.content(),
+        });
+        validate_argument_limits(&arguments).map_err(|_| HarnessError::DurableApprovalMismatch)?;
+        if !registered.validator().is_valid(&arguments) {
+            return Err(HarnessError::DurableApprovalMismatch);
+        }
+        let digest = compute_action_digest(&tool_name, CapabilityKind::LocalWrite, &arguments);
+        if digest != binding.action_digest() {
+            return Err(HarnessError::DurableApprovalMismatch);
+        }
+        let input = agent_core::ToolInput::new(arguments);
+        let preview = port
+            .approval_preview(&input)
+            .map_err(HarnessError::ContainmentPort)?;
+        Ok((
+            ValidatedAction::from_durable_parts(
+                binding.action_proposal_id(),
+                tool_name,
+                input,
+                CapabilityKind::LocalWrite,
+                digest,
+            ),
+            port,
+            preview,
+        ))
+    }
+
     async fn audit_with_run_bounds(
         &self,
         context: &RunContext,
@@ -1945,4 +2591,55 @@ struct ApprovedLocalWriteMeta {
     tool_name: ToolName,
     capability: CapabilityKind,
     action_digest: ActionDigest,
+}
+
+const DURABLE_LOCAL_WRITE_TOOL_NAME: &str = "workspace_write_file";
+
+fn local_write_capsule(value: &Value) -> Result<crate::LocalWriteActionCapsuleV1, HarnessError> {
+    let object = value
+        .as_object()
+        .filter(|object| object.len() == 2)
+        .ok_or(HarnessError::DurableApprovalMismatch)?;
+    let relative_path = object
+        .get("relative_path")
+        .and_then(Value::as_str)
+        .ok_or(HarnessError::DurableApprovalMismatch)?;
+    let content = object
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or(HarnessError::DurableApprovalMismatch)?;
+    crate::LocalWriteActionCapsuleV1::new(relative_path.to_owned(), content.to_owned())
+        .map_err(HarnessError::ActionSeal)
+}
+
+type WaitingBinding = (
+    GraphNodeAttemptId,
+    ApprovalRequestId,
+    ActionProposalId,
+    ToolCallId,
+    ActionDigest,
+);
+
+fn waiting_position(
+    state: &crate::DurableRunState,
+    expected_wait_id: DurableApprovalWaitId,
+) -> Result<WaitingBinding, HarnessError> {
+    match state.graph().map(crate::DurableGraphState::position) {
+        Some(DurableGraphPosition::Waiting {
+            attempt_id,
+            wait_id,
+            approval_request_id,
+            action_proposal_id,
+            tool_call_id,
+            action_digest,
+            ..
+        }) if *wait_id == expected_wait_id => Ok((
+            *attempt_id,
+            *approval_request_id,
+            *action_proposal_id,
+            *tool_call_id,
+            *action_digest,
+        )),
+        _ => Err(HarnessError::DurableApprovalMismatch),
+    }
 }

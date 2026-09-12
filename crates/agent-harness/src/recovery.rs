@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use agent_core::{
-    AgentEvent, AgentEventKind, ApprovalRequestId, BudgetUsage, CURRENT_EVENT_SCHEMA_VERSION,
-    CapabilityKind, EventSequence, GraphNodeAttemptId, GraphNodeId, GraphNodeKind,
-    GraphProgressEvent, GraphRecoveryMode, KnowledgeRetrievalId, KnowledgeRouteMetadata,
-    LoopDecisionKind, LoopEventKind, LoopPhase, MAX_DURABLE_EVIDENCE_REFERENCES,
-    MAX_DURABLE_KNOWLEDGE_BACKENDS, MAX_GRAPH_STEPS, ModelCallId, RunOutcome, RunStatus,
-    ToolCallId,
+    ActionDigest, ActionProposalId, AgentEvent, AgentEventKind, ApprovalRequestId, BudgetUsage,
+    CURRENT_EVENT_SCHEMA_VERSION, CapabilityKind, DurableApprovalWaitId, EventSequence,
+    GraphNodeAttemptId, GraphNodeId, GraphNodeKind, GraphProgressEvent, GraphRecoveryMode,
+    KnowledgeRetrievalId, KnowledgeRouteMetadata, LoopDecisionKind, LoopEventKind, LoopPhase,
+    MAX_DURABLE_EVIDENCE_REFERENCES, MAX_DURABLE_KNOWLEDGE_BACKENDS, MAX_GRAPH_STEPS, ModelCallId,
+    RunOutcome, RunStatus, ToolCallId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -115,6 +115,15 @@ pub enum DurableGraphPosition {
         node_id: GraphNodeId,
         node_kind: GraphNodeKind,
         recovery: GraphRecoveryMode,
+    },
+    Waiting {
+        attempt_id: GraphNodeAttemptId,
+        node_id: GraphNodeId,
+        wait_id: DurableApprovalWaitId,
+        approval_request_id: ApprovalRequestId,
+        action_proposal_id: ActionProposalId,
+        tool_call_id: ToolCallId,
+        action_digest: ActionDigest,
     },
     Finished,
 }
@@ -364,6 +373,24 @@ impl DurableRunState {
                 approval_request_id,
                 ..
             } => self.remove_pending(PendingEffectKey::Approval(*approval_request_id))?,
+            AgentEventKind::DurableApprovalPrepared { usage, limit, .. } => {
+                if *limit != self.context.budget.max_approval_requests()
+                    || *usage != self.context.usage.approval_requests().saturating_add(1)
+                {
+                    return Err(TransitionError::Budget);
+                }
+                self.context.usage = BudgetUsage::with_approval_requests(
+                    self.context.usage.model_calls(),
+                    self.context.usage.tool_calls(),
+                    self.context.usage.iterations(),
+                    *usage,
+                )
+                .with_graph_steps(self.context.usage.graph_steps());
+                self.continuation = ContinuationState::TransientStateRequired;
+            }
+            AgentEventKind::DurableApprovalDecisionRecorded { .. }
+            | AgentEventKind::DurableApprovalGranted { .. }
+            | AgentEventKind::DurableApprovalDenied { .. } => {}
             AgentEventKind::ToolInvocationStarted {
                 tool_call_id,
                 capability,
@@ -728,7 +755,9 @@ impl DurableRunState {
                             && previous_attempt_id == &Some(*current_attempt)
                             && *recovery != GraphRecoveryMode::Never
                     }
-                    DurableGraphPosition::NotStarted | DurableGraphPosition::Finished => false,
+                    DurableGraphPosition::NotStarted
+                    | DurableGraphPosition::Waiting { .. }
+                    | DurableGraphPosition::Finished => false,
                 };
                 let anchor_matches = graph.restart_anchor.as_ref().is_some_and(|anchor| {
                     anchor.node_id == *node_id
@@ -789,6 +818,68 @@ impl DurableRunState {
                     recovery: *next_recovery,
                 };
                 self.continuation = continuation_for(*next_recovery);
+            }
+            GraphProgressEvent::GraphSuspended {
+                attempt_id,
+                node_id,
+                wait_id,
+                approval_request_id,
+                action_proposal_id,
+                tool_call_id,
+                action_digest,
+            } => {
+                let graph = self.graph.as_mut().ok_or(TransitionError::Graph)?;
+                if graph.position
+                    != (DurableGraphPosition::Running {
+                        attempt_id: *attempt_id,
+                        node_id: node_id.clone(),
+                        node_kind: GraphNodeKind::Action,
+                        recovery: GraphRecoveryMode::Never,
+                    })
+                    || !self.pending_effects.is_empty()
+                    || self.pending_knowledge_retrieval.is_some()
+                {
+                    return Err(TransitionError::Graph);
+                }
+                graph.position = DurableGraphPosition::Waiting {
+                    attempt_id: *attempt_id,
+                    node_id: node_id.clone(),
+                    wait_id: *wait_id,
+                    approval_request_id: *approval_request_id,
+                    action_proposal_id: *action_proposal_id,
+                    tool_call_id: *tool_call_id,
+                    action_digest: *action_digest,
+                };
+                graph.restart_anchor = None;
+                self.continuation = ContinuationState::RestartableBoundary;
+            }
+            GraphProgressEvent::GraphResumed {
+                attempt_id,
+                node_id,
+                wait_id,
+            } => {
+                let graph = self.graph.as_mut().ok_or(TransitionError::Graph)?;
+                let waiting_matches = matches!(
+                    &graph.position,
+                    DurableGraphPosition::Waiting {
+                        attempt_id: current_attempt,
+                        node_id: current_node,
+                        wait_id: current_wait,
+                        ..
+                    } if current_attempt == attempt_id
+                        && current_node == node_id
+                        && current_wait == wait_id
+                );
+                if !waiting_matches || !self.pending_effects.is_empty() {
+                    return Err(TransitionError::Graph);
+                }
+                graph.position = DurableGraphPosition::Running {
+                    attempt_id: *attempt_id,
+                    node_id: node_id.clone(),
+                    node_kind: GraphNodeKind::Action,
+                    recovery: GraphRecoveryMode::Never,
+                };
+                self.continuation = ContinuationState::TransientStateRequired;
             }
             GraphProgressEvent::GraphCompleted {
                 attempt_id,
@@ -998,6 +1089,11 @@ impl DurableRunState {
     }
 
     #[must_use]
+    pub const fn recovery_contract(&self) -> RecoveryContract {
+        self.recovery_contract
+    }
+
+    #[must_use]
     pub const fn is_quiescent(&self) -> bool {
         self.pending_effects.is_empty() && self.pending_knowledge_retrieval.is_none()
     }
@@ -1114,6 +1210,34 @@ pub struct RecoveredRun {
     recovery_contract: RecoveryContract,
 }
 
+pub struct RecoveredWaitingRun {
+    context: RunContext,
+    state: DurableRunState,
+    recovery_contract: RecoveryContract,
+}
+
+impl RecoveredWaitingRun {
+    #[must_use]
+    pub const fn context(&self) -> &RunContext {
+        &self.context
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> &DurableRunState {
+        &self.state
+    }
+
+    #[must_use]
+    pub const fn recovery_contract(&self) -> RecoveryContract {
+        self.recovery_contract
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (RunContext, DurableRunState, RecoveryContract) {
+        (self.context, self.state, self.recovery_contract)
+    }
+}
+
 impl RecoveredRun {
     #[must_use]
     pub const fn context(&self) -> &RunContext {
@@ -1150,6 +1274,7 @@ pub enum RecoveryDisposition {
         outcome: RunOutcome,
     },
     Resumable(Box<RecoveredRun>),
+    Waiting(Box<RecoveredWaitingRun>),
     ManualReconciliationRequired {
         state: DurableRunState,
         reason: ManualReconciliationReason,
@@ -1248,6 +1373,20 @@ pub(crate) fn recover_loaded_run(
                         dimension: agent_core::BudgetDimension::Elapsed,
                     },
                 });
+            }
+            if matches!(
+                state.graph().map(DurableGraphState::position),
+                Some(DurableGraphPosition::Waiting { .. })
+            ) {
+                let context =
+                    RunContext::from_recovery(&state, elapsed, now, record.recovery_contract())?;
+                return Ok(RecoveryDisposition::Waiting(Box::new(
+                    RecoveredWaitingRun {
+                        context,
+                        state,
+                        recovery_contract: record.recovery_contract(),
+                    },
+                )));
             }
             if matches!(record.recovery_contract(), RecoveryContract::NonRestartable) {
                 return Ok(RecoveryDisposition::ManualReconciliationRequired {
@@ -1776,6 +1915,69 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[test]
+    fn completed_local_write_before_graph_continuation_is_never_reexecuted() {
+        let record = graph_record();
+        let attempt_id = GraphNodeAttemptId::new();
+        let tool_call_id = ToolCallId::new();
+        let action = GraphNodeId::new("action").expect("action node");
+        let events = vec![
+            started(&record),
+            event(
+                &record,
+                1,
+                AgentEventKind::Graph {
+                    event: GraphProgressEvent::GraphStarted {
+                        definition_digest: [7; 32],
+                        start_node: action.clone(),
+                        start_kind: GraphNodeKind::Action,
+                        start_recovery: GraphRecoveryMode::Never,
+                    },
+                },
+            ),
+            event(
+                &record,
+                2,
+                AgentEventKind::Graph {
+                    event: GraphProgressEvent::GraphNodeEntered {
+                        attempt_id,
+                        node_id: action,
+                        node_kind: GraphNodeKind::Action,
+                        recovery: GraphRecoveryMode::Never,
+                        step: 1,
+                        limit: 8,
+                    },
+                },
+            ),
+            event(
+                &record,
+                3,
+                AgentEventKind::ToolInvocationStarted {
+                    tool_call_id,
+                    tool_name: agent_core::ToolName::new("workspace_write_file")
+                        .expect("tool name"),
+                    capability: CapabilityKind::LocalWrite,
+                    usage: 1,
+                    limit: 4,
+                },
+            ),
+            event(
+                &record,
+                4,
+                AgentEventKind::ToolInvocationCompleted { tool_call_id },
+            ),
+        ];
+        let disposition = recover(record.clone(), DurableCheckpoint::initial(&record), events)
+            .expect("classification");
+        assert!(matches!(
+            disposition,
+            RecoveryDisposition::ManualReconciliationRequired {
+                reason: ManualReconciliationReason::TransientStateUnavailable,
+                ..
+            }
+        ));
     }
 
     #[test]

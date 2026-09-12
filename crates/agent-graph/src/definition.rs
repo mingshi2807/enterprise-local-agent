@@ -15,6 +15,7 @@ pub enum NodeKind {
     Retrieve,
     Model,
     Action,
+    DurableLocalWriteAction,
     Verify,
     Decision { branches: Vec<GraphBranchId> },
     Complete,
@@ -27,7 +28,7 @@ impl NodeKind {
         match self {
             Self::Retrieve => GraphNodeKind::Retrieve,
             Self::Model => GraphNodeKind::Model,
-            Self::Action => GraphNodeKind::Action,
+            Self::Action | Self::DurableLocalWriteAction => GraphNodeKind::Action,
             Self::Verify => GraphNodeKind::Verify,
             Self::Decision { .. } => GraphNodeKind::Decision,
             Self::Complete => GraphNodeKind::Complete,
@@ -215,6 +216,10 @@ fn validate_transitions(
             NodeKind::Retrieve | NodeKind::Model | NodeKind::Action => {
                 BTreeSet::from([GraphTransitionKey::Succeeded])
             }
+            NodeKind::DurableLocalWriteAction => BTreeSet::from([
+                GraphTransitionKey::Succeeded,
+                GraphTransitionKey::ApprovalDenied,
+            ]),
             NodeKind::Verify => BTreeSet::from([
                 GraphTransitionKey::VerificationPassed,
                 GraphTransitionKey::VerificationFailed,
@@ -291,7 +296,7 @@ fn definition_digest(
     edges: &BTreeMap<(GraphNodeId, GraphTransitionKey), GraphNodeId>,
 ) -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(b"enterprise-local-agent:graph:v1");
+    digest.update(b"enterprise-local-agent:graph:v2");
     update_text(&mut digest, start.as_str());
     for node in nodes.values() {
         digest.update([0x01]);
@@ -310,10 +315,11 @@ fn definition_digest(
         update_text(&mut digest, from.as_str());
         match transition {
             GraphTransitionKey::Succeeded => digest.update([0]),
-            GraphTransitionKey::VerificationPassed => digest.update([1]),
-            GraphTransitionKey::VerificationFailed => digest.update([2]),
+            GraphTransitionKey::ApprovalDenied => digest.update([1]),
+            GraphTransitionKey::VerificationPassed => digest.update([2]),
+            GraphTransitionKey::VerificationFailed => digest.update([3]),
             GraphTransitionKey::Branch(branch) => {
-                digest.update([3]);
+                digest.update([4]);
                 update_text(&mut digest, branch.as_str());
             }
         }
@@ -327,10 +333,11 @@ const fn node_kind_tag(kind: &NodeKind) -> u8 {
         NodeKind::Retrieve => 0,
         NodeKind::Model => 1,
         NodeKind::Action => 2,
-        NodeKind::Verify => 3,
-        NodeKind::Decision { .. } => 4,
-        NodeKind::Complete => 5,
-        NodeKind::Fail => 6,
+        NodeKind::DurableLocalWriteAction => 3,
+        NodeKind::Verify => 4,
+        NodeKind::Decision { .. } => 5,
+        NodeKind::Complete => 6,
+        NodeKind::Fail => 7,
     }
 }
 

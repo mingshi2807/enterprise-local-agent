@@ -11,13 +11,13 @@ mod model;
 mod run;
 mod tool;
 
-pub use action::{ActionDigest, ActionProposal, ActionRejectionReason};
+pub use action::{ActionDigest, ActionProposal, ActionRejectionReason, ToolContractDigest};
 pub use budget::{BudgetDimension, BudgetError, BudgetUsage, RunBudget};
 pub use capability::CapabilityKind;
 pub use event::{
     AgentEvent, AgentEventKind, ApprovalFailureKind, CURRENT_EVENT_SCHEMA_VERSION,
-    ContainmentFailureKind, EventSchemaVersion, EventSequence, KnowledgeBackendId,
-    KnowledgeEvidenceReference, KnowledgeFailureKind, KnowledgeRouteMetadata,
+    ContainmentFailureKind, DurableApprovalOutcome, EventSchemaVersion, EventSequence,
+    KnowledgeBackendId, KnowledgeEvidenceReference, KnowledgeFailureKind, KnowledgeRouteMetadata,
     KnowledgeSnapshotMetadata, MAX_DURABLE_EVIDENCE_REFERENCES, MAX_DURABLE_KNOWLEDGE_BACKENDS,
     MAX_DURABLE_KNOWLEDGE_ID_BYTES,
 };
@@ -27,8 +27,8 @@ pub use graph_control::{
     MAX_GRAPH_BRANCH_ID_BYTES, MAX_GRAPH_NODE_ID_BYTES, MAX_GRAPH_STEPS,
 };
 pub use ids::{
-    ActionProposalId, ApprovalRequestId, GraphNodeAttemptId, KnowledgeRetrievalId, ModelCallId,
-    RunId, SessionId, ToolCallId,
+    ActionProposalId, ApprovalRequestId, DurableApprovalWaitId, GraphNodeAttemptId,
+    KnowledgeRetrievalId, ModelCallId, RunId, SessionId, ToolCallId, WorkspaceBindingId,
 };
 pub use loop_control::{
     LoopDecisionKind, LoopEventKind, LoopFailureKind, LoopPhase, LoopProgressEvent,

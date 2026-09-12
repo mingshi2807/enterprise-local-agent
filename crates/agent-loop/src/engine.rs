@@ -728,7 +728,9 @@ fn failure_kind_for_harness_error(error: &HarnessError) -> RunFailureKind {
         | HarnessError::Recovery(_)
         | HarnessError::Context(_)
         | HarnessError::KnowledgePort(_)
-        | HarnessError::GroundingMismatch => RunFailureKind::Internal,
+        | HarnessError::GroundingMismatch
+        | HarnessError::DurableApprovalMismatch
+        | HarnessError::ActionSeal(_) => RunFailureKind::Internal,
     }
 }
 
