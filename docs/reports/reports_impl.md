@@ -1269,3 +1269,63 @@
 
  13. Deviations: None from the approved scope. The Codebase Memory ADR was replaced and verified with exactly its six established headings, including the narrow M7 encrypted-capsule exception. No commit was
      created; changes remain based on a1264ebed528c5b92861c9e96159d13ae5074a4d.
+
+# M11 implementation reporting
+
+1. Changed tree
+     Added agent-mcp-adapters (crates/agent-mcp-adapters/src/lib.rs), its Rust fixture server and integration tests. Extended crates/agent-harness/src/ports.rs:21, crates/agent-harness/src/registry.rs:24, and
+     crates/agent-harness/src/execution.rs:1527. Updated workspace manifests, lockfile, and the stored ADR. No commit created.
+
+2. Supported MCP revision
+     Pinned exclusively to 2025-06-18. Both target servers negotiated it live:
+      - standards-mcp 1.23.0
+      - rag-kag-ocpp 1.27.1
+
+  2026-07-28 is unsupported by their installed SDKs, so it was not used.
+
+  1. Transport/lifecycle
+     Bounded newline-delimited UTF-8 JSON-RPC over stdio, fixed absolute executable/argv, env_clear, explicit environment, null stderr, no shell/retry/reconnect. Executables must be regular, executable, non-
+     setid, and not group/world writable. Each invocation owns a process group; cancellation/deadline terminates and reaps it.
+
+  2. Discovery/fingerprint
+     Trusted McpServerId and ToolMapping define the allowlisted remote name, trusted local name/description/capability, and expected SHA-256 fingerprint. Discovery bounds pages/tools, rejects repeated cursors
+     and duplicate names, canonicalizes object ordering, validates the fingerprint, then constructs ToolDefinition.
+
+  3. Invocation-time drift protection
+     Every invocation starts a fresh process, renegotiates the pinned protocol, repeats tools/list, and verifies the fingerprint before tools/call. Tested drift results in zero remote dispatches.
+
+  4. Schema profile
+     MCP input schemas pass unchanged through the existing M5 bounded schema validator. Unsupported references, combinators, conditionals, complexity, or size return UnsupportedTool. M11 rejects tools
+     advertising outputSchema rather than relying on unvalidated output contracts.
+
+  5. Capability mapping
+     Only trusted-configured ReadOnly tools can dispatch. Managed LocalWrite reports containment unavailable; ExternalWrite and Privileged remain denied. MCP annotations have no authority.
+
+  6. Result mapping
+     Bounded text or structured JSON maps to successful ToolResult. MCP isError=true maps to domain failure. Protocol, process, correlation, malformed response, rich-content, timeout, and drift errors map to
+     sanitized infrastructure failures. Payloads never enter events or audit.
+
+  7. Recovery
+     Existing durable ToolInvocationStarted semantics are reused unchanged. Persistence failure prevents process/tool dispatch. An unresolved MCP invocation recovers as ManualReconciliationRequired; replay
+     performs no spawn, discovery, or call.
+
+  8. Dependencies
+     No MCP SDK or framework added. The new crate uses existing agent-core, agent-harness, Tokio, Serde JSON, SHA-256, thiserror, and libc. SQLite and tempfile are test-only dependencies.
+
+  9. Tests
+     All gates passed:
+
+- formatting and strict workspace Clippy
+- 265 workspace tests plus 4 doctests
+- 15 adapter tests and 2 managed-harness tests
+- SQLite transaction/crash tests
+- Codebase Memory dependency/blast-radius scans
+- M6.1 certification with Bubblewrap 0.11.2, static musl worker, process-tree reaping, and Landlock PartiallyEnforced
+
+  1. Guarantees/non-guarantees
+     The runtime guarantees governed, fingerprint-bound ReadOnly MCP requests through the harness. A configured MCP executable remains trusted infrastructure: ReadOnly classification does not sandbox the
+     executable or prove it cannot misbehave. Cleanup covers the tested process group, not independently daemonized descendants. No exactly-once claim.
+
+  2. Deviations
+     2025-06-18 was selected instead of preferred 2026-07-28 based on live compatibility. HTTP, rich content, output schemas, retries, MCP LocalWrite, and production auto-registration remain unsupported.
+     Deployment must supply reviewed allowlists and expected fingerprints.

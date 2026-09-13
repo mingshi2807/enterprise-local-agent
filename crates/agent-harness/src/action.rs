@@ -515,6 +515,11 @@ pub(crate) fn compile_tool_schema(
         .map_err(|_| ToolSchemaRegistrationError::CompilationFailed)
 }
 
+/// Validates that a schema is within the bounded M5 registration profile.
+pub fn validate_tool_schema(schema: &ToolSchema) -> Result<(), ToolSchemaRegistrationError> {
+    compile_tool_schema(schema).map(|_| ())
+}
+
 fn deserialize_unique_json(text: &str) -> Result<Value, serde_json::Error> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
     let value = UniqueJson::deserialize(&mut deserializer)?.0;

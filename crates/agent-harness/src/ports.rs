@@ -18,6 +18,22 @@ pub trait ToolPort: Send + Sync {
     fn invoke<'a>(&'a self, call: ToolCall) -> PortFuture<'a, Result<ToolResult, ToolPortError>>;
 }
 
+/// A tool whose adapter owns external process lifecycle for one invocation.
+pub trait ManagedToolPort: Send + Sync {
+    fn definition(&self) -> &ToolDefinition;
+
+    fn start_managed(
+        &self,
+        call: ToolCall,
+    ) -> Result<Box<dyn ManagedToolInvocation>, ToolPortError>;
+}
+
+pub trait ManagedToolInvocation: Send {
+    fn wait<'a>(&'a mut self) -> PortFuture<'a, Result<ToolResult, ToolPortError>>;
+
+    fn terminate_and_reap<'a>(&'a mut self) -> PortFuture<'a, Result<(), ToolPortError>>;
+}
+
 pub trait AuditSink: Send + Sync {
     fn record<'a>(&'a self, event: &'a AgentEvent) -> PortFuture<'a, Result<(), AuditPortError>>;
 }
@@ -56,6 +72,7 @@ mod tests {
 
     fn assert_model_port_is_object_safe(_: &dyn ModelPort) {}
     fn assert_tool_port_is_object_safe(_: &dyn ToolPort) {}
+    fn assert_managed_tool_port_is_object_safe(_: &dyn ManagedToolPort) {}
     fn assert_audit_sink_is_object_safe(_: &dyn AuditSink) {}
 
     #[test]
@@ -111,5 +128,19 @@ mod tests {
         .expect("definition must be valid");
         let tool = FakeTool { definition };
         assert_tool_port_is_object_safe(&tool);
+        struct FakeManaged(ToolDefinition);
+        impl ManagedToolPort for FakeManaged {
+            fn definition(&self) -> &ToolDefinition {
+                &self.0
+            }
+
+            fn start_managed(
+                &self,
+                _call: ToolCall,
+            ) -> Result<Box<dyn ManagedToolInvocation>, ToolPortError> {
+                Err(ToolPortError::Unavailable)
+            }
+        }
+        assert_managed_tool_port_is_object_safe(&FakeManaged(tool.definition().clone()));
     }
 }

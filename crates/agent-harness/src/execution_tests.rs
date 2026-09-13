@@ -1,4 +1,11 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    future::pending,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use agent_core::{
     AgentEventKind, BudgetDimension, CapabilityKind, LoopEventKind, LoopPhase, LoopProgressEvent,
@@ -12,14 +19,52 @@ use crate::{
     AppendTransition, ApprovalDecision, ApprovalPort, ApprovalPortError, AuditFailurePolicy,
     AuditPhase, AuditSink, AuthorizationDecision, CapabilityPolicy, ContainedToolPort,
     ContainmentPortError, DurableCheckpoint, ExecutionHarness, ExecutionStage, HarnessConfig,
-    HarnessError, LoadedRun, M0ReadOnlyPolicy, M6ApprovalPolicy, ModelPort, ModelPortError,
-    OperationEffect, PersistenceFuture, PersistencePortError, PolicyDenial, PolicyDenialReason,
-    PortFuture, RunContext, RunPersistencePort, RunRecord, ToolPort, ToolPortError, ToolRegistry,
+    HarnessError, LoadedRun, M0ReadOnlyPolicy, M6ApprovalPolicy, ManagedToolInvocation,
+    ManagedToolPort, ModelPort, ModelPortError, OperationEffect, PersistenceFuture,
+    PersistencePortError, PolicyDenial, PolicyDenialReason, PortFuture, RunContext,
+    RunPersistencePort, RunRecord, ToolPort, ToolPortError, ToolRegistry,
     testing::{
         FailingAuditSink, FakeContainedToolPort, FakeInvocation, FakeModelPort, FakeToolPort,
         InMemoryAuditSink, InvocationLog, PendingApprovalPort, ScriptedApprovalPort,
     },
 };
+
+struct PendingManagedTool {
+    definition: ToolDefinition,
+    starts: Arc<AtomicUsize>,
+    terminations: Arc<AtomicUsize>,
+}
+
+struct PendingManagedInvocation {
+    terminations: Arc<AtomicUsize>,
+}
+
+impl ManagedToolPort for PendingManagedTool {
+    fn definition(&self) -> &ToolDefinition {
+        &self.definition
+    }
+
+    fn start_managed(
+        &self,
+        _call: ToolCall,
+    ) -> Result<Box<dyn ManagedToolInvocation>, ToolPortError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(PendingManagedInvocation {
+            terminations: Arc::clone(&self.terminations),
+        }))
+    }
+}
+
+impl ManagedToolInvocation for PendingManagedInvocation {
+    fn wait<'a>(&'a mut self) -> PortFuture<'a, Result<ToolResult, ToolPortError>> {
+        Box::pin(pending())
+    }
+
+    fn terminate_and_reap<'a>(&'a mut self) -> PortFuture<'a, Result<(), ToolPortError>> {
+        self.terminations.fetch_add(1, Ordering::SeqCst);
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
 
 struct RejectEffectStartPersistence;
 
@@ -180,6 +225,87 @@ async fn durable_effect_start_failure_invokes_no_external_port() {
         Err(HarnessError::Persistence(PersistencePortError::Unavailable))
     ));
     assert_eq!(model.invocation_count(), 0);
+}
+
+#[tokio::test]
+async fn durable_tool_start_failure_starts_no_managed_invocation() {
+    let starts = Arc::new(AtomicUsize::new(0));
+    let managed = Arc::new(PendingManagedTool {
+        definition: definition("managed_lookup", CapabilityKind::ReadOnly),
+        starts: Arc::clone(&starts),
+        terminations: Arc::new(AtomicUsize::new(0)),
+    });
+    let mut registry = ToolRegistry::new();
+    let managed_port: Arc<dyn ManagedToolPort> = managed;
+    registry
+        .register_managed(managed_port)
+        .expect("managed tool registers");
+    let runtime = harness_with_registry(
+        Arc::new(FakeModelPort::scripted(vec![])),
+        registry,
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+        Arc::new(M0ReadOnlyPolicy),
+        None,
+    )
+    .with_persistence_port(Arc::new(RejectEffectStartPersistence));
+    let mut run = context(0, 1, Duration::from_secs(30));
+    runtime.start_run(&mut run).await.expect("run starts");
+
+    assert!(matches!(
+        runtime
+            .invoke_tool(
+                &mut run,
+                call("managed_lookup", ToolCallId::new(), "never dispatched")
+            )
+            .await,
+        Err(HarnessError::Persistence(PersistencePortError::Unavailable))
+    ));
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn managed_invocation_cancellation_terminates_and_reaps() {
+    let starts = Arc::new(AtomicUsize::new(0));
+    let terminations = Arc::new(AtomicUsize::new(0));
+    let managed = Arc::new(PendingManagedTool {
+        definition: definition("managed_lookup", CapabilityKind::ReadOnly),
+        starts: Arc::clone(&starts),
+        terminations: Arc::clone(&terminations),
+    });
+    let mut registry = ToolRegistry::new();
+    let managed_port: Arc<dyn ManagedToolPort> = managed;
+    registry
+        .register_managed(managed_port)
+        .expect("managed tool registers");
+    let runtime = harness_with_registry(
+        Arc::new(FakeModelPort::scripted(vec![])),
+        registry,
+        Arc::new(InMemoryAuditSink::new()),
+        AuditFailurePolicy::FailClosed,
+        Arc::new(M0ReadOnlyPolicy),
+        None,
+    );
+    let mut run = context(0, 1, Duration::from_secs(30));
+    let cancellation = runtime.start_run(&mut run).await.expect("run starts");
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        cancellation.request_cancel();
+    });
+
+    assert!(matches!(
+        runtime
+            .invoke_tool(
+                &mut run,
+                call("managed_lookup", ToolCallId::new(), "cancelled")
+            )
+            .await,
+        Err(HarnessError::Cancelled {
+            stage: ExecutionStage::Invocation
+        })
+    ));
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert_eq!(terminations.load(Ordering::SeqCst), 1);
 }
 
 fn harness_with_registry(

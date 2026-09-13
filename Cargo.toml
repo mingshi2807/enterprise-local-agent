@@ -9,6 +9,7 @@ members = [
     "crates/agent-knowledge",
     "crates/agent-knowledge-adapters",
     "crates/agent-loop",
+    "crates/agent-mcp-adapters",
     "crates/agent-persistence-sqlite",
     "crates/agent-provider-rig",
 ]
@@ -27,6 +28,7 @@ agent-graph = { path = "crates/agent-graph" }
 agent-knowledge = { path = "crates/agent-knowledge" }
 agent-knowledge-adapters = { path = "crates/agent-knowledge-adapters" }
 agent-loop = { path = "crates/agent-loop" }
+agent-mcp-adapters = { path = "crates/agent-mcp-adapters" }
 agent-persistence-sqlite = { path = "crates/agent-persistence-sqlite" }
 agent-provider-rig = { path = "crates/agent-provider-rig" }
 anyhow = "1.0"

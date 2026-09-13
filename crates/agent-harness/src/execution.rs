@@ -549,6 +549,16 @@ impl ExecutionHarness {
                         )
                         .await
                     }
+                    ExecutionBinding::ManagedDirect(port) => {
+                        self.invoke_managed_tool(
+                            context,
+                            port,
+                            action.into_tool_call(tool_call_id),
+                            tool_name,
+                            capability,
+                        )
+                        .await
+                    }
                     ExecutionBinding::Contained(port) => {
                         self.invoke_contained_read_only(
                             context,
@@ -611,6 +621,17 @@ impl ExecutionHarness {
                 }
                 AuthorizationDecision::RequiresApproval => match binding.execution().clone() {
                     ExecutionBinding::Direct(_) => {
+                        self.record_containment_failed(
+                            context,
+                            tool_call_id,
+                            tool_name.clone(),
+                            capability,
+                            ContainmentFailureKind::Unavailable,
+                        )
+                        .await?;
+                        Err(HarnessError::ContainmentUnavailable { name: tool_name })
+                    }
+                    ExecutionBinding::ManagedDirect(_) => {
                         self.record_containment_failed(
                             context,
                             tool_call_id,
@@ -1419,12 +1440,17 @@ impl ExecutionHarness {
                 self.invoke_direct_tool(context, port, call, tool_name, capability)
                     .await
             }
+            (CapabilityKind::ReadOnly, ExecutionBinding::ManagedDirect(port)) => {
+                self.invoke_managed_tool(context, port, call, tool_name, capability)
+                    .await
+            }
             (CapabilityKind::ReadOnly, ExecutionBinding::Contained(port)) => {
                 self.invoke_contained_read_only(context, port, call, tool_name, capability)
                     .await
             }
             (CapabilityKind::LocalWrite, ExecutionBinding::Contained(_))
             | (CapabilityKind::LocalWrite, ExecutionBinding::Direct(_))
+            | (CapabilityKind::LocalWrite, ExecutionBinding::ManagedDirect(_))
             | (CapabilityKind::ExternalWrite, _)
             | (CapabilityKind::Privileged, _) => {
                 self.record_policy_denied(
@@ -1488,6 +1514,35 @@ impl ExecutionHarness {
         .await?;
         let tool_call_id = call.id();
         let result = self.invoke_contained_tool_port(context, &port, call).await;
+        self.finish_tool_invocation(
+            context,
+            tool_call_id,
+            HarnessOperation::InvokeTool,
+            result,
+            ToolTerminalAudit::Configured,
+        )
+        .await
+    }
+
+    async fn invoke_managed_tool(
+        &self,
+        context: &mut RunContext,
+        port: Arc<dyn crate::ManagedToolPort>,
+        call: ToolCall,
+        tool_name: ToolName,
+        capability: CapabilityKind,
+    ) -> Result<ToolResult, HarnessError> {
+        self.reserve_and_record_tool_started(
+            context,
+            call.id(),
+            tool_name,
+            capability,
+            HarnessOperation::InvokeTool,
+            ToolStartAudit::Configured,
+        )
+        .await?;
+        let tool_call_id = call.id();
+        let result = self.invoke_managed_tool_port(context, &port, call).await;
         self.finish_tool_invocation(
             context,
             tool_call_id,
@@ -1771,6 +1826,31 @@ impl ExecutionHarness {
             result = invocation.wait() => {
                 result.map_err(HarnessError::ContainmentPort)
             },
+        }
+    }
+
+    async fn invoke_managed_tool_port(
+        &self,
+        context: &mut RunContext,
+        port: &Arc<dyn crate::ManagedToolPort>,
+        call: ToolCall,
+    ) -> Result<ToolResult, HarnessError> {
+        let cancellation = context.cancellation()?;
+        let deadline = context.deadline_at()?;
+        let mut invocation = port.start_managed(call).map_err(HarnessError::ToolPort)?;
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                invocation.terminate_and_reap().await.map_err(HarnessError::ToolPort)?;
+                self.terminalize_safety(context, SafetyTerminalization::Cancelled).await;
+                Err(HarnessError::Cancelled { stage: ExecutionStage::Invocation })
+            }
+            () = sleep_until(deadline) => {
+                invocation.terminate_and_reap().await.map_err(HarnessError::ToolPort)?;
+                self.terminalize_safety(context, SafetyTerminalization::DeadlineExceeded).await;
+                Err(HarnessError::DeadlineExceeded { stage: ExecutionStage::Invocation })
+            }
+            result = invocation.wait() => result.map_err(HarnessError::ToolPort),
         }
     }
 

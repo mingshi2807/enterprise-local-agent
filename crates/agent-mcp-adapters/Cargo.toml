@@ -1,0 +1,29 @@
+[package]
+name = "agent-mcp-adapters"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agent-core.workspace = true
+agent-harness.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "process"] }
+
+[dev-dependencies]
+agent-harness = { workspace = true, features = ["test-support"] }
+agent-persistence-sqlite.workspace = true
+tempfile = "3.0"
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+
+[features]
+test-fixture = []
+
+[[bin]]
+name = "mcp-fixture-server"
+path = "tests/fixtures/mcp_fixture_server.rs"
+required-features = ["test-fixture"]
+test = false
+bench = false

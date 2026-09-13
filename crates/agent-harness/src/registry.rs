@@ -5,7 +5,8 @@ use jsonschema::Validator;
 use thiserror::Error;
 
 use crate::{
-    ContainedToolPort, ToolPort, ToolSchemaRegistrationError, action::compile_tool_schema,
+    ContainedToolPort, ManagedToolPort, ToolPort, ToolSchemaRegistrationError,
+    action::compile_tool_schema,
 };
 
 #[derive(Default)]
@@ -23,6 +24,7 @@ pub struct ToolBinding {
 #[derive(Clone)]
 pub(crate) enum ExecutionBinding {
     Direct(Arc<dyn ToolPort>),
+    ManagedDirect(Arc<dyn ManagedToolPort>),
     Contained(Arc<dyn ContainedToolPort>),
 }
 
@@ -36,7 +38,7 @@ impl ToolBinding {
     pub fn direct_port(&self) -> Option<Arc<dyn ToolPort>> {
         match &self.execution {
             ExecutionBinding::Direct(port) => Some(Arc::clone(port)),
-            ExecutionBinding::Contained(_) => None,
+            ExecutionBinding::ManagedDirect(_) | ExecutionBinding::Contained(_) => None,
         }
     }
 
@@ -67,6 +69,14 @@ impl ToolRegistry {
     ) -> Result<(), ToolRegistryError> {
         let definition = tool.definition().clone();
         self.register_binding(definition, ExecutionBinding::Contained(tool))
+    }
+
+    pub fn register_managed(
+        &mut self,
+        tool: Arc<dyn ManagedToolPort>,
+    ) -> Result<(), ToolRegistryError> {
+        let definition = tool.definition().clone();
+        self.register_binding(definition, ExecutionBinding::ManagedDirect(tool))
     }
 
     fn register_binding(
