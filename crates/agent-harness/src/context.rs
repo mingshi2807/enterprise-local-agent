@@ -280,6 +280,12 @@ impl RunContext {
         Ok(self.runtime()?.cancellation.clone())
     }
 
+    pub(crate) fn cancellation_handle(&self) -> Result<RunCancellationHandle, RunContextError> {
+        Ok(RunCancellationHandle {
+            token: self.cancellation()?,
+        })
+    }
+
     pub(crate) fn deadline_at(&self) -> Result<Instant, RunContextError> {
         Ok(self.runtime()?.deadline_at)
     }

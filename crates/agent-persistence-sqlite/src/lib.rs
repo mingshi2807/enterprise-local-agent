@@ -5,13 +5,15 @@ use std::sync::Arc;
 
 use agent_core::{
     AgentEvent, AgentEventKind, CURRENT_EVENT_SCHEMA_VERSION, DurableApprovalOutcome,
-    DurableApprovalWaitId, EventSequence, RunStatus,
+    DurableApprovalWaitId, EventSequence, RunId, RunStatus, SessionId,
 };
 use agent_harness::{
     AppendTransition, CURRENT_CHECKPOINT_SCHEMA_VERSION, CURRENT_STORE_SCHEMA_VERSION,
     CreateDurableApprovalWait, DurableApprovalRecord, DurableApprovalStatus,
-    DurableApprovalStatusTransition, DurableCheckpoint, LoadedRun, PersistenceFuture,
-    PersistencePortError, RecordDurableApprovalDecision, RunKey, RunPersistencePort, RunRecord,
+    DurableApprovalStatusTransition, DurableCheckpoint, DurableEventPage, DurableRunPage,
+    DurableRunSummary, DurableWaitingPage, DurableWaitingSummary, LoadedRun, MAX_READ_PAGE_ITEMS,
+    PersistenceFuture, PersistencePortError, ReadFuture, RecordDurableApprovalDecision, RunKey,
+    RunPageCursor, RunPersistencePort, RunReadPort, RunRecord, WaitingPageCursor,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -19,6 +21,7 @@ use tokio::sync::Semaphore;
 
 const APPLICATION_ID: i32 = 0x454c_4137;
 type StoredRunRow = (String, Vec<u8>, Vec<u8>, Option<Vec<u8>>, i64);
+type ReadRunRow = (String, String, Vec<u8>, Vec<u8>, Option<Vec<u8>>, i64);
 type StoredApprovalRow = (String, Vec<u8>, Vec<u8>, String, Vec<u8>, i64, i64);
 
 #[derive(Clone, Debug)]
@@ -193,6 +196,309 @@ impl RunPersistencePort for SqliteRunPersistence {
                 .map_err(|_| PersistencePortError::Unavailable)?
         })
     }
+}
+
+impl RunReadPort for SqliteRunPersistence {
+    fn find_run<'a>(
+        &'a self,
+        key: RunKey,
+    ) -> ReadFuture<'a, Result<Option<DurableRunSummary>, PersistencePortError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        Box::pin(async move {
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?;
+            tokio::task::spawn_blocking(move || find_run(&path, key))
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?
+        })
+    }
+
+    fn list_runs<'a>(
+        &'a self,
+        after: Option<RunPageCursor>,
+        limit: u16,
+    ) -> ReadFuture<'a, Result<DurableRunPage, PersistencePortError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        Box::pin(async move {
+            validate_page_limit(limit)?;
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?;
+            tokio::task::spawn_blocking(move || list_runs(&path, after, limit))
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?
+        })
+    }
+
+    fn read_events<'a>(
+        &'a self,
+        key: RunKey,
+        after: Option<EventSequence>,
+        limit: u16,
+    ) -> ReadFuture<'a, Result<DurableEventPage, PersistencePortError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        Box::pin(async move {
+            validate_page_limit(limit)?;
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?;
+            tokio::task::spawn_blocking(move || read_events(&path, key, after, limit))
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?
+        })
+    }
+
+    fn list_waiting<'a>(
+        &'a self,
+        after: Option<WaitingPageCursor>,
+        limit: u16,
+    ) -> ReadFuture<'a, Result<DurableWaitingPage, PersistencePortError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        Box::pin(async move {
+            validate_page_limit(limit)?;
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?;
+            tokio::task::spawn_blocking(move || list_waiting(&path, after, limit))
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?
+        })
+    }
+}
+
+fn validate_page_limit(limit: u16) -> Result<(), PersistencePortError> {
+    if limit == 0 || limit > MAX_READ_PAGE_ITEMS {
+        return Err(PersistencePortError::Conflict);
+    }
+    Ok(())
+}
+
+fn find_run(path: &Path, key: RunKey) -> Result<Option<DurableRunSummary>, PersistencePortError> {
+    let connection = Connection::open(path).map_err(map_unavailable)?;
+    configure(&connection)?;
+    validate_store_identity(&connection)?;
+    let stored: Option<StoredRunRow> = connection
+        .query_row(
+            "SELECT session_id,record,record_checksum,last_sequence,terminal FROM runs WHERE run_id=?1",
+            [key.run_id().to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .optional()
+        .map_err(map_failed)?;
+    let Some((session_id, bytes, stored_checksum, last_sequence, terminal)) = stored else {
+        return Ok(None);
+    };
+    if session_id != key.session_id().to_string()
+        || checksum(&bytes) != stored_checksum
+        || !matches!(terminal, 0 | 1)
+    {
+        return Err(PersistencePortError::Corrupt);
+    }
+    let record: RunRecord = decode(&bytes)?;
+    if record.store_schema_version() != CURRENT_STORE_SCHEMA_VERSION
+        || record.checkpoint_schema_version() != CURRENT_CHECKPOINT_SCHEMA_VERSION
+    {
+        return Err(PersistencePortError::UnsupportedVersion);
+    }
+    if record.key() != key {
+        return Err(PersistencePortError::Corrupt);
+    }
+    Ok(Some(DurableRunSummary::new(
+        key,
+        record.recovery_contract(),
+        decode_optional_sequence(last_sequence.as_deref())?,
+        terminal == 1,
+    )))
+}
+
+fn list_runs(
+    path: &Path,
+    after: Option<RunPageCursor>,
+    limit: u16,
+) -> Result<DurableRunPage, PersistencePortError> {
+    let connection = Connection::open(path).map_err(map_unavailable)?;
+    configure(&connection)?;
+    validate_store_identity(&connection)?;
+    let after = after
+        .map(|cursor| cursor.run_id().to_string())
+        .unwrap_or_default();
+    let mut statement = connection
+        .prepare(
+            "SELECT run_id,session_id,record,record_checksum,last_sequence,terminal FROM runs
+             WHERE run_id>?1 ORDER BY run_id LIMIT ?2",
+        )
+        .map_err(map_failed)?;
+    let rows: Vec<ReadRunRow> = statement
+        .query_map(params![after, i64::from(limit) + 1], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, Option<Vec<u8>>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(map_failed)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_failed)?;
+    let has_more = rows.len() > usize::from(limit);
+    let mut items = Vec::with_capacity(rows.len().min(usize::from(limit)));
+    for (run_id, session_id, bytes, stored_checksum, last_sequence, terminal) in
+        rows.into_iter().take(usize::from(limit))
+    {
+        if checksum(&bytes) != stored_checksum || !matches!(terminal, 0 | 1) {
+            return Err(PersistencePortError::Corrupt);
+        }
+        let record: RunRecord = decode(&bytes)?;
+        if record.key().run_id().to_string() != run_id
+            || record.key().session_id().to_string() != session_id
+        {
+            return Err(PersistencePortError::Corrupt);
+        }
+        if record.store_schema_version() != CURRENT_STORE_SCHEMA_VERSION
+            || record.checkpoint_schema_version() != CURRENT_CHECKPOINT_SCHEMA_VERSION
+        {
+            return Err(PersistencePortError::UnsupportedVersion);
+        }
+        items.push(DurableRunSummary::new(
+            record.key(),
+            record.recovery_contract(),
+            decode_optional_sequence(last_sequence.as_deref())?,
+            terminal == 1,
+        ));
+    }
+    let next = has_more
+        .then(|| {
+            items
+                .last()
+                .map(|item| RunPageCursor::new(item.key().run_id()))
+        })
+        .flatten();
+    Ok(DurableRunPage::new(items, next))
+}
+
+fn read_events(
+    path: &Path,
+    key: RunKey,
+    after: Option<EventSequence>,
+    limit: u16,
+) -> Result<DurableEventPage, PersistencePortError> {
+    let loaded = load_run(path, key)?;
+    if after.is_some_and(|cursor| {
+        loaded
+            .events()
+            .last()
+            .is_none_or(|event| cursor.get() > event.sequence().get())
+    }) {
+        return Err(PersistencePortError::Conflict);
+    }
+    let mut matching = loaded
+        .events()
+        .iter()
+        .filter(|event| after.is_none_or(|cursor| event.sequence().get() > cursor.get()));
+    let events = matching
+        .by_ref()
+        .take(usize::from(limit))
+        .cloned()
+        .collect::<Vec<_>>();
+    let has_more = matching.next().is_some();
+    let next = has_more
+        .then(|| events.last().map(AgentEvent::sequence))
+        .flatten();
+    Ok(DurableEventPage::new(events, next))
+}
+
+fn list_waiting(
+    path: &Path,
+    after: Option<WaitingPageCursor>,
+    limit: u16,
+) -> Result<DurableWaitingPage, PersistencePortError> {
+    let connection = Connection::open(path).map_err(map_unavailable)?;
+    configure(&connection)?;
+    validate_store_identity(&connection)?;
+    let (after_run, after_wait) = after.map_or_else(
+        || (String::new(), String::new()),
+        |cursor| (cursor.run_id().to_string(), cursor.wait_id().to_string()),
+    );
+    let mut statement = connection
+        .prepare(
+            "SELECT run_id,session_id,wait_id FROM durable_approvals
+             WHERE status<>?1 AND (run_id>?2 OR (run_id=?2 AND wait_id>?3))
+             ORDER BY run_id,wait_id LIMIT ?4",
+        )
+        .map_err(map_failed)?;
+    let rows = statement
+        .query_map(
+            params![
+                status_code(DurableApprovalStatus::Consumed),
+                after_run,
+                after_wait,
+                i64::from(limit) + 1
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(map_failed)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_failed)?;
+    let has_more = rows.len() > usize::from(limit);
+    let mut items = Vec::with_capacity(rows.len().min(usize::from(limit)));
+    for (run_id, session_id, wait_id) in rows.into_iter().take(usize::from(limit)) {
+        let key = RunKey::new(
+            run_id
+                .parse::<RunId>()
+                .map_err(|_| PersistencePortError::Corrupt)?,
+            session_id
+                .parse::<SessionId>()
+                .map_err(|_| PersistencePortError::Corrupt)?,
+        );
+        let wait_id = wait_id
+            .parse::<DurableApprovalWaitId>()
+            .map_err(|_| PersistencePortError::Corrupt)?;
+        let record = load_durable_approval_wait(path, key, wait_id)?;
+        items.push(DurableWaitingSummary::new(
+            key,
+            wait_id,
+            record.row_version(),
+            record.status(),
+        ));
+    }
+    let next = has_more
+        .then(|| {
+            items
+                .last()
+                .map(|item| WaitingPageCursor::new(item.key().run_id(), item.wait_id()))
+        })
+        .flatten();
+    Ok(DurableWaitingPage::new(items, next))
+}
+
+fn validate_store_identity(connection: &Connection) -> Result<(), PersistencePortError> {
+    let version: u16 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(map_failed)?;
+    let application_id: i32 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(map_failed)?;
+    if version != CURRENT_STORE_SCHEMA_VERSION || application_id != APPLICATION_ID {
+        return Err(PersistencePortError::UnsupportedVersion);
+    }
+    Ok(())
 }
 
 fn initialize(path: &Path) -> Result<(), PersistencePortError> {
@@ -769,7 +1075,12 @@ fn load_run(path: &Path, key: RunKey) -> Result<LoadedRun, PersistencePortError>
         if event.schema_version() != CURRENT_EVENT_SCHEMA_VERSION {
             return Err(PersistencePortError::UnsupportedVersion);
         }
-        if sequence != encode_sequence(event.sequence()) || event.run_id() != key.run_id() {
+        let expected_sequence =
+            u64::try_from(events.len()).map_err(|_| PersistencePortError::Corrupt)?;
+        if sequence != encode_sequence(event.sequence())
+            || event.sequence().get() != expected_sequence
+            || event.run_id() != key.run_id()
+        {
             return Err(PersistencePortError::Corrupt);
         }
         events.push(event);
@@ -918,6 +1229,57 @@ mod tests {
         );
         let loaded = store.load_run(record.key()).await.expect("run must load");
         assert_eq!(loaded.events(), &[event]);
+    }
+
+    #[tokio::test]
+    async fn read_port_pages_runs_and_events_without_exposing_storage() {
+        let (directory, record, checkpoint) = fixture();
+        let store = store(&directory).await;
+        store
+            .create_run(&record, &checkpoint)
+            .await
+            .expect("create");
+        let event = AgentEvent::new(
+            record.key().run_id(),
+            EventSequence::new(0),
+            AgentEventKind::RunStarted {
+                started_at_unix_millis: 1,
+            },
+        );
+        store
+            .append_transition(&AppendTransition::new(
+                record.key(),
+                None,
+                event.clone(),
+                None,
+            ))
+            .await
+            .expect("append");
+
+        let found = store
+            .find_run(record.key())
+            .await
+            .expect("find")
+            .expect("summary");
+        assert_eq!(found.key(), record.key());
+        assert_eq!(found.last_sequence(), Some(EventSequence::new(0)));
+        let runs = store.list_runs(None, 1).await.expect("runs");
+        assert_eq!(runs.items(), &[found]);
+        let events = store
+            .read_events(record.key(), None, 1)
+            .await
+            .expect("events");
+        assert_eq!(events.events(), &[event]);
+        assert_eq!(
+            store
+                .read_events(record.key(), Some(EventSequence::new(9)), 1)
+                .await,
+            Err(PersistencePortError::Conflict)
+        );
+        assert_eq!(
+            store.list_runs(None, 0).await,
+            Err(PersistencePortError::Conflict)
+        );
     }
 
     #[tokio::test]

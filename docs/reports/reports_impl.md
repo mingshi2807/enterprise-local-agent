@@ -1329,3 +1329,70 @@
   2. Deviations
      2025-06-18 was selected instead of preferred 2026-07-28 based on live compatibility. HTTP, rich content, output schemas, retries, MCP LocalWrite, and production auto-registration remain unsupported.
      Deployment must supply reviewed allowlists and expected fingerprints.
+
+# M12 implementation reporting
+
+1. Tree
+     Added agent-service (crates/agent-service/src/lib.rs:190), agent-service-http (crates/agent-service-http/src/lib.rs:126), and agent-service-daemon (apps/agent-service-daemon/src/main.rs:177). Extended
+     harness recovery/read APIs and SQLite persistence.
+
+2. Service API
+     Supports session creation, idempotent run start, status, event reads, cancellation, Waiting discovery/preview/decision/resume, and durable Waiting abort.
+
+3. Read Boundary
+     Added provider-neutral RunReadPort (crates/agent-harness/src/read.rs:197). SQLite implements verified paginated run, event, and Waiting reads without exposing storage details.
+
+4. Transport/Auth
+     Axum HTTP/JSON and SSE. Unix socket is default with 0600 permissions. Optional TCP rejects non-loopback addresses and requires bearer authentication plus exact Host and Origin allowlists.
+
+5. Run Ownership
+     One active run per session, 32 active runs maximum, deterministic RunId derivation from the client start-request ID, CAS-backed resume, and exclusive data-directory locking.
+
+6. ServiceEventV1/SSE
+     ServiceEventV1 (crates/agent-service/src/lib.rs:645) is an explicit metadata-only projection. SSE uses durable sequence cursors, bounded pages/connections, polling without catch-up races, and disconnects
+     slow clients without cancelling runs.
+
+7. HITL/Abort
+     Clients provide only wait ID, expected row version, and Approve/Deny. Internal bindings are loaded and verified by the harness. Abort atomically terminalizes the run as Cancelled, consumes the wait,
+     executes zero tools, and rejects stale decisions.
+
+8. Recovery/Startup
+     Startup acquires exclusive ownership, loads trusted composition, discovers durable runs, and invokes recovery without external effects or capsule decryption. Waiting, Resumable, terminal, and manual-
+     reconciliation states remain distinct.
+
+9. Concurrency/Idempotency
+     Duplicate start requests resolve to the same run. Concurrent start/resume conflicts fail closed. Commands have a fail-fast 32-operation bound; SSE allows 64 global and 4 per run.
+
+10. Tests
+     fmt, strict workspace Clippy, and all workspace tests pass. This includes SQLite transaction faults, M10 approve/deny/abort and no-replay tests, M11 regressions, service ownership, event projection, SSE
+     reconnect/backpressure, auth, body bounds, and daemon lock/socket tests.
+
+11. Guarantees/Non-Guarantees
+     Clients cannot select execution infrastructure or bypass ExecutionHarness. No payloads, capsules, evidence, results, or audit internals enter service events. No multi-process coordination, ACP, non-loopback
+     serving, RBAC, or exactly-once external-effect claim.
+
+12. Deviations
+     The daemon currently registers only a fixed service-health workflow; production graph/loop compositions must be added through reviewed server-side configuration. Mandatory M6.1 certification was run and
+     failed, without skipping, because this host has Bubblewrap 0.6.1 rather than the required FD-binding-capable version. The static worker remains available, but production containment certification cannot be
+     claimed on this host.
+
+• M6.1 certification rerun: PASS.
+
+- Environment: enterprise-local-agent-m6-cert:2541e5c
+- Source: current uncommitted worktree based on 27bba306edb6bf800eb336e34906fa63e1d9c5ee
+- Toolchain: Rust 1.97.1
+- Bubblewrap: 0.11.2, root-owned, mode 0755
+- Bubblewrap SHA-256: 52461e70c92497b12ebe637eceb0a651b9cc66251a39f45afb755f84dd815581
+- Worker: static PIE musl ELF, root-owned, mode 0555
+- Worker SHA-256: fb5d6066384f65b0934b46dd05fbc2f84566d0c9f580b63c312a89a35e7d2295
+- Execution user: UID 1000
+- Landlock: PartiallyEnforced optional defense-in-depth
+
+  Exact certification result:
+
+  production_linux_security_certification ... ok
+  1 passed; 0 failed; 0 ignored
+
+  The unchanged suite exercised the capability probe, containment boundaries, network/environment/FD isolation, openat2(), governed LocalWrite flow, ID preservation, and process-tree termination/reaping.
+
+  The repository was mounted read-only inside the certification container. No files were modified and no commit was created

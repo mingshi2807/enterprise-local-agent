@@ -11,6 +11,7 @@ mod execution;
 mod persistence;
 mod policy;
 mod ports;
+mod read;
 mod recovery;
 mod registry;
 
@@ -54,6 +55,10 @@ pub use policy::{
 pub use ports::{
     AuditPortError, AuditSink, ManagedToolInvocation, ManagedToolPort, ModelPort, ModelPortError,
     PortFuture, ToolPort, ToolPortError,
+};
+pub use read::{
+    DurableEventPage, DurableRunPage, DurableRunSummary, DurableWaitingPage, DurableWaitingSummary,
+    MAX_READ_PAGE_ITEMS, ReadFuture, RunPageCursor, RunReadPort, WaitingPageCursor,
 };
 pub use recovery::{
     ContinuationState, DurableGraphPosition, DurableGraphState, DurableLoopPosition,

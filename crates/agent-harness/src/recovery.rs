@@ -1232,6 +1232,12 @@ impl RecoveredWaitingRun {
         self.recovery_contract
     }
 
+    pub fn cancellation_handle(
+        &self,
+    ) -> Result<crate::RunCancellationHandle, crate::RunContextError> {
+        self.context.cancellation_handle()
+    }
+
     #[must_use]
     pub fn into_parts(self) -> (RunContext, DurableRunState, RecoveryContract) {
         (self.context, self.state, self.recovery_contract)
@@ -1252,6 +1258,12 @@ impl RecoveredRun {
     #[must_use]
     pub const fn recovery_contract(&self) -> RecoveryContract {
         self.recovery_contract
+    }
+
+    pub fn cancellation_handle(
+        &self,
+    ) -> Result<crate::RunCancellationHandle, crate::RunContextError> {
+        self.context.cancellation_handle()
     }
 
     #[must_use]

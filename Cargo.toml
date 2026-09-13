@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/agent-service-daemon",
     "apps/agent-cli",
     "crates/agent-containment-linux",
     "crates/agent-action-seal-local",
@@ -12,6 +13,8 @@ members = [
     "crates/agent-mcp-adapters",
     "crates/agent-persistence-sqlite",
     "crates/agent-provider-rig",
+    "crates/agent-service",
+    "crates/agent-service-http",
 ]
 resolver = "3"
 
@@ -31,6 +34,9 @@ agent-loop = { path = "crates/agent-loop" }
 agent-mcp-adapters = { path = "crates/agent-mcp-adapters" }
 agent-persistence-sqlite = { path = "crates/agent-persistence-sqlite" }
 agent-provider-rig = { path = "crates/agent-provider-rig" }
+agent-service = { path = "crates/agent-service" }
+agent-service-http = { path = "crates/agent-service-http" }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 anyhow = "1.0"
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
@@ -45,7 +51,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = { version = "=0.11.0", default-features = false }
 thiserror = "2.0"
-tokio = { version = "1.0", default-features = false, features = ["rt", "macros", "time"] }
+tokio = { version = "1.0", default-features = false, features = ["rt", "macros", "time", "sync", "net", "signal"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }

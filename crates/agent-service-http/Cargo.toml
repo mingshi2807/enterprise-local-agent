@@ -1,0 +1,22 @@
+[package]
+name = "agent-service-http"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agent-service.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+agent-core.workspace = true
+agent-harness = { workspace = true, features = ["test-support"] }
+agent-persistence-sqlite.workspace = true
+http-body-util = "0.1"
+tempfile = "3.0"
+tower = { version = "0.5", features = ["util"] }

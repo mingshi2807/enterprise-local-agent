@@ -3,11 +3,11 @@ use std::{sync::Arc, time::SystemTime};
 use agent_core::{
     ActionDigest, ActionProposalId, AgentEvent, AgentEventKind, ApprovalFailureKind,
     ApprovalRequestId, BudgetDimension, CapabilityKind, ContainmentFailureKind,
-    DurableApprovalWaitId, EventSequence, GraphFailureKind, GraphNodeAttemptId, GraphNodeId,
-    GraphNodeKind, GraphProgressEvent, GraphRecoveryMode, GraphTransitionKey, KnowledgeFailureKind,
-    KnowledgeRetrievalId, LoopEventKind, LoopProgressEvent, ModelCallId, ModelRequest,
-    ModelResponse, RunFailureKind, RunOutcome, RunStatus, ToolCall, ToolCallId, ToolName,
-    ToolResult, WorkspaceBindingId,
+    DurableApprovalOutcome, DurableApprovalWaitId, EventSequence, GraphFailureKind,
+    GraphNodeAttemptId, GraphNodeId, GraphNodeKind, GraphProgressEvent, GraphRecoveryMode,
+    GraphTransitionKey, KnowledgeFailureKind, KnowledgeRetrievalId, LoopEventKind,
+    LoopProgressEvent, ModelCallId, ModelRequest, ModelResponse, RunFailureKind, RunOutcome,
+    RunStatus, ToolCall, ToolCallId, ToolName, ToolResult, WorkspaceBindingId,
 };
 use agent_knowledge::{
     EvidenceSet, GroundedModelRequest, KnowledgeError, KnowledgePort, KnowledgeRequest,
@@ -905,6 +905,83 @@ impl ExecutionHarness {
             HarnessOperation::RequestApproval,
             AuditPhase::AfterInvocation,
             OperationEffect::NotInvoked,
+            false,
+        )
+        .await
+    }
+
+    pub async fn record_durable_approval_outcome(
+        &self,
+        key: RunKey,
+        wait_id: DurableApprovalWaitId,
+        expected_row_version: u64,
+        outcome: DurableApprovalOutcome,
+    ) -> Result<(), HarnessError> {
+        let recovered = match self.recover_run(key).await? {
+            RecoveryDisposition::Waiting(recovered) => recovered,
+            _ => return Err(HarnessError::DurableApprovalMismatch),
+        };
+        let waiting = waiting_position(recovered.state(), wait_id)?;
+        self.record_durable_approval_decision(DurableApprovalDecisionCommand {
+            key,
+            wait_id,
+            approval_request_id: waiting.1,
+            action_proposal_id: waiting.2,
+            tool_call_id: waiting.3,
+            action_digest: waiting.4,
+            expected_row_version,
+            outcome,
+        })
+        .await
+    }
+
+    pub async fn abort_durable_waiting(
+        &self,
+        key: RunKey,
+        wait_id: DurableApprovalWaitId,
+        expected_row_version: u64,
+    ) -> Result<(), HarnessError> {
+        let recovered = match self.recover_run(key).await? {
+            RecoveryDisposition::Waiting(recovered) => recovered,
+            _ => return Err(HarnessError::DurableApprovalMismatch),
+        };
+        let (mut context, state, _) = recovered.into_parts();
+        let _ = waiting_position(&state, wait_id)?;
+        let persistence = self
+            .persistence
+            .as_ref()
+            .ok_or(HarnessError::Persistence(PersistencePortError::Unavailable))?;
+        let record = persistence
+            .load_durable_approval_wait(key, wait_id)
+            .await
+            .map_err(HarnessError::Persistence)?;
+        if record.status() != DurableApprovalStatus::Waiting
+            || record.row_version() != expected_row_version
+        {
+            return Err(HarnessError::DurableApprovalMismatch);
+        }
+        context.commit_finished(RunOutcome::Cancelled)?;
+        let event = context.next_event(AgentEventKind::RunFinished {
+            outcome: RunOutcome::Cancelled,
+        })?;
+        let transition = self.transition_for_event(&context, &event, true);
+        persistence
+            .transition_durable_approval_status(&DurableApprovalStatusTransition::new(
+                Some(transition),
+                key,
+                wait_id,
+                expected_row_version,
+                DurableApprovalStatus::Waiting,
+                DurableApprovalStatus::Consumed,
+            ))
+            .await
+            .map_err(HarnessError::Persistence)?;
+        self.audit_already_persisted(
+            &mut context,
+            &event,
+            HarnessOperation::CancelRun,
+            AuditPhase::Lifecycle,
+            OperationEffect::StateCommitted,
             false,
         )
         .await

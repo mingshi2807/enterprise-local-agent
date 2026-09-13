@@ -18,8 +18,8 @@ use agent_harness::{
     ContainedToolPort, ContainmentPortError, DurableApprovalDecisionCommand, DurableApprovalWait,
     DurableCheckpoint, ExecutionHarness, HarnessConfig, LoadedRun, LocalWriteActionCapsuleV1,
     M0ReadOnlyPolicy, M6ApprovalPolicy, ModelPort, PersistenceFuture, PersistencePortError,
-    RecoveryDisposition, RunContext, RunKey, RunPersistencePort, RunRecord, SealedLocalWriteAction,
-    ToolPort, ToolRegistry,
+    RecoveryDisposition, RunContext, RunKey, RunPersistencePort, RunReadPort, RunRecord,
+    SealedLocalWriteAction, ToolPort, ToolRegistry,
     testing::{
         FakeContainedToolPort, FakeModelPort, FakeToolPort, InMemoryAuditSink, ScriptedApprovalPort,
     },
@@ -1545,8 +1545,18 @@ async fn durable_local_write_waits_restarts_previews_and_resumes_once() {
         );
     }
     let (left, right) = tokio::join!(
-        second.record_durable_approval_decision(command),
-        second.record_durable_approval_decision(command),
+        second.record_durable_approval_outcome(
+            key,
+            wait.wait_id(),
+            view.row_version(),
+            DurableApprovalOutcome::Approve,
+        ),
+        second.record_durable_approval_outcome(
+            key,
+            wait.wait_id(),
+            view.row_version(),
+            DurableApprovalOutcome::Approve,
+        ),
     );
     assert_ne!(left.is_ok(), right.is_ok());
     let duplicate = second.record_durable_approval_decision(command).await;
@@ -1780,4 +1790,101 @@ async fn durable_wait_transaction_failure_publishes_neither_wait_nor_suspension(
             event: agent_core::GraphProgressEvent::GraphSuspended { .. }
         }
     )));
+}
+
+#[tokio::test]
+async fn durable_waiting_abort_is_terminal_and_rejects_stale_approval() {
+    let definition = durable_definition();
+    let directory = tempfile::tempdir().expect("directory");
+    let store = Arc::new(
+        agent_persistence_sqlite::SqliteRunPersistence::open(
+            directory.path().join("abort.sqlite3"),
+        )
+        .await
+        .expect("store"),
+    );
+    let sealer: Arc<dyn ActionSealPort> = Arc::new(CountingSeal::new());
+    let workspace = WorkspaceBindingId::new();
+    let tool = Arc::new(DurablePreviewTool::new(durable_tool_definition()));
+    let model = Arc::new(FakeModelPort::scripted(vec![Ok(ModelResponse::new(
+        vec![ModelOutputPart::Text(
+            r#"{"action":{"tool":"workspace_write_file","arguments":{"relative_path":"abort.txt","content":"never-written"}}}"#.to_owned(),
+        )],
+        None,
+    ))]));
+    let harness = durable_harness(
+        model,
+        tool.clone(),
+        store.clone(),
+        sealer,
+        workspace,
+        Arc::new(InMemoryAuditSink::new()),
+    );
+    let key = RunKey::new(RunId::new(), SessionId::new());
+    let mut context = RunContext::new_graph(
+        key.run_id(),
+        key.session_id(),
+        RunBudget::new(1, 1, 0, Duration::from_secs(30))
+            .expect("budget")
+            .with_max_approval_requests(1)
+            .with_max_graph_steps(4)
+            .expect("steps"),
+        DurableProgram::RECOVERY_VERSION,
+        definition.digest(),
+    );
+    harness.start_run(&mut context).await.expect("start");
+    let waiting = crate::GraphEngine::new(&definition)
+        .run(
+            &harness,
+            &mut context,
+            &mut DurableProgram {
+                action_callbacks: Arc::new(AtomicUsize::new(0)),
+            },
+            &mut DurableState::default(),
+        )
+        .await
+        .expect("waiting");
+    let wait = waiting.waiting().expect("wait");
+    let waiting_page = store.list_waiting(None, 8).await.expect("waiting page");
+    assert_eq!(waiting_page.items().len(), 1);
+    assert_eq!(waiting_page.items()[0].wait_id(), wait.wait_id());
+    harness
+        .abort_durable_waiting(key, wait.wait_id(), 0)
+        .await
+        .expect("abort");
+
+    assert!(matches!(
+        harness.recover_run(key).await.expect("recover"),
+        RecoveryDisposition::TerminalFailure {
+            outcome: RunOutcome::Cancelled,
+            ..
+        }
+    ));
+    assert_eq!(tool.invocation_count(), 0);
+    assert!(
+        store
+            .list_waiting(None, 8)
+            .await
+            .expect("waiting page")
+            .items()
+            .is_empty()
+    );
+    assert!(
+        store
+            .load_pending_approval_requests(key)
+            .await
+            .expect("waits")
+            .is_empty()
+    );
+    assert!(
+        harness
+            .record_durable_approval_outcome(
+                key,
+                wait.wait_id(),
+                0,
+                DurableApprovalOutcome::Approve,
+            )
+            .await
+            .is_err()
+    );
 }
