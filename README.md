@@ -193,6 +193,59 @@ cannot misbehave. M11 provides no HTTP MCP transport, retry/reconnect loop,
 dynamic installation, output-schema support, or control over independently
 daemonized descendants.
 
+## M12 agent service API
+
+M12 adds a provider-neutral application boundary for local clients:
+
+```text
+client
+  -> agent-service-http
+  -> agent-service
+  -> trusted graph or loop workflow
+  -> ExecutionHarness
+```
+
+`agent-service` provides session creation, idempotent run start, status and
+event reads, active-run cancellation, durable Waiting discovery and preview,
+Approve/Deny submission, explicit resume, and durable Waiting abort. A trusted
+server-side `WorkflowId` selects a fixed composition. Clients cannot choose a
+model, tool, MCP server, endpoint, policy, approval implementation, or
+containment adapter.
+
+The passive `RunReadPort` exposes bounded run summaries, verified event pages,
+and Waiting records without exposing SQLite or granting mutation authority.
+`ServiceEventV1` is a stable metadata-only projection rather than a serialized
+`AgentEvent`; it contains no prompts, arguments, evidence, tool results,
+approval previews, capsules, ciphertext, credentials, or audit internals.
+
+M12 transport is HTTP/JSON plus SSE. The daemon listens on a mode-0600 Unix
+socket by default. Optional TCP is restricted to loopback and requires bearer
+authentication plus exact Host and Origin allowlists; wildcard CORS and
+non-loopback listeners are rejected. Request bodies, run inputs, active runs,
+concurrent commands, event pages, and SSE connections are bounded. SSE uses
+`EventSequence` as its cursor, reads durable catch-up pages before polling for
+new events, and disconnects slow clients instead of blocking runtime execution.
+A client disconnect never cancels a run.
+
+`RunSupervisor` permits one active run per session, reserves capacity before
+spawn, and uses deterministic run IDs derived from a client start-request ID so
+transport retries cannot create a second run. Startup acquires exclusive data-
+directory ownership, discovers durable runs without invoking external ports or
+decrypting capsules, and exposes their exact M7/M10 recovery dispositions.
+
+Approval clients submit only the wait ID, expected row version, and Approve or
+Deny. The harness loads and verifies all M10 security bindings internally.
+Aborting a Waiting run atomically terminalizes it as Cancelled, consumes the
+wait, executes zero tools, and causes later stale decisions to fail closed.
+Persistence remains separate from required M6 audit.
+
+The initial daemon registers only the fixed `service-health` workflow; reviewed
+production graph/loop compositions remain deployment work. The service and
+lower M10 layers are tested independently, but the complete HTTP Waiting ->
+Approve -> resume -> real contained LocalWrite path is not yet transport-level
+certified. Future ACP and Tauri/IDE adapters must reuse `agent-service` and may
+not acquire runtime authority.
+
 ## Deterministic demonstration
 
 The default CLI path is network-free. It uses `RigModelAdapter<FakeRigModel>`

@@ -17,6 +17,7 @@
 - [M9 Deterministic Graph Engine PoC](m9-deterministic-graph-engine-poc.md) — # M9 Deterministic Graph Engine PoC
 - [M10 Durable Graph Pause Resume and HITL](m10-durable-graph-pause-resume-hitl.md) — # M10 Durable Graph Pause Resume and HITL
 - [M11 Governed MCP Integration](m11-governed-mcp-integration.md) — # M11 Governed MCP Integration
+- [M12 Agent Service API and Client Boundary](m12-agent-service-api.md) — # M12 Agent Service API and Client Boundary
 
 ## reference
 

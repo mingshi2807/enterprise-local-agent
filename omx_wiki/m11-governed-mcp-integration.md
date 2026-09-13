@@ -4,7 +4,7 @@ tags: ["m11", "mcp", "tools", "governance", "stdio", "recovery"]
 created: 2026-09-13
 updated: 2026-09-13
 sources: ["crates/agent-mcp-adapters/src/lib.rs", "crates/agent-mcp-adapters/tests/stdio.rs", "crates/agent-harness/src/ports.rs", "crates/agent-harness/src/registry.rs", "crates/agent-harness/src/execution.rs"]
-links: ["enterprise-local-agent-milestone-index.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m7-durable-event-persistence-and-recovery.md", "m8-enterprise-knowledge-integration.md", "m10-durable-graph-pause-resume-hitl.md"]
+links: ["enterprise-local-agent-milestone-index.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m7-durable-event-persistence-and-recovery.md", "m8-enterprise-knowledge-integration.md", "m10-durable-graph-pause-resume-hitl.md", "m12-agent-service-api.md"]
 category: architecture
 confidence: high
 schemaVersion: 1
