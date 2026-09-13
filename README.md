@@ -151,6 +151,48 @@ crashes before graph continuation is never repeated; if required transient
 state was lost, recovery remains manual/non-resumable. No exactly-once or
 audit/SQLite cross-system transaction guarantee is claimed.
 
+## M11 governed MCP integration
+
+M11 adds `agent-mcp-adapters` for governed executable MCP tools. MCP remains
+transport and discovery only. Trusted configuration fixes the server ID,
+absolute executable, argv, explicit environment, allowlisted remote tool,
+trusted local name and description, capability, and expected definition
+fingerprint. Model output cannot select an MCP server, endpoint, executable, or
+operation.
+
+M11 supports only bounded newline-delimited UTF-8 JSON-RPC over stdio and pins
+MCP revision `2025-06-18`, which was negotiated by both configured enterprise
+servers during implementation. Discovery performs bounded `tools/list`
+pagination, validates the exact allowlist and existing M5 schema profile, and
+compares a deterministic SHA-256 definition fingerprint. Every invocation uses
+a fresh process and repeats the protocol, definition, and fingerprint checks
+before `tools/call`; definition drift dispatches no remote tool call.
+
+Executable MCP operations still follow `ToolDefinition -> ActionProposal ->
+ValidatedAction -> ExecutionHarness -> policy/budget/audit -> ManagedToolPort`.
+Only trusted-configured ReadOnly tools can dispatch. MCP LocalWrite cannot call
+the server and remains containment-unavailable; ExternalWrite and Privileged
+remain denied. Existing M8 knowledge retrieval and M6/M6.1 LocalWrite
+governance are unchanged.
+
+`ManagedToolInvocation` gives the harness explicit process lifecycle ownership.
+The harness durably records `ToolInvocationStarted` before spawning the managed
+invocation, and cancellation or deadline terminates and reaps its process group.
+An unresolved call recovers as `ManualReconciliationRequired`; replay performs
+no MCP spawn, discovery, or invocation.
+
+M11 accepts bounded text and structured JSON results. MCP `isError` maps to a
+domain failure, while protocol, process, framing, correlation, timeout, and
+drift failures remain sanitized infrastructure failures. Rich content and tools
+advertising `outputSchema` are rejected in this milestone. No result content is
+stored in AgentEvent or audit records.
+
+A configured MCP executable is trusted infrastructure. ReadOnly mapping limits
+what the runtime requests but does not sandbox the executable or prove it
+cannot misbehave. M11 provides no HTTP MCP transport, retry/reconnect loop,
+dynamic installation, output-schema support, or control over independently
+daemonized descendants.
+
 ## Deterministic demonstration
 
 The default CLI path is network-free. It uses `RigModelAdapter<FakeRigModel>`
@@ -208,4 +250,6 @@ structured output, model fallback, native provider tool calls, provider-driven
 tool execution, enterprise identity, or durable approval. M10 adds durable
 approval only for its explicitly configured `workspace_write_file` graph node;
 it is not a generic approval queue or workflow engine. M6.1 containment remains
-Linux-only and is not an arbitrary tool sandbox.
+Linux-only and is not an arbitrary tool sandbox. M11 enables only configured
+ReadOnly MCP tool requests and does not make MCP a policy, approval,
+containment, or execution authority.

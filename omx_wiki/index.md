@@ -1,6 +1,6 @@
 # Wiki Index
 
-> 13 pages | Last updated: 2026-09-13
+> 14 pages | Last updated: 2026-09-13
 
 ## architecture
 
@@ -16,6 +16,7 @@
 - [M8 Enterprise Knowledge Integration](m8-enterprise-knowledge-integration.md) — # M8 Enterprise Knowledge Integration
 - [M9 Deterministic Graph Engine PoC](m9-deterministic-graph-engine-poc.md) — # M9 Deterministic Graph Engine PoC
 - [M10 Durable Graph Pause Resume and HITL](m10-durable-graph-pause-resume-hitl.md) — # M10 Durable Graph Pause Resume and HITL
+- [M11 Governed MCP Integration](m11-governed-mcp-integration.md) — # M11 Governed MCP Integration
 
 ## reference
 

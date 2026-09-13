@@ -4,7 +4,7 @@ tags: ["enterprise-local-agent", "milestones", "roadmap", "index"]
 created: 2026-08-15T13:34:09.996Z
 updated: 2026-09-13
 sources: ["docs/proposal/proposal.md", "docs/reports/reports_impl.md", "git history"]
-links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m6-1-production-linux-localwrite-containment.md", "m7-durable-event-persistence-and-recovery.md", "m8-enterprise-knowledge-integration.md", "m9-deterministic-graph-engine-poc.md", "m10-durable-graph-pause-resume-hitl.md"]
+links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m6-1-production-linux-localwrite-containment.md", "m7-durable-event-persistence-and-recovery.md", "m8-enterprise-knowledge-integration.md", "m9-deterministic-graph-engine-poc.md", "m10-durable-graph-pause-resume-hitl.md", "m11-governed-mcp-integration.md"]
 category: reference
 confidence: high
 schemaVersion: 1
@@ -28,6 +28,7 @@ This is the durable navigation page for architectural milestones. Git and the im
 | M8 Enterprise Knowledge Integration | Completed | `m8-enterprise-knowledge` | [[m8-enterprise-knowledge-integration]] |
 | M9 Deterministic Graph Engine PoC | Implemented and verified, uncommitted | Not tagged | [[m9-deterministic-graph-engine-poc]] |
 | M10 Durable Graph Pause Resume and HITL | Implemented, verified, and Linux containment-certified, uncommitted | Not tagged | [[m10-durable-graph-pause-resume-hitl]] |
+| M11 Governed MCP Integration | Implemented, verified, and committed | Not tagged | [[m11-governed-mcp-integration]] |
 
 ## Stable architecture
 
@@ -36,6 +37,11 @@ Client -> Deterministic Loop or Graph Engine -> Enterprise Harness -> Model / To
 M10 adds trusted durable graph suspension for bounded LocalWrite approval. The
 encrypted capsule adapter and SQLite wait storage remain behind harness-owned
 ports; explicit resume returns through the existing M6/M6.1 execution path.
+
+M11 adds pinned, allowlisted stdio MCP discovery and ReadOnly invocation behind
+`ManagedToolPort`. MCP remains transport only: every executable call still
+passes through M5 validation and harness-owned policy, budgets, audit, durable
+start recording, cancellation, and terminal correlation.
 
 Provider and framework types remain outside agent-core, agent-harness, agent-loop,
 and agent-graph. ExecutionHarness remains the authority for lifecycle, budgets,
