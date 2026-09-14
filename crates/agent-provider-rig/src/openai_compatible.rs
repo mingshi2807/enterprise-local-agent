@@ -1,7 +1,10 @@
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 
-use agent_harness::ModelPort;
+use agent_core::{ModelOutputPart, ModelRequest, ModelResponse, ModelRole, TokenUsage};
+use agent_harness::{ModelPort, ModelPortError, PortFuture};
+use reqwest::{Client, StatusCode, redirect::Policy};
 use rig_core::{client::CompletionClient, providers::openai::CompletionsClient};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::{Host, Url};
 
@@ -20,6 +23,7 @@ const MAX_PROVIDER_LABEL_LEN: usize = 64;
 /// let credential = BearerCredential::new("secret").unwrap();
 /// let _ = rig_core::serde_json::to_string(&credential);
 /// ```
+#[derive(Clone)]
 pub struct BearerCredential(String);
 
 impl BearerCredential {
@@ -79,11 +83,27 @@ pub enum ProviderLabelError {
     Invalid,
 }
 
+#[derive(Clone)]
 pub struct OpenAiCompatibleConfig {
     base_url: Url,
     model_identifier: String,
-    credential: BearerCredential,
+    auth: OpenAiCompatibleAuth,
     provider_label: Option<ProviderLabel>,
+}
+
+#[derive(Clone)]
+pub enum OpenAiCompatibleAuth {
+    Bearer(BearerCredential),
+    NoAuthLoopback,
+}
+
+impl fmt::Debug for OpenAiCompatibleAuth {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bearer(_) => formatter.write_str("Bearer(<redacted>)"),
+            Self::NoAuthLoopback => formatter.write_str("NoAuthLoopback"),
+        }
+    }
 }
 
 impl OpenAiCompatibleConfig {
@@ -105,9 +125,26 @@ impl OpenAiCompatibleConfig {
         Ok(Self {
             base_url,
             model_identifier,
-            credential,
+            auth: OpenAiCompatibleAuth::Bearer(credential),
             provider_label: None,
         })
+    }
+
+    pub fn new_no_auth_loopback(
+        base_url: impl AsRef<str>,
+        model_identifier: impl Into<String>,
+    ) -> Result<Self, OpenAiCompatibleConfigError> {
+        let mut config = Self::new(
+            base_url,
+            model_identifier,
+            BearerCredential::new("unused-no-auth-marker")
+                .map_err(|_| OpenAiCompatibleConfigError::InvalidAuth)?,
+        )?;
+        if !is_loopback(&config.base_url) {
+            return Err(OpenAiCompatibleConfigError::NoAuthRequiresLoopback);
+        }
+        config.auth = OpenAiCompatibleAuth::NoAuthLoopback;
+        Ok(config)
     }
 
     #[must_use]
@@ -119,6 +156,11 @@ impl OpenAiCompatibleConfig {
     #[must_use]
     pub fn provider_label(&self) -> Option<&ProviderLabel> {
         self.provider_label.as_ref()
+    }
+
+    #[must_use]
+    pub const fn auth(&self) -> &OpenAiCompatibleAuth {
+        &self.auth
     }
 }
 
@@ -142,6 +184,10 @@ pub enum OpenAiCompatibleConfigError {
     InsecureRemoteHttp,
     #[error("OpenAI-compatible model identifier is invalid")]
     InvalidModelIdentifier,
+    #[error("OpenAI-compatible authentication mode is invalid")]
+    InvalidAuth,
+    #[error("no-auth OpenAI-compatible access is allowed only on loopback")]
+    NoAuthRequiresLoopback,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -156,18 +202,204 @@ pub fn build_openai_compatible_model_port(
     let OpenAiCompatibleConfig {
         base_url,
         model_identifier,
-        credential,
+        auth,
         provider_label: _,
     } = config;
 
-    let client = CompletionsClient::builder()
-        .api_key(credential.into_inner())
-        .base_url(base_url.as_str())
-        .build()
-        .map_err(|_| OpenAiCompatibleBuildError::ClientConstructionFailed)?;
-    let model = client.completion_model(model_identifier);
+    match auth {
+        OpenAiCompatibleAuth::Bearer(credential) => {
+            let client = CompletionsClient::builder()
+                .api_key(credential.into_inner())
+                .base_url(base_url.as_str())
+                .build()
+                .map_err(|_| OpenAiCompatibleBuildError::ClientConstructionFailed)?;
+            Ok(Arc::new(RigModelAdapter::new(
+                client.completion_model(model_identifier),
+            )))
+        }
+        OpenAiCompatibleAuth::NoAuthLoopback => {
+            let endpoint = endpoint(&base_url, "chat/completions");
+            let client = Client::builder()
+                .redirect(Policy::none())
+                .timeout(Duration::from_secs(60))
+                .build()
+                .map_err(|_| OpenAiCompatibleBuildError::ClientConstructionFailed)?;
+            Ok(Arc::new(NoAuthOpenAiModel {
+                client,
+                endpoint,
+                model_identifier,
+            }))
+        }
+    }
+}
 
-    Ok(Arc::new(RigModelAdapter::new(model)))
+pub async fn probe_openai_compatible(
+    config: &OpenAiCompatibleConfig,
+) -> Result<(), OpenAiCompatibleReadinessError> {
+    let endpoint = endpoint(&config.base_url, "models");
+    let client = Client::builder()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| OpenAiCompatibleReadinessError)?;
+    let mut request = client
+        .get(endpoint)
+        .header(reqwest::header::CONTENT_LENGTH, "0");
+    if let OpenAiCompatibleAuth::Bearer(credential) = &config.auth {
+        request = request.bearer_auth(&credential.0);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|_| OpenAiCompatibleReadinessError)?;
+    if response.status() != StatusCode::OK
+        || response
+            .content_length()
+            .is_some_and(|length| length > 64 * 1024)
+    {
+        return Err(OpenAiCompatibleReadinessError);
+    }
+    let body = response
+        .bytes()
+        .await
+        .map_err(|_| OpenAiCompatibleReadinessError)?;
+    if body.len() > 64 * 1024 {
+        return Err(OpenAiCompatibleReadinessError);
+    }
+    let value: ApiModels =
+        serde_json::from_slice(&body).map_err(|_| OpenAiCompatibleReadinessError)?;
+    if !value
+        .data
+        .iter()
+        .any(|model| model.id == config.model_identifier)
+    {
+        return Err(OpenAiCompatibleReadinessError);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[error("OpenAI-compatible readiness probe failed")]
+pub struct OpenAiCompatibleReadinessError;
+
+struct NoAuthOpenAiModel {
+    client: Client,
+    endpoint: Url,
+    model_identifier: String,
+}
+
+impl ModelPort for NoAuthOpenAiModel {
+    fn invoke<'a>(
+        &'a self,
+        request: ModelRequest,
+    ) -> PortFuture<'a, Result<ModelResponse, ModelPortError>> {
+        Box::pin(async move {
+            let messages = request
+                .messages()
+                .iter()
+                .map(|message| ApiMessage {
+                    role: match message.role() {
+                        ModelRole::System => "system",
+                        ModelRole::User => "user",
+                        ModelRole::Assistant => "assistant",
+                    },
+                    content: message.content(),
+                })
+                .collect();
+            let response = self
+                .client
+                .post(self.endpoint.clone())
+                .json(&ApiRequest {
+                    model: &self.model_identifier,
+                    messages,
+                })
+                .send()
+                .await
+                .map_err(|_| ModelPortError::Unavailable)?;
+            if matches!(
+                response.status(),
+                StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+            ) || response.status().is_server_error()
+            {
+                return Err(ModelPortError::Unavailable);
+            }
+            if response.status().is_client_error() {
+                return Err(ModelPortError::Rejected);
+            }
+            if response.status() != StatusCode::OK
+                || response
+                    .content_length()
+                    .is_some_and(|length| length > 64 * 1024)
+            {
+                return Err(ModelPortError::Failed);
+            }
+            let bytes = response.bytes().await.map_err(|_| ModelPortError::Failed)?;
+            if bytes.len() > 64 * 1024 {
+                return Err(ModelPortError::Failed);
+            }
+            let payload: ApiResponse =
+                serde_json::from_slice(&bytes).map_err(|_| ModelPortError::Failed)?;
+            if payload.choices.len() != 1 {
+                return Err(ModelPortError::Failed);
+            }
+            let content = payload
+                .choices
+                .into_iter()
+                .next()
+                .map(|choice| choice.message.content)
+                .ok_or(ModelPortError::Failed)?;
+            Ok(ModelResponse::new(
+                vec![ModelOutputPart::Text(content)],
+                payload
+                    .usage
+                    .map(|usage| TokenUsage::new(usage.prompt_tokens, usage.completion_tokens)),
+            ))
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct ApiRequest<'a> {
+    model: &'a str,
+    messages: Vec<ApiMessage<'a>>,
+}
+#[derive(Serialize)]
+struct ApiMessage<'a> {
+    role: &'static str,
+    content: &'a str,
+}
+#[derive(Deserialize)]
+struct ApiResponse {
+    choices: Vec<ApiChoice>,
+    usage: Option<ApiUsage>,
+}
+#[derive(Deserialize)]
+struct ApiChoice {
+    message: ApiResponseMessage,
+}
+#[derive(Deserialize)]
+struct ApiResponseMessage {
+    content: String,
+}
+#[derive(Deserialize)]
+struct ApiUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+}
+#[derive(Deserialize)]
+struct ApiModels {
+    data: Vec<ApiModel>,
+}
+#[derive(Deserialize)]
+struct ApiModel {
+    id: String,
+}
+
+fn endpoint(base: &Url, suffix: &str) -> Url {
+    let mut endpoint = base.clone();
+    let path = format!("{}/{}", base.path().trim_end_matches('/'), suffix);
+    endpoint.set_path(&path);
+    endpoint
 }
 
 fn validate_endpoint(base_url: &Url) -> Result<(), OpenAiCompatibleConfigError> {
@@ -283,6 +515,27 @@ mod tests {
                 Some(OpenAiCompatibleConfigError::InsecureRemoteHttp)
             );
         }
+    }
+
+    #[test]
+    fn no_auth_is_explicit_and_loopback_only() {
+        let config = OpenAiCompatibleConfig::new_no_auth_loopback(
+            "http://127.0.0.1:8000/v1",
+            "opaque-model",
+        )
+        .expect("loopback no-auth must be accepted");
+        assert!(matches!(
+            config.auth(),
+            OpenAiCompatibleAuth::NoAuthLoopback
+        ));
+        assert_eq!(
+            OpenAiCompatibleConfig::new_no_auth_loopback(
+                "https://gateway.internal.example/v1",
+                "opaque-model",
+            )
+            .err(),
+            Some(OpenAiCompatibleConfigError::NoAuthRequiresLoopback)
+        );
     }
 
     #[test]

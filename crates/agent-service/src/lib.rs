@@ -4,6 +4,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::Arc,
+    time::Instant,
 };
 
 use agent_core::{AgentEvent, AgentEventKind, DurableApprovalOutcome, RunOutcome};
@@ -25,7 +26,11 @@ pub const MAX_RUN_INPUT_BYTES: usize = 8 * 1024;
 pub const MAX_ACTIVE_RUNS: usize = 32;
 pub const MAX_SESSIONS: usize = 256;
 pub const MAX_COMMAND_QUEUE: usize = 32;
-pub const SERVICE_EVENT_VERSION: u16 = 1;
+pub const MAX_APPLICATION_RESULTS: usize = 256;
+pub const MAX_FINAL_ANSWER_BYTES: usize = 8 * 1024;
+pub const MAX_RESULT_CITATIONS: usize = 8;
+pub const MAX_CITATION_FIELD_BYTES: usize = 512;
+pub const SERVICE_EVENT_VERSION: u16 = 2;
 
 pub type ServiceFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -103,6 +108,96 @@ pub struct RunView {
     pub disposition: RunDispositionV1,
     pub last_sequence: Option<u64>,
     pub outcome: Option<RunOutcomeV1>,
+    pub workflow_id: Option<WorkflowId>,
+    pub result: Option<ApplicationResultV1>,
+    pub duration_millis: Option<u64>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationCitationV1 {
+    pub evidence_id: String,
+    pub backend: agent_core::KnowledgeBackendId,
+    pub source_id: String,
+    pub reference_id: String,
+    pub provenance: Option<String>,
+}
+
+impl fmt::Debug for ApplicationCitationV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ApplicationCitationV1")
+            .field("evidence_id", &self.evidence_id)
+            .field("backend", &self.backend)
+            .field("content", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum ApplicationResultV1 {
+    FinalAnswer {
+        answer: String,
+        citations: Vec<ApplicationCitationV1>,
+    },
+    LocalWriteCompleted {
+        tool_call_id: agent_core::ToolCallId,
+    },
+    ApprovalDenied,
+}
+
+impl fmt::Debug for ApplicationResultV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FinalAnswer { answer, citations } => formatter
+                .debug_struct("ApplicationResultV1::FinalAnswer")
+                .field("answer_bytes", &answer.len())
+                .field("citation_count", &citations.len())
+                .field("content", &"[REDACTED]")
+                .finish(),
+            Self::LocalWriteCompleted { tool_call_id } => formatter
+                .debug_struct("ApplicationResultV1::LocalWriteCompleted")
+                .field("tool_call_id", tool_call_id)
+                .finish(),
+            Self::ApprovalDenied => formatter.write_str("ApplicationResultV1::ApprovalDenied"),
+        }
+    }
+}
+
+impl ApplicationResultV1 {
+    pub fn final_answer(
+        answer: String,
+        citations: Vec<ApplicationCitationV1>,
+    ) -> Result<Self, ServiceError> {
+        if answer.is_empty()
+            || answer.len() > MAX_FINAL_ANSWER_BYTES
+            || citations.len() > MAX_RESULT_CITATIONS
+            || citations.iter().any(|citation| {
+                [
+                    citation.evidence_id.as_str(),
+                    citation.source_id.as_str(),
+                    citation.reference_id.as_str(),
+                ]
+                .into_iter()
+                .chain(citation.provenance.as_deref())
+                .any(|value| {
+                    value.is_empty()
+                        || value.len() > MAX_CITATION_FIELD_BYTES
+                        || value.chars().any(char::is_control)
+                })
+            })
+        {
+            return Err(ServiceError::InvalidRequest);
+        }
+        Ok(Self::FinalAnswer { answer, citations })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkflowCompletion {
+    NoApplicationResult,
+    ApplicationResult(ApplicationResultV1),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,24 +246,27 @@ pub struct ApprovalPreviewV1 {
 pub trait ConfiguredWorkflow: Send + Sync {
     fn id(&self) -> &WorkflowId;
     fn recovery_contract(&self) -> RecoveryContract;
+    fn validate_input(&self, _input: &RunInput) -> Result<(), WorkflowError> {
+        Ok(())
+    }
     fn new_context(&self, key: RunKey) -> RunContext;
     fn run(
         self: Arc<Self>,
         harness: Arc<ExecutionHarness>,
         context: RunContext,
         input: RunInput,
-    ) -> ServiceFuture<'static, Result<(), WorkflowError>>;
+    ) -> ServiceFuture<'static, Result<WorkflowCompletion, WorkflowError>>;
     fn resume_waiting(
         self: Arc<Self>,
         harness: Arc<ExecutionHarness>,
         recovered: RecoveredWaitingRun,
         wait_id: DurableApprovalWaitId,
-    ) -> ServiceFuture<'static, Result<(), WorkflowError>>;
+    ) -> ServiceFuture<'static, Result<WorkflowCompletion, WorkflowError>>;
     fn resume_recovered(
         self: Arc<Self>,
         _harness: Arc<ExecutionHarness>,
         _recovered: RecoveredRun,
-    ) -> ServiceFuture<'static, Result<(), WorkflowError>> {
+    ) -> ServiceFuture<'static, Result<WorkflowCompletion, WorkflowError>> {
         Box::pin(async { Err(WorkflowError::NotRestartable) })
     }
 }
@@ -185,6 +283,14 @@ struct ActiveRun {
     key: RunKey,
     disposition: RunDispositionV1,
     cancellation: Option<RunCancellationHandle>,
+    workflow_id: WorkflowId,
+    started_at: Instant,
+}
+
+#[derive(Clone)]
+struct StoredApplicationResult {
+    result: ApplicationResultV1,
+    duration_millis: u64,
 }
 
 pub struct AgentService {
@@ -194,6 +300,7 @@ pub struct AgentService {
     recovery_workflows: Vec<(RecoveryContract, WorkflowId)>,
     sessions: Mutex<HashSet<SessionId>>,
     active: Mutex<HashMap<SessionId, ActiveRun>>,
+    results: Mutex<HashMap<RunKey, StoredApplicationResult>>,
 }
 
 impl AgentService {
@@ -225,6 +332,7 @@ impl AgentService {
             recovery_workflows: by_recovery,
             sessions: Mutex::new(HashSet::new()),
             active: Mutex::new(HashMap::new()),
+            results: Mutex::new(HashMap::new()),
         })
     }
 
@@ -254,6 +362,9 @@ impl AgentService {
             .get(workflow_id)
             .cloned()
             .ok_or(ServiceError::WorkflowUnavailable)?;
+        workflow
+            .validate_input(&input)
+            .map_err(|_| ServiceError::InvalidRequest)?;
         let key = RunKey::new(derive_run_id(session_id, start_request_id), session_id);
         {
             let mut active = self.active.lock().await;
@@ -272,18 +383,18 @@ impl AgentService {
                     key,
                     disposition: RunDispositionV1::Starting,
                     cancellation: None,
+                    workflow_id: workflow_id.clone(),
+                    started_at: Instant::now(),
                 },
             );
         }
 
         match self.read.find_run(key).await {
             Ok(Some(_)) => {
-                let result = self
-                    .harness
-                    .recover_run(key)
-                    .await
-                    .map_err(ServiceError::from)
-                    .and_then(disposition_view);
+                let result = match self.harness.recover_run(key).await {
+                    Ok(disposition) => self.view_for_disposition(disposition).await,
+                    Err(error) => Err(ServiceError::from(error)),
+                };
                 self.active.lock().await.remove(&session_id);
                 return result;
             }
@@ -311,7 +422,11 @@ impl AgentService {
         let service = self.clone();
         let harness = self.harness.clone();
         tokio::spawn(async move {
-            let _ = workflow.run(harness, context, input).await;
+            if let Ok(WorkflowCompletion::ApplicationResult(result)) =
+                workflow.run(harness, context, input).await
+            {
+                service.store_result(key, result).await;
+            }
             service.active.lock().await.remove(&session_id);
         });
         Ok(RunView {
@@ -320,6 +435,9 @@ impl AgentService {
             disposition: RunDispositionV1::Running,
             last_sequence: Some(0),
             outcome: None,
+            workflow_id: Some(workflow_id.clone()),
+            result: None,
+            duration_millis: None,
         })
     }
 
@@ -329,7 +447,8 @@ impl AgentService {
         {
             return Ok(active_view(active));
         }
-        disposition_view(self.harness.recover_run(key).await?)
+        self.view_for_disposition(self.harness.recover_run(key).await?)
+            .await
     }
 
     pub async fn cancel_active_run(&self, key: RunKey) -> Result<(), ServiceError> {
@@ -352,15 +471,20 @@ impl AgentService {
         key: RunKey,
         after: Option<EventSequence>,
         limit: u16,
-    ) -> Result<Vec<ServiceEventV1>, ServiceError> {
+    ) -> Result<Vec<ServiceEventV2>, ServiceError> {
         validate_read_limit(limit)?;
+        let workflow_id = self.read.find_run(key).await?.and_then(|run| {
+            self.recovery_workflows.iter().find_map(|(contract, id)| {
+                (*contract == run.recovery_contract()).then_some(id.clone())
+            })
+        });
         Ok(self
             .read
             .read_events(key, after, limit)
             .await?
             .events()
             .iter()
-            .map(ServiceEventV1::from)
+            .map(|event| ServiceEventV2::new(event, workflow_id.clone()))
             .collect())
     }
 
@@ -479,26 +603,60 @@ impl AgentService {
                     key,
                     disposition: RunDispositionV1::Running,
                     cancellation: Some(cancellation),
+                    workflow_id: workflow_id.clone(),
+                    started_at: Instant::now(),
                 },
             );
         }
         let service = self.clone();
         let harness = self.harness.clone();
         tokio::spawn(async move {
-            match disposition {
+            let completion = match disposition {
                 RecoveryDisposition::Waiting(recovered) => {
                     if let Some(wait_id) = wait_id {
-                        let _ = workflow.resume_waiting(harness, *recovered, wait_id).await;
+                        workflow
+                            .resume_waiting(harness, *recovered, wait_id)
+                            .await
+                            .ok()
+                    } else {
+                        None
                     }
                 }
                 RecoveryDisposition::Resumable(recovered) => {
-                    let _ = workflow.resume_recovered(harness, *recovered).await;
+                    workflow.resume_recovered(harness, *recovered).await.ok()
                 }
-                _ => {}
+                _ => None,
+            };
+            if let Some(WorkflowCompletion::ApplicationResult(result)) = completion {
+                service.store_result(key, result).await;
             }
             service.active.lock().await.remove(&key.session_id());
         });
         Ok(())
+    }
+
+    async fn store_result(&self, key: RunKey, result: ApplicationResultV1) {
+        let duration_millis = self
+            .active
+            .lock()
+            .await
+            .get(&key.session_id())
+            .filter(|active| active.key == key)
+            .map(|active| {
+                u64::try_from(active.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+            })
+            .unwrap_or_default();
+        let mut results = self.results.lock().await;
+        if results.len() >= MAX_APPLICATION_RESULTS && !results.contains_key(&key) {
+            results.clear();
+        }
+        results.insert(
+            key,
+            StoredApplicationResult {
+                result,
+                duration_millis,
+            },
+        );
     }
 
     pub async fn discover_runs(&self) -> Result<Vec<RunView>, ServiceError> {
@@ -507,7 +665,9 @@ impl AgentService {
         loop {
             let page = self.read.list_runs(cursor, 256).await?;
             for item in page.items() {
-                let view = disposition_view(self.harness.recover_run(item.key()).await?)?;
+                let view = self
+                    .view_for_disposition(self.harness.recover_run(item.key()).await?)
+                    .await?;
                 self.sessions.lock().await.insert(view.session_id);
                 result.push(view);
             }
@@ -520,6 +680,42 @@ impl AgentService {
             }
         }
         Ok(result)
+    }
+
+    async fn view_for_disposition(
+        &self,
+        disposition: RecoveryDisposition,
+    ) -> Result<RunView, ServiceError> {
+        let contract = recovery_contract(&disposition);
+        let mut view = disposition_view(disposition)?;
+        view.workflow_id = contract.and_then(|contract| {
+            self.recovery_workflows
+                .iter()
+                .find_map(|(candidate, id)| (*candidate == contract).then_some(id.clone()))
+        });
+        if let Some(stored) = self
+            .results
+            .lock()
+            .await
+            .get(&RunKey::new(view.run_id, view.session_id))
+            .cloned()
+        {
+            view.result = Some(stored.result);
+            view.duration_millis = Some(stored.duration_millis);
+        }
+        Ok(view)
+    }
+}
+
+fn recovery_contract(disposition: &RecoveryDisposition) -> Option<RecoveryContract> {
+    match disposition {
+        RecoveryDisposition::Completed { state }
+        | RecoveryDisposition::TerminalFailure { state, .. }
+        | RecoveryDisposition::ManualReconciliationRequired { state, .. } => {
+            Some(state.recovery_contract())
+        }
+        RecoveryDisposition::Resumable(run) => Some(run.recovery_contract()),
+        RecoveryDisposition::Waiting(run) => Some(run.recovery_contract()),
     }
 }
 
@@ -550,6 +746,9 @@ fn active_view(active: &ActiveRun) -> RunView {
         disposition: active.disposition,
         last_sequence: None,
         outcome: None,
+        workflow_id: Some(active.workflow_id.clone()),
+        result: None,
+        duration_millis: None,
     }
 }
 
@@ -579,6 +778,9 @@ fn disposition_view(disposition: RecoveryDisposition) -> Result<RunView, Service
         disposition: kind,
         last_sequence: state.last_sequence().map(EventSequence::get),
         outcome,
+        workflow_id: None,
+        result: None,
+        duration_millis: None,
     })
 }
 
@@ -640,19 +842,27 @@ pub enum ServiceEventPhaseV1 {
     Finished,
 }
 
+pub type ServiceEventCategoryV2 = ServiceEventCategoryV1;
+pub type ServiceEventPhaseV2 = ServiceEventPhaseV1;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ServiceEventV1 {
+pub struct ServiceEventV2 {
     pub version: u16,
     pub sequence: u64,
     pub run_id: RunId,
     pub category: ServiceEventCategoryV1,
     pub phase: ServiceEventPhaseV1,
     pub correlation_id: Option<String>,
+    pub workflow_id: Option<WorkflowId>,
+    pub knowledge_backends: Vec<agent_core::KnowledgeBackendId>,
+    pub graph_node_id: Option<agent_core::GraphNodeId>,
+    pub budget_usage: Option<u32>,
+    pub budget_limit: Option<u32>,
 }
 
-impl From<&AgentEvent> for ServiceEventV1 {
-    fn from(event: &AgentEvent) -> Self {
+impl ServiceEventV2 {
+    fn new(event: &AgentEvent, workflow_id: Option<WorkflowId>) -> Self {
         use ServiceEventCategoryV1 as C;
         use ServiceEventPhaseV1 as P;
         let (category, phase, id) = match event.kind() {
@@ -774,6 +984,42 @@ impl From<&AgentEvent> for ServiceEventV1 {
                 }
             }
         };
+        let knowledge_backends = match event.kind() {
+            AgentEventKind::KnowledgeRetrievalStarted { route, .. }
+            | AgentEventKind::KnowledgeRetrievalRestarted { route, .. } => {
+                route.backends().to_vec()
+            }
+            _ => Vec::new(),
+        };
+        let graph_node_id = match event.kind() {
+            AgentEventKind::Graph { event } => match event {
+                agent_core::GraphProgressEvent::GraphStarted { start_node, .. } => {
+                    Some(start_node.clone())
+                }
+                agent_core::GraphProgressEvent::GraphNodeEntered { node_id, .. }
+                | agent_core::GraphProgressEvent::GraphNodeRestarted { node_id, .. }
+                | agent_core::GraphProgressEvent::GraphNodeCompleted { node_id, .. }
+                | agent_core::GraphProgressEvent::GraphSuspended { node_id, .. }
+                | agent_core::GraphProgressEvent::GraphResumed { node_id, .. }
+                | agent_core::GraphProgressEvent::GraphCompleted { node_id, .. }
+                | agent_core::GraphProgressEvent::GraphFailed { node_id, .. } => {
+                    Some(node_id.clone())
+                }
+            },
+            _ => None,
+        };
+        let (budget_usage, budget_limit) = match event.kind() {
+            AgentEventKind::ModelInvocationStarted { usage, limit, .. }
+            | AgentEventKind::ToolInvocationStarted { usage, limit, .. } => {
+                (Some(*usage), Some(*limit))
+            }
+            AgentEventKind::Graph {
+                event:
+                    agent_core::GraphProgressEvent::GraphNodeEntered { step, limit, .. }
+                    | agent_core::GraphProgressEvent::GraphNodeRestarted { step, limit, .. },
+            } => (Some(*step), Some(*limit)),
+            _ => (None, None),
+        };
         Self {
             version: SERVICE_EVENT_VERSION,
             sequence: event.sequence().get(),
@@ -781,6 +1027,11 @@ impl From<&AgentEvent> for ServiceEventV1 {
             category,
             phase,
             correlation_id: id,
+            workflow_id,
+            knowledge_backends,
+            graph_node_id,
+            budget_usage,
+            budget_limit,
         }
     }
 }
@@ -851,7 +1102,7 @@ mod tests {
             harness: Arc<ExecutionHarness>,
             mut context: RunContext,
             _input: RunInput,
-        ) -> ServiceFuture<'static, Result<(), WorkflowError>> {
+        ) -> ServiceFuture<'static, Result<WorkflowCompletion, WorkflowError>> {
             Box::pin(async move {
                 self.invocations.fetch_add(1, Ordering::SeqCst);
                 tokio::time::sleep(self.delay).await;
@@ -859,8 +1110,9 @@ mod tests {
                     Ok(()) => harness
                         .complete_run(&mut context)
                         .await
+                        .map(|()| WorkflowCompletion::NoApplicationResult)
                         .map_err(|_| WorkflowError::Failed),
-                    Err(_) => Ok(()),
+                    Err(_) => Ok(WorkflowCompletion::NoApplicationResult),
                 }
             })
         }
@@ -869,7 +1121,7 @@ mod tests {
             _harness: Arc<ExecutionHarness>,
             _recovered: RecoveredWaitingRun,
             _wait_id: DurableApprovalWaitId,
-        ) -> ServiceFuture<'static, Result<(), WorkflowError>> {
+        ) -> ServiceFuture<'static, Result<WorkflowCompletion, WorkflowError>> {
             Box::pin(async { Err(WorkflowError::NotRestartable) })
         }
     }
@@ -978,6 +1230,12 @@ mod tests {
         let events = service.read_events(key, None, 64).await.expect("events");
         let encoded = serde_json::to_string(&events).expect("encode");
         assert!(!encoded.contains("secret-prompt"));
+        assert!(events.iter().all(|event| event.version == 2));
+        assert!(
+            events
+                .iter()
+                .all(|event| event.workflow_id.as_ref() == Some(&workflow))
+        );
         assert_eq!(events.first().map(|event| event.sequence), Some(0));
         assert!(
             events
@@ -1008,15 +1266,20 @@ mod tests {
             )
             .await
             .expect("start");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(
-            first
-                .get_run_status(RunKey::new(run.run_id, session))
+        let key = RunKey::new(run.run_id, session);
+        let mut completed = false;
+        for _ in 0..100 {
+            if first
+                .get_run_status(key)
                 .await
-                .expect("status")
-                .disposition,
-            RunDispositionV1::Completed
-        );
+                .is_ok_and(|view| view.disposition == RunDispositionV1::Completed)
+            {
+                completed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(completed, "run must complete before service reconstruction");
 
         let store = Arc::new(
             SqliteRunPersistence::open(directory.path().join("runs.sqlite3"))

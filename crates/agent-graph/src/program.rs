@@ -1,6 +1,6 @@
 use std::{future::Future, pin::Pin};
 
-use agent_core::{GraphBranchId, GraphNodeId};
+use agent_core::{GraphBranchId, GraphNodeId, ToolCallId};
 use agent_harness::{DurableApprovalWait, DurableRunState};
 
 use crate::{
@@ -13,6 +13,14 @@ pub type GraphFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub enum VerificationOutcome {
     Passed,
     Failed,
+}
+
+/// Payload-free outcome supplied only after an M10 durable action resumes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DurableActionCompletion {
+    Succeeded(ToolCallId),
+    DomainFailure,
+    InfrastructureFailure,
 }
 
 pub trait GraphProgram: Send {
@@ -75,4 +83,15 @@ pub trait RestartableGraphProgram: GraphProgram {
         &mut self,
         state: &DurableRunState,
     ) -> Result<Self::WorkingState, GraphProgramError>;
+
+    /// Restores only the classification required by a post-resume node.
+    /// This hook does not receive `ToolResult` payloads and is never called by
+    /// replay or in place of the original action callback.
+    fn restore_durable_action_completion(
+        &mut self,
+        _state: &mut Self::WorkingState,
+        _completion: DurableActionCompletion,
+    ) -> Result<(), GraphProgramError> {
+        Ok(())
+    }
 }

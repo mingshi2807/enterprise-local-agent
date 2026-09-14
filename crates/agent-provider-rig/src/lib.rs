@@ -18,9 +18,9 @@
 mod openai_compatible;
 
 pub use openai_compatible::{
-    BearerCredential, BearerCredentialError, OpenAiCompatibleBuildError, OpenAiCompatibleConfig,
-    OpenAiCompatibleConfigError, ProviderLabel, ProviderLabelError,
-    build_openai_compatible_model_port,
+    BearerCredential, BearerCredentialError, OpenAiCompatibleAuth, OpenAiCompatibleBuildError,
+    OpenAiCompatibleConfig, OpenAiCompatibleConfigError, OpenAiCompatibleReadinessError,
+    ProviderLabel, ProviderLabelError, build_openai_compatible_model_port, probe_openai_compatible,
 };
 
 use agent_core::{

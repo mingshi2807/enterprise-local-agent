@@ -9,7 +9,7 @@ use std::{
 
 use agent_service::{
     AgentService, ApprovalDecisionV1, DurableApprovalWaitId, EventSequence, MAX_ACTIVE_RUNS,
-    MAX_COMMAND_QUEUE, RunId, RunInput, RunKey, ServiceError, ServiceEventV1, SessionId,
+    MAX_COMMAND_QUEUE, RunId, RunInput, RunKey, ServiceError, ServiceEventV2, SessionId,
     WaitingPageCursor, WorkflowId,
 };
 use axum::{
@@ -290,7 +290,7 @@ async fn read_events(
     State(state): State<HttpState>,
     Path((session_id, run_id)): Path<(String, String)>,
     Query(query): Query<EventQuery>,
-) -> Result<Json<Vec<ServiceEventV1>>, ApiError> {
+) -> Result<Json<Vec<ServiceEventV2>>, ApiError> {
     Ok(Json(
         state
             .service
@@ -433,7 +433,7 @@ struct SseState {
     service: Arc<AgentService>,
     key: RunKey,
     cursor: Option<EventSequence>,
-    pending: VecDeque<ServiceEventV1>,
+    pending: VecDeque<ServiceEventV2>,
     deadline: Instant,
     _permit: StreamPermit,
     done: bool,
@@ -608,11 +608,13 @@ mod tests {
             harness: Arc<ExecutionHarness>,
             mut context: RunContext,
             _input: RunInput,
-        ) -> ServiceFuture<'static, Result<(), WorkflowError>> {
+        ) -> ServiceFuture<'static, Result<agent_service::WorkflowCompletion, WorkflowError>>
+        {
             Box::pin(async move {
                 harness
                     .complete_run(&mut context)
                     .await
+                    .map(|()| agent_service::WorkflowCompletion::NoApplicationResult)
                     .map_err(|_| WorkflowError::Failed)
             })
         }
@@ -621,14 +623,16 @@ mod tests {
             _harness: Arc<ExecutionHarness>,
             _recovered: RecoveredWaitingRun,
             _wait_id: DurableApprovalWaitId,
-        ) -> ServiceFuture<'static, Result<(), WorkflowError>> {
+        ) -> ServiceFuture<'static, Result<agent_service::WorkflowCompletion, WorkflowError>>
+        {
             Box::pin(async { Err(WorkflowError::NotRestartable) })
         }
         fn resume_recovered(
             self: Arc<Self>,
             _harness: Arc<ExecutionHarness>,
             _recovered: RecoveredRun,
-        ) -> ServiceFuture<'static, Result<(), WorkflowError>> {
+        ) -> ServiceFuture<'static, Result<agent_service::WorkflowCompletion, WorkflowError>>
+        {
             Box::pin(async { Err(WorkflowError::NotRestartable) })
         }
     }

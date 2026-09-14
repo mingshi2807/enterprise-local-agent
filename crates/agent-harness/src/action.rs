@@ -50,6 +50,23 @@ impl CompletedModelInvocation {
     pub(crate) fn into_response(self) -> ModelResponse {
         self.response
     }
+
+    /// Returns the sole text output without consuming the tracked invocation.
+    ///
+    /// This permits strict application-level response discrimination while
+    /// preserving the original invocation for the M5 action decoder.
+    #[must_use]
+    pub fn single_text(&self) -> Option<&str> {
+        match self.response.output() {
+            [ModelOutputPart::Text(text)] => Some(text),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn model_call_id(&self) -> ModelCallId {
+        self.model_call_id
+    }
 }
 
 #[cfg(test)]

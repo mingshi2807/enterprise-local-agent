@@ -18,6 +18,7 @@ use agent_loop::{
 };
 use agent_provider_rig::{
     BearerCredential, OpenAiCompatibleConfig, ProviderLabel, build_openai_compatible_model_port,
+    probe_openai_compatible,
 };
 use rig_core::serde_json::{self, Value, json};
 
@@ -146,6 +147,42 @@ async fn both_api_root_slash_forms_reach_chat_completions() {
         assert_eq!(requests.len(), 1);
         assert_standard_request(&requests[0]);
     }
+}
+
+#[tokio::test]
+async fn explicit_loopback_no_auth_sends_no_authorization_header() {
+    let server = TestOpenAiServer::start(vec![ScriptedResponse::json(200, success_response())])
+        .await
+        .expect("test server must start");
+    let config = OpenAiCompatibleConfig::new_no_auth_loopback(server.base_url(), MODEL_IDENTIFIER)
+        .expect("loopback no-auth configuration");
+    let port = build_openai_compatible_model_port(config).expect("model port must build");
+    let response = port.invoke(user_request()).await.expect("completion");
+    assert_eq!(response_text(&response), Some(RESPONSE_SENTINEL));
+    let requests = server.finish().await.expect("server finish");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path(), "/v1/chat/completions");
+    assert_eq!(requests[0].header("authorization"), None);
+}
+
+#[tokio::test]
+async fn provider_readiness_uses_bounded_models_endpoint() {
+    let server = TestOpenAiServer::start(vec![ScriptedResponse::json(
+        200,
+        json!({"object":"list","data":[{"id":MODEL_IDENTIFIER}]}).to_string(),
+    )])
+    .await
+    .expect("test server must start");
+    let config = config(server.base_url());
+    probe_openai_compatible(&config).await.expect("readiness");
+    let requests = server.finish().await.expect("server finish");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method(), "GET");
+    assert_eq!(requests[0].path(), "/v1/models");
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer m4-secret-token-sentinel")
+    );
 }
 
 #[tokio::test]

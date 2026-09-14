@@ -16,7 +16,10 @@ pub use definition::{
 pub use effects::{ActionEffects, DecisionContext, ModelEffects, RetrieveEffects, VerifyEffects};
 pub use engine::{GraphEngine, GraphRunSummary, GraphTerminalOutcome};
 pub use error::{GraphError, GraphProgramError};
-pub use program::{GraphFuture, GraphProgram, RestartableGraphProgram, VerificationOutcome};
+pub use program::{
+    DurableActionCompletion, GraphFuture, GraphProgram, RestartableGraphProgram,
+    VerificationOutcome,
+};
 
 #[cfg(test)]
 mod tests;

@@ -8,8 +8,9 @@ use agent_harness::{
 };
 
 use crate::{
-    ActionEffects, DecisionContext, GraphDefinition, GraphError, GraphProgram, ModelEffects,
-    NodeKind, RestartableGraphProgram, RetrieveEffects, VerificationOutcome, VerifyEffects,
+    ActionEffects, DecisionContext, DurableActionCompletion, GraphDefinition, GraphError,
+    GraphProgram, ModelEffects, NodeKind, RestartableGraphProgram, RetrieveEffects,
+    VerificationOutcome, VerifyEffects,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,8 +181,19 @@ impl<'a> GraphEngine<'a> {
                 context,
                 attempt_id,
                 node_id,
-                ..
-            } => (context, attempt_id, node_id, GraphTransitionKey::Succeeded),
+                result,
+            } => {
+                let completion = match result {
+                    agent_core::ToolResult::Succeeded { call_id, .. } => {
+                        DurableActionCompletion::Succeeded(call_id)
+                    }
+                    agent_core::ToolResult::DomainFailure { .. } => {
+                        DurableActionCompletion::DomainFailure
+                    }
+                };
+                program.restore_durable_action_completion(&mut state, completion)?;
+                (context, attempt_id, node_id, GraphTransitionKey::Succeeded)
+            }
             DurableLocalWriteResume::Denied {
                 context,
                 attempt_id,
