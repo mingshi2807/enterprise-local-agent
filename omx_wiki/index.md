@@ -1,6 +1,6 @@
 # Wiki Index
 
-> 14 pages | Last updated: 2026-09-13
+> 15 pages | Last updated: 2026-09-20
 
 ## architecture
 
@@ -18,6 +18,7 @@
 - [M10 Durable Graph Pause Resume and HITL](m10-durable-graph-pause-resume-hitl.md) — # M10 Durable Graph Pause Resume and HITL
 - [M11 Governed MCP Integration](m11-governed-mcp-integration.md) — # M11 Governed MCP Integration
 - [M12 Agent Service API and Client Boundary](m12-agent-service-api.md) — # M12 Agent Service API and Client Boundary
+- [M13 Local Enterprise Agent MVP and Real LLM Smoke Test](m13-local-enterprise-agent-mvp.md) — # M13 Local Enterprise Agent MVP and Real LLM Smoke Test
 
 ## reference
 

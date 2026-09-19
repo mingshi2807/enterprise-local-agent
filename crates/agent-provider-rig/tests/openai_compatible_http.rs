@@ -166,6 +166,41 @@ async fn explicit_loopback_no_auth_sends_no_authorization_header() {
 }
 
 #[tokio::test]
+async fn opt_in_json_output_is_bounded_and_deterministic() {
+    for bearer in [true, false] {
+        let server = TestOpenAiServer::start(vec![ScriptedResponse::json(200, success_response())])
+            .await
+            .expect("test server must start");
+        let config = if bearer {
+            self::config(server.base_url())
+        } else {
+            OpenAiCompatibleConfig::new_no_auth_loopback(server.base_url(), MODEL_IDENTIFIER)
+                .expect("loopback no-auth configuration")
+        }
+        .with_json_object_output(1_024)
+        .expect("structured output configuration")
+        .with_reasoning_disabled();
+        let port = build_openai_compatible_model_port(config).expect("model port must build");
+        port.invoke(user_request()).await.expect("completion");
+
+        let requests = server.finish().await.expect("server finish");
+        let body = requests[0].json_body().expect("request body must be JSON");
+        assert_eq!(body.get("max_tokens").and_then(Value::as_u64), Some(1_024));
+        assert_eq!(body.get("temperature").and_then(Value::as_f64), Some(0.0));
+        assert_eq!(
+            body.pointer("/response_format/type")
+                .and_then(Value::as_str),
+            Some("json_object")
+        );
+        assert_eq!(
+            body.pointer("/chat_template_kwargs/enable_thinking")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+    }
+}
+
+#[tokio::test]
 async fn provider_readiness_uses_bounded_models_endpoint() {
     let server = TestOpenAiServer::start(vec![ScriptedResponse::json(
         200,

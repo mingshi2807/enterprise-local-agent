@@ -47,6 +47,7 @@ const MODEL_ID_ENV: &str = "ELA_MODEL_ID";
 const MODEL_PROVIDER_ENV: &str = "ELA_MODEL_PROVIDER_LABEL";
 const MODEL_AUTH_ENV: &str = "ELA_MODEL_AUTH";
 const MODEL_BEARER_ENV: &str = "ELA_MODEL_BEARER";
+const MODEL_DISABLE_REASONING_ENV: &str = "ELA_MODEL_DISABLE_REASONING";
 const KNOWLEDGE_ROUTE_ENV: &str = "ELA_KNOWLEDGE_ROUTE";
 const OCPP_URL_ENV: &str = "ELA_OCPP_KNOWLEDGE_URL";
 const STANDARDS_EXE_ENV: &str = "ELA_STANDARDS_MCP_EXECUTABLE";
@@ -315,7 +316,14 @@ fn model_config() -> anyhow::Result<OpenAiCompatibleConfig> {
         Ok("no-auth-loopback") => OpenAiCompatibleConfig::new_no_auth_loopback(base, model)?,
         _ => bail!("ELA_MODEL_AUTH must be bearer or no-auth-loopback"),
     };
-    Ok(config.with_provider_label(label))
+    let config = config
+        .with_provider_label(label)
+        .with_json_object_output(256)?;
+    match env::var(MODEL_DISABLE_REASONING_ENV).as_deref() {
+        Ok("true") => Ok(config.with_reasoning_disabled()),
+        Ok("false") | Err(_) => Ok(config),
+        _ => bail!("ELA_MODEL_DISABLE_REASONING must be true or false"),
+    }
 }
 
 fn knowledge_config() -> anyhow::Result<(Arc<dyn KnowledgePort>, KnowledgeRoute)> {

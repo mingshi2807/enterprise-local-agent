@@ -239,12 +239,54 @@ Aborting a Waiting run atomically terminalizes it as Cancelled, consumes the
 wait, executes zero tools, and causes later stale decisions to fail closed.
 Persistence remains separate from required M6 audit.
 
-The initial daemon registers only the fixed `service-health` workflow; reviewed
-production graph/loop compositions remain deployment work. The service and
-lower M10 layers are tested independently, but the complete HTTP Waiting ->
-Approve -> resume -> real contained LocalWrite path is not yet transport-level
-certified. Future ACP and Tauri/IDE adapters must reuse `agent-service` and may
-not acquire runtime authority.
+M13 replaces the health-only composition with reviewed enterprise engineering
+workflows while retaining `service-health`. Future ACP and Tauri/IDE adapters
+must reuse `agent-service` and may not acquire runtime authority.
+
+## M13 local enterprise agent MVP
+
+M13 composes the first real application path from the service boundary through
+enterprise retrieval, a trusted-configured OpenAI-compatible model, strict
+typed output handling, and the existing governed action pipeline. The graph is
+immutable and server-selected; neither clients nor model output can select the
+provider, knowledge backend, workflow, policy, tool, or containment adapter.
+
+Two workflow IDs are registered:
+
+- `enterprise-engineering-readonly-v1`: `Retrieve -> Model -> VerifyAnswer ->
+  Complete`. It returns a bounded `ApplicationResultV1::FinalAnswer` and does
+  not depend on Linux containment.
+- `enterprise-engineering-localwrite-v1`: `Retrieve -> Model -> Decision`, then
+  either the final-answer path or M5 validation followed by M10 durable
+  approval, explicit resume, M6 policy/audit, and M6.1 contained LocalWrite.
+  It is registered only when the complete LocalWrite readiness probe succeeds.
+
+Model output must be exactly one JSON object: either `final_answer` plus up to
+eight current-evidence citation IDs, or the existing M5 `action` envelope. The
+original completed model invocation passes unchanged to M5 for the Action
+branch. Mixed responses, extra fields, prose, fences, duplicate keys, malformed
+JSON, oversized answers, and unknown citations fail closed. Retrieved evidence
+is rendered as untrusted data with provider-neutral evidence IDs; model-supplied
+citation metadata is never trusted.
+
+Trusted daemon configuration supplies the opaque model ID, provider label,
+endpoint, explicit bearer or loopback no-auth mode, and fixed knowledge route.
+No-auth is rejected for non-loopback endpoints. The ReadOnly workflow requires
+model, knowledge, persistence, audit, and graph readiness. LocalWrite additionally
+requires a stable workspace binding, action-seal key, trusted static worker, and
+successful Bubblewrap/openat2 containment probe. LocalWrite readiness failure
+does not disable the otherwise healthy ReadOnly workflow and never causes a
+silent workflow downgrade.
+
+The explicit real-environment smoke suite has passed against a local
+`llama-server` OpenAI-compatible Qwen deployment and the standards knowledge
+backend. It verified a cited ReadOnly answer, durable denied LocalWrite with
+zero tool dispatch, and approved LocalWrite across service reconstruction with
+one observed contained dispatch into a disposable workspace. The M6.1 suite was
+also rerun successfully with Bubblewrap 0.11.2 and the static worker. These are
+observed test results, not an exactly-once execution claim. Real smoke tests
+remain ignored in normal workspace tests and require explicit environment
+configuration and invocation.
 
 ## Deterministic demonstration
 

@@ -11,6 +11,7 @@ use url::{Host, Url};
 use crate::RigModelAdapter;
 
 const MAX_PROVIDER_LABEL_LEN: usize = 64;
+const MAX_JSON_OUTPUT_TOKENS: u64 = 4_096;
 
 /// Bearer credential used to construct an OpenAI-compatible Rig client.
 ///
@@ -89,6 +90,8 @@ pub struct OpenAiCompatibleConfig {
     model_identifier: String,
     auth: OpenAiCompatibleAuth,
     provider_label: Option<ProviderLabel>,
+    json_object_max_tokens: Option<u64>,
+    reasoning_disabled: bool,
 }
 
 #[derive(Clone)]
@@ -127,6 +130,8 @@ impl OpenAiCompatibleConfig {
             model_identifier,
             auth: OpenAiCompatibleAuth::Bearer(credential),
             provider_label: None,
+            json_object_max_tokens: None,
+            reasoning_disabled: false,
         })
     }
 
@@ -150,6 +155,23 @@ impl OpenAiCompatibleConfig {
     #[must_use]
     pub fn with_provider_label(mut self, provider_label: ProviderLabel) -> Self {
         self.provider_label = Some(provider_label);
+        self
+    }
+
+    pub fn with_json_object_output(
+        mut self,
+        max_tokens: u64,
+    ) -> Result<Self, OpenAiCompatibleConfigError> {
+        if max_tokens == 0 || max_tokens > MAX_JSON_OUTPUT_TOKENS {
+            return Err(OpenAiCompatibleConfigError::InvalidOutputLimit);
+        }
+        self.json_object_max_tokens = Some(max_tokens);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn with_reasoning_disabled(mut self) -> Self {
+        self.reasoning_disabled = true;
         self
     }
 
@@ -188,6 +210,8 @@ pub enum OpenAiCompatibleConfigError {
     InvalidAuth,
     #[error("no-auth OpenAI-compatible access is allowed only on loopback")]
     NoAuthRequiresLoopback,
+    #[error("OpenAI-compatible structured output limit is invalid")]
+    InvalidOutputLimit,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -204,6 +228,8 @@ pub fn build_openai_compatible_model_port(
         model_identifier,
         auth,
         provider_label: _,
+        json_object_max_tokens,
+        reasoning_disabled,
     } = config;
 
     match auth {
@@ -213,9 +239,29 @@ pub fn build_openai_compatible_model_port(
                 .base_url(base_url.as_str())
                 .build()
                 .map_err(|_| OpenAiCompatibleBuildError::ClientConstructionFailed)?;
-            Ok(Arc::new(RigModelAdapter::new(
-                client.completion_model(model_identifier),
-            )))
+            let adapter = RigModelAdapter::new(client.completion_model(model_identifier));
+            let mut additional_params = serde_json::Map::new();
+            if json_object_max_tokens.is_some() {
+                additional_params.insert(
+                    "response_format".to_owned(),
+                    serde_json::json!({"type": "json_object"}),
+                );
+            }
+            if reasoning_disabled {
+                additional_params.insert(
+                    "chat_template_kwargs".to_owned(),
+                    serde_json::json!({"enable_thinking": false}),
+                );
+            }
+            Ok(Arc::new(if additional_params.is_empty() {
+                adapter
+            } else {
+                adapter.with_request_defaults(
+                    json_object_max_tokens,
+                    json_object_max_tokens.map(|_| 0.0),
+                    serde_json::Value::Object(additional_params),
+                )
+            }))
         }
         OpenAiCompatibleAuth::NoAuthLoopback => {
             let endpoint = endpoint(&base_url, "chat/completions");
@@ -228,6 +274,8 @@ pub fn build_openai_compatible_model_port(
                 client,
                 endpoint,
                 model_identifier,
+                json_object_max_tokens,
+                reasoning_disabled,
             }))
         }
     }
@@ -286,6 +334,8 @@ struct NoAuthOpenAiModel {
     client: Client,
     endpoint: Url,
     model_identifier: String,
+    json_object_max_tokens: Option<u64>,
+    reasoning_disabled: bool,
 }
 
 impl ModelPort for NoAuthOpenAiModel {
@@ -312,6 +362,16 @@ impl ModelPort for NoAuthOpenAiModel {
                 .json(&ApiRequest {
                     model: &self.model_identifier,
                     messages,
+                    max_tokens: self.json_object_max_tokens,
+                    temperature: self.json_object_max_tokens.map(|_| 0.0),
+                    response_format: self.json_object_max_tokens.map(|_| ApiResponseFormat {
+                        kind: "json_object",
+                    }),
+                    chat_template_kwargs: self.reasoning_disabled.then_some(
+                        ApiChatTemplateKwargs {
+                            enable_thinking: false,
+                        },
+                    ),
                 })
                 .send()
                 .await
@@ -362,6 +422,23 @@ impl ModelPort for NoAuthOpenAiModel {
 struct ApiRequest<'a> {
     model: &'a str,
     messages: Vec<ApiMessage<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ApiResponseFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<ApiChatTemplateKwargs>,
+}
+#[derive(Serialize)]
+struct ApiResponseFormat {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+#[derive(Serialize)]
+struct ApiChatTemplateKwargs {
+    enable_thinking: bool,
 }
 #[derive(Serialize)]
 struct ApiMessage<'a> {

@@ -1396,3 +1396,114 @@
   The unchanged suite exercised the capability probe, containment boundaries, network/environment/FD isolation, openat2(), governed LocalWrite flow, ID preservation, and process-tree termination/reaping.
 
   The repository was mounted read-only inside the certification container. No files were modified and no commit was created
+
+# M13 smoke testing report
+
+• 1. Environment
+
+- Commit tested: 803fe05797ea325bae6b138e875163c8c4f78822 plus uncommitted M13 fixes
+- Provider: local llama-server, OpenAI-compatible
+- Model: unsloth/Qwen3.8-27B-GGUF:UD-Q6_K_XL
+- Endpoint: <http://127.0.0.1:18080/v1> through SSH tunnel
+- Authentication: explicit loopback no-auth
+- Knowledge route: StandardsMcp
+- LocalWrite: disposable temporary workspace
+- Containment: enterprise-local-agent-m6-cert:2541e5c, Bubblewrap 0.11.2
+- Worker: 818,856-byte static PIE ELF
+
+  1. ReadOnly Result
+
+  PASS.
+
+- Run: 7b5efc5a-5d43-57fc-a1f4-4e187e6d2833
+- Retrieval: 5783830f-4504-4dad-9fb2-d91b89bdbf48
+- Model invocation: 09ee9b06-170c-4fdb-9cdb-95367e1209c4
+- Evidence: 8 items, 894 bytes
+- Answer: 214 bytes, 2 valid citations
+- Terminal status: Completed
+
+  1. Denied Write
+
+  PASS.
+
+- Run: e58d090e-464b-5103-9d74-2533edaf6625
+- Entered durable Waiting
+- M5 proposal and validation events recorded
+- Denial survived service reconstruction
+- Tool dispatches: 0
+- Target file: not created
+- Terminal result: ApprovalDenied
+
+  1. Approved Restart/Resume
+
+  PASS.
+
+- Run: 1dda2913-ff5c-5fe7-8848-49522d9df5de
+- Wait: 022db7ca-c71f-4cca-80dc-9977b4a299ae
+- Proposal: bea0de20-391f-453c-a6fb-fb4064320a77
+- ToolCallId: e3435326-4ffb-40aa-a693-407098e7da31
+- Same identifiers survived restart
+- Model/retrieval/action callbacks were not repeated
+- Observed contained dispatches: exactly 1
+- File was created only inside the temporary workspace
+- Terminal status: Completed
+
+  This is observed single dispatch, not a generic exactly-once guarantee.
+
+  1. Budgets/Timing
+
+- ReadOnly: model 1/1, graph steps 4/8, approximately 32.4 seconds
+- Denied: model 1/1, approval 1/1, tools 0/1, graph steps 5/8, test 27.1 seconds
+- Approved: model 1/1, approval 1/1, tools 1/1, graph steps 6/8, test 12.6 seconds
+
+  1. Model Compliance
+
+  The final model responses complied with the strict JSON union:
+
+- ReadOnly: exactly final_answer plus citations
+- LocalWrite: exactly the nested M5 action envelope
+- No prose, fences, <think> tags, or extra root fields
+
+  The initial write attempt used the wrong root shape. The prompt was tightened without weakening strict parsing.
+
+  1. Knowledge/Citations
+
+  Standards retrieval and citation binding passed. Grounded evidence now includes the provider-neutral EvidenceId, allowing model citations to bind to trusted provenance.
+
+  The OCPP backend was inspected but had an empty corpus, so the real tests used the populated Standards backend.
+
+  1. Recovery/HITL
+
+  Durable Waiting, preview, decision CAS, restart, explicit resume, capsule validation, and ID correlation passed. Replay did not call the model or knowledge backend and did not repeat the action callback.
+
+  1. Containment
+
+  Explicit M6.1 certification passed:
+
+- Bubblewrap: 0.11.2
+- Static worker trusted and executable
+- Capability probe passed
+- Create/replace and escape protections passed
+- Process-reaping certification passed
+- Landlock: PartiallyEnforced, optional defense-in-depth
+
+  1. Fixes and Verification
+
+  Code fixes covered bounded JSON output, disabling Qwen reasoning when configured, exact action prompting, evidence-ID grounding, and richer sanitized real-test assertions.
+
+  Passed:
+
+- cargo fmt --all -- --check
+- strict workspace Clippy
+- workspace tests with all features
+- SQLite fault tests
+- architecture/dependency tests
+- git diff --check
+- explicit M6.1 certification
+- all three real smoke scenarios
+
+  No commit was created. The untracked crates/agent-mvp/knowledge/ backend cache is approximately 2.2 GB and must not be committed.
+
+  1. Recommendation
+
+  M13 PASS.

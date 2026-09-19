@@ -38,12 +38,33 @@ use rig_core::{
 
 pub struct RigModelAdapter<M> {
     model: M,
+    max_tokens: Option<u64>,
+    temperature: Option<f64>,
+    additional_params: Option<serde_json::Value>,
 }
 
 impl<M> RigModelAdapter<M> {
     #[must_use]
     pub const fn new(model: M) -> Self {
-        Self { model }
+        Self {
+            model,
+            max_tokens: None,
+            temperature: None,
+            additional_params: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn with_request_defaults(
+        mut self,
+        max_tokens: Option<u64>,
+        temperature: Option<f64>,
+        additional_params: serde_json::Value,
+    ) -> Self {
+        self.max_tokens = max_tokens;
+        self.temperature = temperature;
+        self.additional_params = Some(additional_params);
+        self
     }
 }
 
@@ -56,7 +77,10 @@ where
         request: ModelRequest,
     ) -> PortFuture<'a, Result<ModelResponse, ModelPortError>> {
         Box::pin(async move {
-            let request = to_rig_request(&request)?;
+            let mut request = to_rig_request(&request)?;
+            request.max_tokens = self.max_tokens;
+            request.temperature = self.temperature;
+            request.additional_params = self.additional_params.clone();
             self.model
                 .completion(request)
                 .await
