@@ -3,7 +3,7 @@
 Local-first Rust agent runtime with an enterprise execution harness, fixed-loop
 and graph orchestration, replaceable model/provider adapters, governed
 model-proposed actions, durable recovery, enterprise knowledge integration,
-and bounded human-in-the-loop approval.
+bounded human-in-the-loop approval, and hardened local deployment operations.
 
 ## M5 action planning
 
@@ -287,6 +287,74 @@ also rerun successfully with Bubblewrap 0.11.2 and the static worker. These are
 observed test results, not an exactly-once execution claim. Real smoke tests
 remain ignored in normal workspace tests and require explicit environment
 configuration and invocation.
+
+## M14 deployment and operations hardening
+
+M14 adds `agent-deployment` as the composition and operations layer above the
+service. It does not acquire model, tool, approval, policy, containment, or
+recovery authority from `ExecutionHarness`.
+
+The daemon now requires an absolute `ELA_DEPLOYMENT_CONFIG` path naming a
+strict, versioned `DeploymentConfigV1` TOML document. Unknown fields and
+unbounded values are rejected. Configuration covers listener security,
+persistence and audit paths, workflow profiles, model and knowledge adapters,
+MCP fingerprints, LocalWrite workspace and artifact bindings, external secret
+references, and operational limits. Secret values remain outside the document.
+A deterministic SHA-256 deployment fingerprint covers security-relevant
+non-secret configuration. See
+[`docs/deployment-config-v1.example.toml`](docs/deployment-config-v1.example.toml).
+
+ReadOnly and LocalWrite readiness are evaluated independently. Startup performs
+bounded deep checks for the dependencies used by configured workflows, then
+publishes cached metadata-only readiness. `/healthz` reports process lifecycle
+only. LocalWrite registration additionally verifies the seal key reference,
+stable workspace binding, derived tool-contract digest, configured Bubblewrap
+and worker hashes, root ownership and immutable executable modes, worker
+protocol, and the existing bounded M6.1 capability probe. This runtime probe is
+not a replacement for release certification. Failed LocalWrite readiness never
+silently becomes ReadOnly and does not remove a healthy ReadOnly workflow.
+
+The service has an explicit `Draining` lifecycle. Shutdown stops accepting new
+work, requests cancellation through existing harness handles, waits for tracked
+tasks within the configured deadline, flushes required audit output, and then
+releases process ownership. Durable Waiting remains quiescent. If shutdown
+intersects an external effect with no trustworthy terminal record, existing M7
+manual-reconciliation semantics remain authoritative.
+
+Operational endpoints expose only bounded readiness, build/version,
+fixed-bucket timings and counters, and metadata-only run/reconciliation views.
+They never expose prompts, answers, evidence, action paths or content, tool
+results, credentials, audit payloads, or sealed capsules. Run IDs are not used
+as metric labels.
+
+`SqliteStoreAdmin` provides offline/quiesced backup using SQLite's backup API;
+live database files are never copied directly. The backup manifest hashes the
+database and audit file and records compatibility-critical store, event,
+checkpoint, workflow, graph, capsule, tool-contract, key, workspace, MCP, and
+containment identities separately from informational build identity. Restore
+requires an empty target and rejects corruption, tampering, unsupported
+versions, or incompatible security contracts. No automatic migration,
+downgrade, distributed coordination, or cryptographic backup-authenticity claim
+is made.
+
+The trusted `agent-operator` CLI is intentionally operational only:
+
+```bash
+agent-operator --config /absolute/deployment.toml config validate
+agent-operator --config /absolute/deployment.toml readiness
+agent-operator --config /absolute/deployment.toml runs list
+agent-operator --config /absolute/deployment.toml reconciliation list
+agent-operator --config /absolute/deployment.toml backup create /absolute/backup
+agent-operator --config /absolute/deployment.toml backup verify /absolute/backup
+agent-operator --config /absolute/deployment.toml restore verify /absolute/backup
+agent-operator --config /absolute/deployment.toml restore apply /absolute/backup
+agent-operator --config /absolute/deployment.toml version
+```
+
+It cannot approve, resume, mutate policy, select infrastructure, or access
+runtime ports. Online commands use the configured Unix socket or authenticated
+loopback listener; backup and restore require exclusive data-directory
+ownership.
 
 ## Deterministic demonstration
 
