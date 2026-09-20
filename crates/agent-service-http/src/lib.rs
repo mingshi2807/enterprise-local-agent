@@ -11,19 +11,22 @@ use agent_deployment::{
     BuildInfoV1, OperationalMetrics, OperationsState, ReadinessCache, ReadinessSnapshotV1,
     ReadinessStatusV1,
 };
+use agent_identity::VerifiedPrincipal;
 use agent_service::{
     AgentService, ApprovalDecisionV1, DurableApprovalWaitId, EventSequence, MAX_ACTIVE_RUNS,
     MAX_COMMAND_QUEUE, OperationalRunPageV1, OperationalRunViewV1, RunId, RunInput, RunKey,
     ServiceError, ServiceEventV2, SessionId, WaitingPageCursor, WorkflowId,
 };
+use axum::extract::connect_info::Connected;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, Query, State},
     http::{HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::Event},
     routing::{get, post},
+    serve::IncomingStream,
 };
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
@@ -40,25 +43,94 @@ const SSE_MAX_LIFETIME: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
 pub struct HttpSecurity {
-    bearer_digest: Option<[u8; 32]>,
+    mode: HttpAuthenticationMode,
     allowed_hosts: Arc<[String]>,
     allowed_origins: Arc<[String]>,
 }
 
-impl HttpSecurity {
+#[derive(Clone)]
+enum HttpAuthenticationMode {
+    UnixPeer(Arc<[UnixPrincipalMapping]>),
+    LoopbackBearer {
+        digest: [u8; 32],
+        principal: VerifiedPrincipal,
+    },
+}
+
+#[derive(Clone)]
+pub struct UnixPrincipalMapping {
+    uid: u32,
+    gid: u32,
+    principal: VerifiedPrincipal,
+}
+
+impl UnixPrincipalMapping {
     #[must_use]
-    pub fn unix_socket() -> Self {
+    pub const fn new(uid: u32, gid: u32, principal: VerifiedPrincipal) -> Self {
         Self {
-            bearer_digest: None,
+            uid,
+            gid,
+            principal,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnixPeerCredentials {
+    pub uid: u32,
+    pub gid: u32,
+    valid: bool,
+}
+
+impl UnixPeerCredentials {
+    #[must_use]
+    pub const fn new(uid: u32, gid: u32) -> Self {
+        Self {
+            uid,
+            gid,
+            valid: true,
+        }
+    }
+}
+
+impl Connected<IncomingStream<'_, tokio::net::UnixListener>> for UnixPeerCredentials {
+    fn connect_info(stream: IncomingStream<'_, tokio::net::UnixListener>) -> Self {
+        stream.io().peer_cred().map_or(
+            Self {
+                uid: 0,
+                gid: 0,
+                valid: false,
+            },
+            |credentials| Self::new(credentials.uid(), credentials.gid()),
+        )
+    }
+}
+
+impl HttpSecurity {
+    pub fn unix_socket(
+        mappings: Vec<UnixPrincipalMapping>,
+    ) -> Result<Self, HttpConfigurationError> {
+        if mappings.is_empty()
+            || mappings.iter().enumerate().any(|(index, mapping)| {
+                mappings[..index]
+                    .iter()
+                    .any(|item| item.uid == mapping.uid && item.gid == mapping.gid)
+            })
+        {
+            return Err(HttpConfigurationError);
+        }
+        Ok(Self {
+            mode: HttpAuthenticationMode::UnixPeer(mappings.into()),
             allowed_hosts: Arc::from([]),
             allowed_origins: Arc::from([]),
-        }
+        })
     }
 
     pub fn loopback(
         bearer: &str,
         allowed_hosts: Vec<String>,
         allowed_origins: Vec<String>,
+        principal: VerifiedPrincipal,
     ) -> Result<Self, HttpConfigurationError> {
         if bearer.len() < 32
             || allowed_hosts.is_empty()
@@ -69,7 +141,10 @@ impl HttpSecurity {
             return Err(HttpConfigurationError);
         }
         Ok(Self {
-            bearer_digest: Some(Sha256::digest(bearer.as_bytes()).into()),
+            mode: HttpAuthenticationMode::LoopbackBearer {
+                digest: Sha256::digest(bearer.as_bytes()).into(),
+                principal,
+            },
             allowed_hosts: allowed_hosts.into(),
             allowed_origins: allowed_origins.into(),
         })
@@ -268,11 +343,13 @@ struct OperationalRunsQuery {
 
 async fn operational_runs(
     State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
     Query(query): Query<OperationalRunsQuery>,
 ) -> Result<Json<OperationalRunPageV1>, ApiError> {
     state
         .service
         .operational_run_page(
+            &principal,
             query.after_run_id.map(agent_harness::RunPageCursor::new),
             query.limit.unwrap_or(64),
             false,
@@ -284,11 +361,13 @@ async fn operational_runs(
 
 async fn reconciliation_runs(
     State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
     Query(query): Query<OperationalRunsQuery>,
 ) -> Result<Json<OperationalRunPageV1>, ApiError> {
     state
         .service
         .operational_run_page(
+            &principal,
             query.after_run_id.map(agent_harness::RunPageCursor::new),
             query.limit.unwrap_or(64),
             true,
@@ -300,11 +379,12 @@ async fn reconciliation_runs(
 
 async fn operational_run(
     State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
     Path((session_id, run_id)): Path<(String, String)>,
 ) -> Result<Json<OperationalRunViewV1>, ApiError> {
     let view = state
         .service
-        .get_run_status(key(&session_id, &run_id)?)
+        .get_run_status(&principal, key(&session_id, &run_id)?)
         .await?;
     Ok(Json(OperationalRunViewV1 {
         session_id: view.session_id,
@@ -318,23 +398,42 @@ async fn operational_run(
 
 async fn authorize(
     State(state): State<HttpState>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Result<Response, ApiError> {
-    if let Some(expected) = state.security.bearer_digest {
-        let supplied = request
-            .headers()
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .map(|value| Sha256::digest(value.as_bytes()))
-            .ok_or(ApiError::Unauthorized)?;
-        if !constant_time_equal(&expected, supplied.as_slice()) {
-            return Err(ApiError::Unauthorized);
+    let principal = match &state.security.mode {
+        HttpAuthenticationMode::UnixPeer(mappings) => {
+            let peer = request
+                .extensions()
+                .get::<ConnectInfo<UnixPeerCredentials>>()
+                .map(|value| &value.0)
+                .ok_or(ApiError::Unauthorized)?;
+            if !peer.valid {
+                return Err(ApiError::Unauthorized);
+            }
+            mappings
+                .iter()
+                .find(|mapping| mapping.uid == peer.uid && mapping.gid == peer.gid)
+                .map(|mapping| mapping.principal.clone())
+                .ok_or(ApiError::Unauthorized)?
         }
-        require_allowed_header(request.headers(), "host", &state.security.allowed_hosts)?;
-        require_allowed_header(request.headers(), "origin", &state.security.allowed_origins)?;
-    }
+        HttpAuthenticationMode::LoopbackBearer { digest, principal } => {
+            let supplied = request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(|value| Sha256::digest(value.as_bytes()))
+                .ok_or(ApiError::Unauthorized)?;
+            if !constant_time_equal(digest, supplied.as_slice()) {
+                return Err(ApiError::Unauthorized);
+            }
+            require_allowed_header(request.headers(), "host", &state.security.allowed_hosts)?;
+            require_allowed_header(request.headers(), "origin", &state.security.allowed_origins)?;
+            principal.clone()
+        }
+    };
+    request.extensions_mut().insert(principal);
     let _ = state.operations.metrics().connection_opened();
     let response = next.run(request).await;
     let _ = state.operations.metrics().connection_closed();
@@ -371,10 +470,13 @@ struct SessionResponse {
     session_id: SessionId,
 }
 
-async fn create_session(State(state): State<HttpState>) -> Result<Json<SessionResponse>, ApiError> {
+async fn create_session(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
+) -> Result<Json<SessionResponse>, ApiError> {
     let _permit = state.acquire_command()?;
     Ok(Json(SessionResponse {
-        session_id: state.service.create_session().await?,
+        session_id: state.service.create_session(&principal).await?,
     }))
 }
 
@@ -388,6 +490,7 @@ struct StartRunBody {
 
 async fn start_run(
     State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
     Path(session_id): Path<String>,
     Json(body): Json<StartRunBody>,
 ) -> Result<Json<agent_service::RunView>, ApiError> {
@@ -398,7 +501,13 @@ async fn start_run(
     Ok(Json(
         state
             .service
-            .start_run(session_id, body.start_request_id, &body.workflow_id, input)
+            .start_run(
+                &principal,
+                session_id,
+                body.start_request_id,
+                &body.workflow_id,
+                input,
+            )
             .await?,
     ))
 }
@@ -409,12 +518,13 @@ fn key(session_id: &str, run_id: &str) -> Result<RunKey, ApiError> {
 
 async fn run_status(
     State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
     Path((session_id, run_id)): Path<(String, String)>,
 ) -> Result<Json<agent_service::RunView>, ApiError> {
     Ok(Json(
         state
             .service
-            .get_run_status(key(&session_id, &run_id)?)
+            .get_run_status(&principal, key(&session_id, &run_id)?)
             .await?,
     ))
 }
@@ -428,6 +538,7 @@ struct EventQuery {
 
 async fn read_events(
     State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
     Path((session_id, run_id)): Path<(String, String)>,
     Query(query): Query<EventQuery>,
 ) -> Result<Json<Vec<ServiceEventV2>>, ApiError> {
@@ -435,6 +546,7 @@ async fn read_events(
         state
             .service
             .read_events(
+                &principal,
                 key(&session_id, &run_id)?,
                 query.after.map(EventSequence::new),
                 query.limit.unwrap_or(64),
@@ -460,6 +572,7 @@ struct WaitingPageResponse {
 
 async fn list_waiting(
     State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
     Query(query): Query<WaitingQuery>,
 ) -> Result<Json<WaitingPageResponse>, ApiError> {
     let cursor = match (query.after_run_id, query.after_wait_id) {
@@ -469,7 +582,7 @@ async fn list_waiting(
     };
     let (items, next) = state
         .service
-        .waiting_page(cursor, query.limit.unwrap_or(64))
+        .waiting_page(&principal, cursor, query.limit.unwrap_or(64))
         .await?;
     Ok(Json(WaitingPageResponse {
         items,
@@ -480,12 +593,13 @@ async fn list_waiting(
 
 async fn approval_preview(
     State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
     Path((session_id, run_id, wait_id)): Path<(String, String, String)>,
 ) -> Result<Json<agent_service::ApprovalPreviewV1>, ApiError> {
     Ok(Json(
         state
             .service
-            .approval_preview(key(&session_id, &run_id)?, parse_id(&wait_id)?)
+            .approval_preview(&principal, key(&session_id, &run_id)?, parse_id(&wait_id)?)
             .await?,
     ))
 }
@@ -499,6 +613,7 @@ struct DecisionBody {
 
 async fn submit_decision(
     State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
     Path((session_id, run_id, wait_id)): Path<(String, String, String)>,
     Json(body): Json<DecisionBody>,
 ) -> Result<StatusCode, ApiError> {
@@ -506,6 +621,7 @@ async fn submit_decision(
     state
         .service
         .submit_decision(
+            &principal,
             key(&session_id, &run_id)?,
             parse_id(&wait_id)?,
             body.expected_row_version,
@@ -523,25 +639,27 @@ struct ResumeBody {
 
 async fn resume_run(
     State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
     Path((session_id, run_id)): Path<(String, String)>,
     Json(body): Json<ResumeBody>,
 ) -> Result<StatusCode, ApiError> {
     let _permit = state.acquire_command()?;
     state
         .service
-        .resume_run(key(&session_id, &run_id)?, body.wait_id)
+        .resume_run(&principal, key(&session_id, &run_id)?, body.wait_id)
         .await?;
     Ok(StatusCode::ACCEPTED)
 }
 
 async fn cancel_run(
     State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
     Path((session_id, run_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let _permit = state.acquire_command()?;
     state
         .service
-        .cancel_active_run(key(&session_id, &run_id)?)
+        .cancel_active_run(&principal, key(&session_id, &run_id)?)
         .await?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -554,6 +672,7 @@ struct AbortBody {
 
 async fn abort_waiting(
     State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
     Path((session_id, run_id, wait_id)): Path<(String, String, String)>,
     Json(body): Json<AbortBody>,
 ) -> Result<StatusCode, ApiError> {
@@ -561,6 +680,7 @@ async fn abort_waiting(
     state
         .service
         .abort_waiting(
+            &principal,
             key(&session_id, &run_id)?,
             parse_id(&wait_id)?,
             body.expected_row_version,
@@ -571,6 +691,7 @@ async fn abort_waiting(
 
 struct SseState {
     service: Arc<AgentService>,
+    principal: VerifiedPrincipal,
     key: RunKey,
     cursor: Option<EventSequence>,
     pending: VecDeque<ServiceEventV2>,
@@ -581,6 +702,7 @@ struct SseState {
 
 async fn stream_events(
     State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
     Path((session_id, run_id)): Path<(String, String)>,
     Query(query): Query<EventQuery>,
     headers: HeaderMap,
@@ -599,6 +721,7 @@ async fn stream_events(
     let after = query.after.or(header_cursor);
     let stream_state = SseState {
         service: state.service,
+        principal,
         key,
         cursor: after.map(EventSequence::new),
         pending: VecDeque::new(),
@@ -637,7 +760,7 @@ async fn stream_events(
             }
             match state
                 .service
-                .read_events(state.key, state.cursor, SSE_PAGE_SIZE)
+                .read_events(&state.principal, state.key, state.cursor, SSE_PAGE_SIZE)
                 .await
             {
                 Ok(events) if events.is_empty() => tokio::time::sleep(SSE_POLL_INTERVAL).await,
@@ -677,12 +800,16 @@ impl From<ServiceError> for ApiError {
     fn from(error: ServiceError) -> Self {
         match error {
             ServiceError::InvalidRequest => Self::InvalidRequest,
+            ServiceError::Unauthorized => Self::Unauthorized,
             ServiceError::NotFound => Self::NotFound,
             ServiceError::Conflict => Self::Conflict,
             ServiceError::Capacity => Self::Capacity,
             ServiceError::Draining => Self::Unavailable,
             ServiceError::WorkflowUnavailable => Self::NotFound,
+            ServiceError::LegacyUnowned => Self::Conflict,
             ServiceError::Configuration
+            | ServiceError::SecurityAudit
+            | ServiceError::IdentityStore(_)
             | ServiceError::Harness(_)
             | ServiceError::Persistence(_)
             | ServiceError::Context(_) => Self::Internal,
@@ -720,6 +847,10 @@ mod tests {
         RecoveredWaitingRun, RecoveryContract, RunContext, RunKey, ToolRegistry,
         testing::{FakeModelPort, InMemoryAuditSink},
     };
+    use agent_identity::{
+        ApprovalSeparation, PrincipalRole,
+        testing::{InMemorySecurityAudit, policy, principal},
+    };
     use agent_persistence_sqlite::SqliteRunPersistence;
     use agent_service::{ConfiguredWorkflow, RunInput, ServiceFuture, WorkflowError, WorkflowId};
     use axum::{body::Body, http::Request};
@@ -727,6 +858,31 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    fn test_principal() -> VerifiedPrincipal {
+        principal(
+            "http-test-user",
+            &[
+                PrincipalRole::User,
+                PrincipalRole::Approver,
+                PrincipalRole::Operator,
+            ],
+        )
+    }
+
+    fn unix_security() -> HttpSecurity {
+        HttpSecurity::unix_socket(vec![UnixPrincipalMapping::new(
+            1000,
+            1000,
+            test_principal(),
+        )])
+        .expect("Unix security")
+    }
+
+    fn unix_app(service: Arc<AgentService>) -> Router {
+        router(service, unix_security())
+            .layer(Extension(ConnectInfo(UnixPeerCredentials::new(1000, 1000))))
+    }
 
     struct CompleteWorkflow {
         id: WorkflowId,
@@ -804,7 +960,20 @@ mod tests {
         let workflow: Arc<dyn ConfiguredWorkflow> = Arc::new(CompleteWorkflow {
             id: WorkflowId::new("test").expect("id"),
         });
-        let service = Arc::new(AgentService::new(harness, store, vec![workflow]).expect("service"));
+        let service = Arc::new(
+            AgentService::new(
+                harness,
+                store.clone(),
+                store,
+                Arc::new(policy(
+                    ["test".to_owned()],
+                    ApprovalSeparation::RequesterMayApprove,
+                )),
+                Arc::new(InMemorySecurityAudit::default()),
+                vec![workflow],
+            )
+            .expect("service"),
+        );
         (directory, service)
     }
 
@@ -815,6 +984,7 @@ mod tests {
             "01234567890123456789012345678901",
             vec!["127.0.0.1:8080".to_owned()],
             vec!["http://127.0.0.1:8080".to_owned()],
+            test_principal(),
         )
         .expect("security");
         let app = router(service, security);
@@ -847,11 +1017,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unix_peer_mapping_rejects_spoofed_identity_headers() {
+        let (_directory, service) = service().await;
+        let app = router(service, unix_security())
+            .layer(Extension(ConnectInfo(UnixPeerCredentials::new(2000, 2000))));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sessions")
+                    .header("x-principal-id", "http-test-user")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn command_concurrency_is_bounded_without_waiting() {
         let (_directory, service) = service().await;
         let state = HttpState {
             service,
-            security: HttpSecurity::unix_socket(),
+            security: unix_security(),
             streams: StreamLimits::new(),
             commands: Arc::new(Semaphore::new(MAX_COMMAND_QUEUE)),
             operations: OperationsState::new(
@@ -885,8 +1074,11 @@ mod tests {
     #[tokio::test]
     async fn unix_transport_accepts_commands_and_rejects_oversized_json() {
         let (_directory, service) = service().await;
-        let session = service.create_session().await.expect("session");
-        let app = router(service, HttpSecurity::unix_socket());
+        let session = service
+            .create_session(&test_principal())
+            .await
+            .expect("session");
+        let app = unix_app(service);
         let body = format!(
             r#"{{"start_request_id":"{}","workflow_id":"test","input":"{}"}}"#,
             Uuid::new_v4(),
@@ -909,7 +1101,7 @@ mod tests {
     #[tokio::test]
     async fn operational_endpoints_are_metadata_only_and_cached() {
         let (_directory, service) = service().await;
-        let app = router(service, HttpSecurity::unix_socket());
+        let app = unix_app(service);
         for path in [
             "/healthz",
             "/v1/operations/readiness",
@@ -954,10 +1146,12 @@ mod tests {
     #[tokio::test]
     async fn sse_reconnects_from_sequence_and_bounds_slow_connections() {
         let (_directory, service) = service().await;
-        let session = service.create_session().await.expect("session");
+        let principal = test_principal();
+        let session = service.create_session(&principal).await.expect("session");
         let workflow = WorkflowId::new("test").expect("workflow");
         let run = service
             .start_run(
+                &principal,
                 session,
                 Uuid::new_v4(),
                 &workflow,
@@ -966,7 +1160,7 @@ mod tests {
             .await
             .expect("start");
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let app = router(service.clone(), HttpSecurity::unix_socket());
+        let app = unix_app(service.clone());
         let uri = format!(
             "/v1/sessions/{session}/runs/{}/events/stream?after=0",
             run.run_id
@@ -1009,7 +1203,7 @@ mod tests {
         drop(streams);
         assert_eq!(
             service
-                .get_run_status(RunKey::new(run.run_id, session))
+                .get_run_status(&principal, RunKey::new(run.run_id, session))
                 .await
                 .expect("status")
                 .disposition,

@@ -7,6 +7,7 @@ edition.workspace = true
 agent-core.workspace = true
 agent-deployment.workspace = true
 agent-harness.workspace = true
+agent-identity.workspace = true
 agent-service.workspace = true
 axum.workspace = true
 futures-util.workspace = true
@@ -18,6 +19,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 agent-core.workspace = true
+agent-identity = { workspace = true, features = ["test-support"] }
 agent-harness = { workspace = true, features = ["test-support"] }
 agent-persistence-sqlite.workspace = true
 http-body-util = "0.1"

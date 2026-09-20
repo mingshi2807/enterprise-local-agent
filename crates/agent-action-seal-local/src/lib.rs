@@ -105,8 +105,8 @@ impl ActionSealPort for LocalActionSealer {
 mod tests {
     use agent_core::{
         ActionDigest, ActionProposalId, ApprovalRequestId, DurableApprovalWaitId,
-        GraphNodeAttemptId, GraphNodeId, RunId, SessionId, ToolCallId, ToolContractDigest,
-        WorkspaceBindingId,
+        GraphNodeAttemptId, GraphNodeId, PrincipalId, RunId, SessionId, ToolCallId,
+        ToolContractDigest, WorkspaceBindingId,
     };
     use agent_harness::{ActionSealBinding, ActionSealPort, GraphDefinitionDigest, RunKey};
 
@@ -188,6 +188,25 @@ mod tests {
         assert_eq!(
             wrong_id.open_local_write(&binding, &sealed),
             Err(ActionSealError::KeyUnavailable)
+        );
+    }
+
+    #[test]
+    fn requester_identity_is_authenticated_capsule_data() {
+        let sealer = LocalActionSealer::new("key-1", [7; 32]).expect("sealer");
+        let requester = PrincipalId::new("requester-a").expect("principal");
+        let requester_binding = binding().with_requester(requester);
+        let action =
+            LocalWriteActionCapsuleV1::new("out.txt".into(), "data".into()).expect("action");
+        let sealed = sealer
+            .seal_local_write(&requester_binding, &action)
+            .expect("seal");
+        let swapped =
+            binding().with_requester(PrincipalId::new("requester-b").expect("second principal"));
+
+        assert_eq!(
+            sealer.open_local_write(&swapped, &sealed),
+            Err(ActionSealError::AuthenticationFailed)
         );
     }
 

@@ -2,12 +2,24 @@ use std::os::unix::fs::PermissionsExt;
 
 use super::*;
 
-fn config(_secret: &Path) -> DeploymentConfigV1 {
+fn config(_secret: &Path) -> DeploymentConfigV2 {
     let data_directory = _secret.parent().expect("secret parent").join("data");
-    DeploymentConfigV1 {
-        schema_version: 1,
+    DeploymentConfigV2 {
+        schema_version: DEPLOYMENT_CONFIG_SCHEMA_VERSION,
         listener: ListenerConfigV1::Unix {
             socket_path: PathBuf::from("/tmp/ela.sock"),
+        },
+        identity: IdentityConfigV1 {
+            policy_version: 1,
+            approval_separation: ApprovalSeparation::RequesterMustDiffer,
+            principals: vec![PrincipalConfigV1 {
+                principal_id: agent_core::PrincipalId::new("local:test-user").expect("principal"),
+                kind: PrincipalKind::Human,
+                roles: vec![PrincipalRole::User, PrincipalRole::Approver],
+                unix_uid: Some(1000),
+                unix_gid: Some(1000),
+                loopback_bearer: false,
+            }],
         },
         storage: StorageConfigV1 {
             data_directory,
@@ -58,19 +70,19 @@ fn strict_config_bounds_redaction_and_fingerprint_are_deterministic() {
     let encoded = toml::to_string(&config).expect("toml");
     let with_unknown = format!("{encoded}\nunknown = true\n");
     assert!(matches!(
-        DeploymentConfigV1::parse(with_unknown.as_bytes()),
+        DeploymentConfigV2::parse(with_unknown.as_bytes()),
         Err(DeploymentConfigError::InvalidConfig)
     ));
     assert!(matches!(
-        DeploymentConfigV1::parse(&vec![b'x'; MAX_DEPLOYMENT_CONFIG_BYTES + 1]),
+        DeploymentConfigV2::parse(&vec![b'x'; MAX_DEPLOYMENT_CONFIG_BYTES + 1]),
         Err(DeploymentConfigError::InvalidConfig)
     ));
 }
 
 #[test]
 fn checked_in_readonly_example_is_valid() {
-    let example = include_bytes!("../../../docs/deployment-config-v1.example.toml");
-    DeploymentConfigV1::parse(example).expect("deployment example");
+    let example = include_bytes!("../../../docs/deployment-config-v2.example.toml");
+    DeploymentConfigV2::parse(example).expect("deployment example");
 }
 
 #[test]

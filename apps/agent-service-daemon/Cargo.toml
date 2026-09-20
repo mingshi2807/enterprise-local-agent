@@ -9,6 +9,7 @@ agent-action-seal-local.workspace = true
 agent-containment-linux.workspace = true
 agent-deployment.workspace = true
 agent-harness.workspace = true
+agent-identity.workspace = true
 agent-knowledge.workspace = true
 agent-knowledge-adapters.workspace = true
 agent-mvp.workspace = true

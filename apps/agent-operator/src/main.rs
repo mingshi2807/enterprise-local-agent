@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf};
 
 use agent_deployment::{
-    CompatibilityManifestV1, DeploymentConfigV1, ListenerConfigV1, create_backup, restore_backup,
+    CompatibilityManifestV1, DeploymentConfigV2, ListenerConfigV1, create_backup, restore_backup,
     verify_backup,
 };
 use anyhow::{Context, bail};
@@ -13,7 +13,7 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let (config_path, command) = arguments()?;
-    let config = DeploymentConfigV1::load(&config_path)?;
+    let config = DeploymentConfigV2::load(&config_path)?;
     let compatibility = CompatibilityManifestV1::from_config(
         &config,
         env!("CARGO_PKG_VERSION"),
@@ -119,13 +119,13 @@ fn validate_identifier(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn print_online(config: &DeploymentConfigV1, path: &str) -> anyhow::Result<()> {
+async fn print_online(config: &DeploymentConfigV2, path: &str) -> anyhow::Result<()> {
     let value: serde_json::Value = serde_json::from_slice(&http_get(config, path).await?)
         .context("service returned invalid JSON")?;
     print_json(&value)
 }
 
-async fn http_get(config: &DeploymentConfigV1, path: &str) -> anyhow::Result<Vec<u8>> {
+async fn http_get(config: &DeploymentConfigV2, path: &str) -> anyhow::Result<Vec<u8>> {
     match &config.listener {
         ListenerConfigV1::Unix { socket_path } => {
             let mut stream = tokio::net::UnixStream::connect(socket_path)

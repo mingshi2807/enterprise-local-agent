@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicU8, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use agent_core::{AgentEvent, AgentEventKind, DurableApprovalOutcome, RunOutcome};
@@ -19,6 +19,11 @@ use agent_harness::{
     RunReadPort,
 };
 pub use agent_harness::{RunKey, WaitingPageCursor};
+use agent_identity::{
+    AuthorizationAction, AuthorizationDecision, AuthorizationResource, DurableRunAuthorization,
+    SecurityAuditEvent, SecurityAuditPhase, SecurityAuditPort, ServiceAuthorizationPolicy,
+    SessionOwnershipPort, SessionOwnershipRecord, VerifiedPrincipal,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -327,6 +332,9 @@ struct StoredApplicationResult {
 pub struct AgentService {
     harness: Arc<ExecutionHarness>,
     read: Arc<dyn RunReadPort>,
+    ownership: Arc<dyn SessionOwnershipPort>,
+    authorization: Arc<dyn ServiceAuthorizationPolicy>,
+    security_audit: Arc<dyn SecurityAuditPort>,
     workflows: HashMap<WorkflowId, Arc<dyn ConfiguredWorkflow>>,
     recovery_workflows: Vec<(RecoveryContract, WorkflowId)>,
     sessions: Mutex<HashSet<SessionId>>,
@@ -358,6 +366,9 @@ impl AgentService {
     pub fn new(
         harness: Arc<ExecutionHarness>,
         read: Arc<dyn RunReadPort>,
+        ownership: Arc<dyn SessionOwnershipPort>,
+        authorization: Arc<dyn ServiceAuthorizationPolicy>,
+        security_audit: Arc<dyn SecurityAuditPort>,
         workflows: Vec<Arc<dyn ConfiguredWorkflow>>,
     ) -> Result<Self, ServiceError> {
         let mut by_id = HashMap::new();
@@ -379,6 +390,9 @@ impl AgentService {
         Ok(Self {
             harness,
             read,
+            ownership,
+            authorization,
+            security_audit,
             workflows: by_id,
             recovery_workflows: by_recovery,
             sessions: Mutex::new(HashSet::new()),
@@ -411,6 +425,97 @@ impl AgentService {
             .ok_or(ServiceError::Draining)
     }
 
+    fn authorize(
+        &self,
+        principal: &VerifiedPrincipal,
+        action: AuthorizationAction,
+        resource: AuthorizationResource<'_>,
+    ) -> Result<(), ServiceError> {
+        (self.authorization.authorize(principal, action, resource)
+            == AuthorizationDecision::Granted)
+            .then_some(())
+            .ok_or(ServiceError::Unauthorized)
+    }
+
+    async fn audit_security(
+        &self,
+        principal: &VerifiedPrincipal,
+        action: AuthorizationAction,
+        phase: SecurityAuditPhase,
+        key: Option<RunKey>,
+        wait_id: Option<DurableApprovalWaitId>,
+    ) -> Result<(), ServiceError> {
+        self.security_audit
+            .record(&SecurityAuditEvent {
+                phase,
+                actor: principal.id().clone(),
+                action,
+                session_id: key.map(RunKey::session_id),
+                run_id: key.map(RunKey::run_id),
+                wait_id,
+            })
+            .await
+            .map_err(|_| ServiceError::SecurityAudit)
+    }
+
+    async fn authorize_mutation(
+        &self,
+        principal: &VerifiedPrincipal,
+        action: AuthorizationAction,
+        resource: AuthorizationResource<'_>,
+        key: Option<RunKey>,
+        wait_id: Option<DurableApprovalWaitId>,
+    ) -> Result<(), ServiceError> {
+        self.authorize(principal, action, resource)?;
+        self.audit_security(
+            principal,
+            action,
+            SecurityAuditPhase::AuthorizationGranted,
+            key,
+            wait_id,
+        )
+        .await?;
+        self.audit_security(
+            principal,
+            action,
+            SecurityAuditPhase::MutationRequested,
+            key,
+            wait_id,
+        )
+        .await
+    }
+
+    async fn audit_mutation_result<T>(
+        &self,
+        principal: &VerifiedPrincipal,
+        action: AuthorizationAction,
+        key: Option<RunKey>,
+        wait_id: Option<DurableApprovalWaitId>,
+        result: Result<T, ServiceError>,
+    ) -> Result<T, ServiceError> {
+        let phase = if result.is_ok() {
+            SecurityAuditPhase::MutationCommitted
+        } else {
+            SecurityAuditPhase::MutationFailed
+        };
+        self.audit_security(principal, action, phase, key, wait_id)
+            .await?;
+        result
+    }
+
+    async fn run_authorization(
+        &self,
+        key: RunKey,
+    ) -> Result<DurableRunAuthorization, ServiceError> {
+        self.read
+            .find_run(key)
+            .await?
+            .ok_or(ServiceError::NotFound)?
+            .authorization()
+            .cloned()
+            .ok_or(ServiceError::LegacyUnowned)
+    }
+
     pub async fn drain(&self, deadline: Duration) -> Result<ShutdownReportV1, ServiceError> {
         self.lifecycle.store(LIFECYCLE_DRAINING, Ordering::Release);
         self.tasks.close();
@@ -439,19 +544,43 @@ impl AgentService {
         })
     }
 
-    pub async fn create_session(&self) -> Result<SessionId, ServiceError> {
+    pub async fn create_session(
+        &self,
+        principal: &VerifiedPrincipal,
+    ) -> Result<SessionId, ServiceError> {
         self.ensure_serving()?;
-        let mut sessions = self.sessions.lock().await;
-        if sessions.len() >= MAX_SESSIONS {
+        self.authorize_mutation(
+            principal,
+            AuthorizationAction::CreateSession,
+            AuthorizationResource::Global,
+            None,
+            None,
+        )
+        .await?;
+        if self.sessions.lock().await.len() >= MAX_SESSIONS {
             return Err(ServiceError::Capacity);
         }
         let id = SessionId::new();
-        sessions.insert(id);
+        let result = self
+            .ownership
+            .create_session(&SessionOwnershipRecord::new(id, principal.id().clone()))
+            .await
+            .map_err(ServiceError::from);
+        self.audit_mutation_result(
+            principal,
+            AuthorizationAction::CreateSession,
+            None,
+            None,
+            result,
+        )
+        .await?;
+        self.sessions.lock().await.insert(id);
         Ok(id)
     }
 
     pub async fn start_run(
         self: &Arc<Self>,
+        principal: &VerifiedPrincipal,
         session_id: SessionId,
         start_request_id: Uuid,
         workflow_id: &WorkflowId,
@@ -459,9 +588,24 @@ impl AgentService {
     ) -> Result<RunView, ServiceError> {
         self.ensure_serving()?;
         workflow_id.validate()?;
-        if !self.sessions.lock().await.contains(&session_id) {
-            return Err(ServiceError::NotFound);
+        let session = self
+            .ownership
+            .load_session(session_id)
+            .await?
+            .ok_or(ServiceError::NotFound)?;
+        if session.owner() != principal.id() {
+            return Err(ServiceError::Unauthorized);
         }
+        self.authorize_mutation(
+            principal,
+            AuthorizationAction::StartWorkflow,
+            AuthorizationResource::Workflow {
+                workflow_id: workflow_id.as_str(),
+            },
+            None,
+            None,
+        )
+        .await?;
         let workflow = self
             .workflows
             .get(workflow_id)
@@ -496,13 +640,28 @@ impl AgentService {
         }
 
         match self.read.find_run(key).await {
-            Ok(Some(_)) => {
+            Ok(Some(summary)) => {
+                let authorization = summary.authorization().ok_or(ServiceError::LegacyUnowned)?;
+                if authorization.owner() != principal.id()
+                    || authorization.workflow_id() != workflow_id.as_str()
+                {
+                    self.active.lock().await.remove(&session_id);
+                    return Err(ServiceError::Unauthorized);
+                }
                 let result = match self.harness.recover_run(key).await {
                     Ok(disposition) => self.view_for_disposition(disposition).await,
                     Err(error) => Err(ServiceError::from(error)),
                 };
                 self.active.lock().await.remove(&session_id);
-                return result;
+                return self
+                    .audit_mutation_result(
+                        principal,
+                        AuthorizationAction::StartWorkflow,
+                        Some(key),
+                        None,
+                        result,
+                    )
+                    .await;
             }
             Ok(None) => {}
             Err(error) => {
@@ -512,13 +671,42 @@ impl AgentService {
         }
 
         let mut context = workflow.new_context(key);
-        let cancellation = match self.harness.start_run(&mut context).await {
+        let durable_authorization = DurableRunAuthorization::new(
+            principal.id().clone(),
+            principal.id().clone(),
+            workflow_id.as_str().to_owned(),
+            self.authorization.policy_version(),
+            self.authorization.fingerprint(),
+        )
+        .map_err(|_| ServiceError::Configuration)?;
+        let cancellation = match self
+            .harness
+            .start_run_with_authorization(&mut context, durable_authorization)
+            .await
+        {
             Ok(handle) => handle,
             Err(error) => {
                 self.active.lock().await.remove(&session_id);
+                let _ = self
+                    .audit_security(
+                        principal,
+                        AuthorizationAction::StartWorkflow,
+                        SecurityAuditPhase::MutationFailed,
+                        Some(key),
+                        None,
+                    )
+                    .await;
                 return Err(ServiceError::Harness(error));
             }
         };
+        self.audit_mutation_result(
+            principal,
+            AuthorizationAction::StartWorkflow,
+            Some(key),
+            None,
+            Ok(()),
+        )
+        .await?;
         {
             let mut active = self.active.lock().await;
             let slot = active.get_mut(&session_id).ok_or(ServiceError::Conflict)?;
@@ -565,7 +753,20 @@ impl AgentService {
         })
     }
 
-    pub async fn get_run_status(&self, key: RunKey) -> Result<RunView, ServiceError> {
+    pub async fn get_run_status(
+        &self,
+        principal: &VerifiedPrincipal,
+        key: RunKey,
+    ) -> Result<RunView, ServiceError> {
+        let authorization = self.run_authorization(key).await?;
+        self.authorize(
+            principal,
+            AuthorizationAction::ReadRun,
+            AuthorizationResource::OwnedRun {
+                workflow_id: authorization.workflow_id(),
+                owner: authorization.owner(),
+            },
+        )?;
         if let Some(active) = self.active.lock().await.get(&key.session_id())
             && active.key == key
         {
@@ -575,7 +776,23 @@ impl AgentService {
             .await
     }
 
-    pub async fn cancel_active_run(&self, key: RunKey) -> Result<(), ServiceError> {
+    pub async fn cancel_active_run(
+        &self,
+        principal: &VerifiedPrincipal,
+        key: RunKey,
+    ) -> Result<(), ServiceError> {
+        let authorization = self.run_authorization(key).await?;
+        self.authorize_mutation(
+            principal,
+            AuthorizationAction::CancelRun,
+            AuthorizationResource::OwnedRun {
+                workflow_id: authorization.workflow_id(),
+                owner: authorization.owner(),
+            },
+            Some(key),
+            None,
+        )
+        .await?;
         let handle = {
             let active = self.active.lock().await;
             let slot = active
@@ -587,16 +804,33 @@ impl AgentService {
             slot.cancellation.clone().ok_or(ServiceError::Conflict)?
         };
         handle.request_cancel();
-        Ok(())
+        self.audit_mutation_result(
+            principal,
+            AuthorizationAction::CancelRun,
+            Some(key),
+            None,
+            Ok(()),
+        )
+        .await
     }
 
     pub async fn read_events(
         &self,
+        principal: &VerifiedPrincipal,
         key: RunKey,
         after: Option<EventSequence>,
         limit: u16,
     ) -> Result<Vec<ServiceEventV2>, ServiceError> {
         validate_read_limit(limit)?;
+        let authorization = self.run_authorization(key).await?;
+        self.authorize(
+            principal,
+            AuthorizationAction::ReadEvents,
+            AuthorizationResource::OwnedRun {
+                workflow_id: authorization.workflow_id(),
+                owner: authorization.owner(),
+            },
+        )?;
         let workflow_id = self.read.find_run(key).await?.and_then(|run| {
             self.recovery_workflows.iter().find_map(|(contract, id)| {
                 (*contract == run.recovery_contract()).then_some(id.clone())
@@ -614,26 +848,43 @@ impl AgentService {
 
     pub async fn run_page(
         &self,
+        principal: &VerifiedPrincipal,
         after: Option<RunPageCursor>,
         limit: u16,
     ) -> Result<DurableRunPage, ServiceError> {
         validate_read_limit(limit)?;
+        self.authorize(
+            principal,
+            AuthorizationAction::ReadOperations,
+            AuthorizationResource::Global,
+        )?;
         self.read.list_runs(after, limit).await.map_err(Into::into)
     }
 
     pub async fn operational_run_page(
         &self,
+        principal: &VerifiedPrincipal,
         after: Option<RunPageCursor>,
         limit: u16,
         reconciliation_only: bool,
     ) -> Result<OperationalRunPageV1, ServiceError> {
         validate_read_limit(limit)?;
+        self.authorize(
+            principal,
+            if reconciliation_only {
+                AuthorizationAction::InspectReconciliation
+            } else {
+                AuthorizationAction::ReadOperations
+            },
+            AuthorizationResource::Global,
+        )?;
         let page = self.read.list_runs(after, limit).await?;
         let mut items = Vec::new();
         for summary in page.items() {
-            let view = self
+            let mut view = self
                 .view_for_disposition(self.harness.recover_run(summary.key()).await?)
                 .await?;
+            project_legacy_unowned(summary.authorization().is_none(), &mut view);
             if reconciliation_only
                 && view.disposition != RunDispositionV1::ManualReconciliationRequired
             {
@@ -656,30 +907,61 @@ impl AgentService {
 
     pub async fn waiting_page(
         &self,
+        principal: &VerifiedPrincipal,
         after: Option<WaitingPageCursor>,
         limit: u16,
     ) -> Result<(Vec<WaitingApprovalView>, Option<WaitingPageCursor>), ServiceError> {
         validate_read_limit(limit)?;
+        self.authorize(
+            principal,
+            AuthorizationAction::ListWaiting,
+            AuthorizationResource::Global,
+        )?;
         let page: DurableWaitingPage = self.read.list_waiting(after, limit).await?;
-        let items = page
-            .items()
-            .iter()
-            .map(|item| WaitingApprovalView {
+        let mut items = Vec::new();
+        for item in page.items() {
+            let Ok(authorization) = self.run_authorization(item.key()).await else {
+                continue;
+            };
+            if self.authorization.authorize(
+                principal,
+                AuthorizationAction::ReadApprovalPreview,
+                AuthorizationResource::Approval {
+                    workflow_id: authorization.workflow_id(),
+                    owner: authorization.owner(),
+                    requester: authorization.requester(),
+                },
+            ) != AuthorizationDecision::Granted
+            {
+                continue;
+            }
+            items.push(WaitingApprovalView {
                 session_id: item.key().session_id(),
                 run_id: item.key().run_id(),
                 wait_id: item.wait_id(),
                 row_version: item.row_version(),
                 state: waiting_state(item.status()),
-            })
-            .collect();
+            });
+        }
         Ok((items, page.next()))
     }
 
     pub async fn approval_preview(
         &self,
+        principal: &VerifiedPrincipal,
         key: RunKey,
         wait_id: DurableApprovalWaitId,
     ) -> Result<ApprovalPreviewV1, ServiceError> {
+        let authorization = self.run_authorization(key).await?;
+        self.authorize(
+            principal,
+            AuthorizationAction::ReadApprovalPreview,
+            AuthorizationResource::Approval {
+                workflow_id: authorization.workflow_id(),
+                owner: authorization.owner(),
+                requester: authorization.requester(),
+            },
+        )?;
         let view: DurableApprovalView = self.harness.durable_approval_view(key, wait_id).await?;
         Ok(ApprovalPreviewV1 {
             wait_id,
@@ -691,41 +973,112 @@ impl AgentService {
 
     pub async fn submit_decision(
         &self,
+        principal: &VerifiedPrincipal,
         key: RunKey,
         wait_id: DurableApprovalWaitId,
         expected_row_version: u64,
         decision: ApprovalDecisionV1,
     ) -> Result<(), ServiceError> {
         self.ensure_serving()?;
+        let authorization = self.run_authorization(key).await?;
+        self.authorize_mutation(
+            principal,
+            AuthorizationAction::DecideApproval,
+            AuthorizationResource::Approval {
+                workflow_id: authorization.workflow_id(),
+                owner: authorization.owner(),
+                requester: authorization.requester(),
+            },
+            Some(key),
+            Some(wait_id),
+        )
+        .await?;
         let outcome = match decision {
             ApprovalDecisionV1::Approve => DurableApprovalOutcome::Approve,
             ApprovalDecisionV1::Deny => DurableApprovalOutcome::Deny,
         };
-        self.harness
-            .record_durable_approval_outcome(key, wait_id, expected_row_version, outcome)
+        let decided_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ServiceError::Conflict)?
+            .as_millis()
+            .try_into()
+            .map_err(|_| ServiceError::Conflict)?;
+        let result = self
+            .harness
+            .record_durable_approval_outcome_as(
+                key,
+                wait_id,
+                expected_row_version,
+                outcome,
+                principal.id().clone(),
+                decided_at,
+            )
             .await
-            .map_err(Into::into)
+            .map_err(Into::into);
+        self.audit_mutation_result(
+            principal,
+            AuthorizationAction::DecideApproval,
+            Some(key),
+            Some(wait_id),
+            result,
+        )
+        .await
     }
 
     pub async fn abort_waiting(
         &self,
+        principal: &VerifiedPrincipal,
         key: RunKey,
         wait_id: DurableApprovalWaitId,
         expected_row_version: u64,
     ) -> Result<(), ServiceError> {
         self.ensure_serving()?;
-        self.harness
+        let authorization = self.run_authorization(key).await?;
+        self.authorize_mutation(
+            principal,
+            AuthorizationAction::AbortWaiting,
+            AuthorizationResource::OwnedRun {
+                workflow_id: authorization.workflow_id(),
+                owner: authorization.owner(),
+            },
+            Some(key),
+            Some(wait_id),
+        )
+        .await?;
+        let result = self
+            .harness
             .abort_durable_waiting(key, wait_id, expected_row_version)
             .await
-            .map_err(Into::into)
+            .map_err(Into::into);
+        self.audit_mutation_result(
+            principal,
+            AuthorizationAction::AbortWaiting,
+            Some(key),
+            Some(wait_id),
+            result,
+        )
+        .await
     }
 
     pub async fn resume_run(
         self: &Arc<Self>,
+        principal: &VerifiedPrincipal,
         key: RunKey,
         wait_id: Option<DurableApprovalWaitId>,
     ) -> Result<(), ServiceError> {
         self.ensure_serving()?;
+        let authorization = self.run_authorization(key).await?;
+        self.authorize_mutation(
+            principal,
+            AuthorizationAction::ResumeRun,
+            AuthorizationResource::OwnedRun {
+                workflow_id: authorization.workflow_id(),
+                owner: authorization.owner(),
+            },
+            Some(key),
+            wait_id,
+        )
+        .await?;
         let disposition = self.harness.recover_run(key).await?;
         if matches!(&disposition, RecoveryDisposition::Waiting(_)) && wait_id.is_none()
             || matches!(&disposition, RecoveryDisposition::Resumable(_)) && wait_id.is_some()
@@ -803,7 +1156,14 @@ impl AgentService {
             service.observer.run_settled(disposition, started.elapsed());
             service.active.lock().await.remove(&key.session_id());
         });
-        Ok(())
+        self.audit_mutation_result(
+            principal,
+            AuthorizationAction::ResumeRun,
+            Some(key),
+            wait_id,
+            Ok(()),
+        )
+        .await
     }
 
     async fn store_result(&self, key: RunKey, result: ApplicationResultV1) {
@@ -836,9 +1196,10 @@ impl AgentService {
         loop {
             let page = self.read.list_runs(cursor, 256).await?;
             for item in page.items() {
-                let view = self
+                let mut view = self
                     .view_for_disposition(self.harness.recover_run(item.key()).await?)
                     .await?;
+                project_legacy_unowned(item.authorization().is_none(), &mut view);
                 self.sessions.lock().await.insert(view.session_id);
                 result.push(view);
             }
@@ -920,6 +1281,12 @@ fn validate_read_limit(limit: u16) -> Result<(), ServiceError> {
         return Err(ServiceError::InvalidRequest);
     }
     Ok(())
+}
+
+fn project_legacy_unowned(unowned: bool, view: &mut RunView) {
+    if unowned && view.disposition == RunDispositionV1::Waiting {
+        view.disposition = RunDispositionV1::ManualReconciliationRequired;
+    }
 }
 
 fn active_view(active: &ActiveRun) -> RunView {
@@ -1223,6 +1590,8 @@ impl ServiceEventV2 {
 pub enum ServiceError {
     #[error("invalid request")]
     InvalidRequest,
+    #[error("operation is not authorized")]
+    Unauthorized,
     #[error("resource not found")]
     NotFound,
     #[error("request conflicts with current state")]
@@ -1235,6 +1604,12 @@ pub enum ServiceError {
     WorkflowUnavailable,
     #[error("service configuration is invalid")]
     Configuration,
+    #[error("durable state predates principal ownership")]
+    LegacyUnowned,
+    #[error("required security audit failed")]
+    SecurityAudit,
+    #[error("durable identity state failed")]
+    IdentityStore(#[from] agent_identity::IdentityStoreError),
     #[error("governed runtime rejected the operation")]
     Harness(#[from] agent_harness::HarnessError),
     #[error("durable read failed")]
@@ -1258,9 +1633,17 @@ mod tests {
         AuditFailurePolicy, HarnessConfig, M0ReadOnlyPolicy, ToolRegistry,
         testing::{FakeModelPort, InMemoryAuditSink},
     };
+    use agent_identity::{
+        ApprovalSeparation, PrincipalRole,
+        testing::{InMemorySecurityAudit, policy, principal},
+    };
     use agent_persistence_sqlite::SqliteRunPersistence;
 
     use super::*;
+
+    fn test_principal() -> VerifiedPrincipal {
+        principal("test-user", &[PrincipalRole::User, PrincipalRole::Approver])
+    }
 
     struct TestWorkflow {
         id: WorkflowId,
@@ -1338,23 +1721,40 @@ mod tests {
             invocations: invocations.clone(),
             delay,
         });
-        let service = Arc::new(AgentService::new(harness, store, vec![workflow]).expect("service"));
+        let authorization = Arc::new(policy(
+            ["test".to_owned()],
+            ApprovalSeparation::RequesterMayApprove,
+        ));
+        let service = Arc::new(
+            AgentService::new(
+                harness,
+                store.clone(),
+                store,
+                authorization,
+                Arc::new(InMemorySecurityAudit::default()),
+                vec![workflow],
+            )
+            .expect("service"),
+        );
         (directory, service, invocations)
     }
 
     #[tokio::test]
     async fn duplicate_start_is_idempotent_and_distinct_concurrent_start_conflicts() {
         let (_directory, service, invocations) = fixture(Duration::from_millis(100)).await;
-        let session = service.create_session().await.expect("session");
+        let principal = test_principal();
+        let session = service.create_session(&principal).await.expect("session");
         let request = Uuid::new_v4();
         let workflow = WorkflowId::new("test").expect("workflow");
         let first = service.start_run(
+            &principal,
             session,
             request,
             &workflow,
             RunInput::new(b"one".to_vec()).expect("input"),
         );
         let second = service.start_run(
+            &principal,
             session,
             request,
             &workflow,
@@ -1367,6 +1767,7 @@ mod tests {
         assert!(matches!(
             service
                 .start_run(
+                    &test_principal(),
                     session,
                     Uuid::new_v4(),
                     &workflow,
@@ -1378,12 +1779,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
         let status = service
-            .get_run_status(RunKey::new(first.run_id, session))
+            .get_run_status(&test_principal(), RunKey::new(first.run_id, session))
             .await
             .expect("status");
         assert_eq!(status.disposition, RunDispositionV1::Completed);
         let retry = service
             .start_run(
+                &test_principal(),
                 session,
                 request,
                 &workflow,
@@ -1398,10 +1800,14 @@ mod tests {
     #[tokio::test]
     async fn cancellation_and_event_projection_remain_metadata_only() {
         let (_directory, service, _) = fixture(Duration::from_millis(100)).await;
-        let session = service.create_session().await.expect("session");
+        let session = service
+            .create_session(&test_principal())
+            .await
+            .expect("session");
         let workflow = WorkflowId::new("test").expect("workflow");
         let run = service
             .start_run(
+                &test_principal(),
                 session,
                 Uuid::new_v4(),
                 &workflow,
@@ -1410,9 +1816,15 @@ mod tests {
             .await
             .expect("start");
         let key = RunKey::new(run.run_id, session);
-        service.cancel_active_run(key).await.expect("cancel");
+        service
+            .cancel_active_run(&test_principal(), key)
+            .await
+            .expect("cancel");
         tokio::time::sleep(Duration::from_millis(150)).await;
-        let events = service.read_events(key, None, 64).await.expect("events");
+        let events = service
+            .read_events(&test_principal(), key, None, 64)
+            .await
+            .expect("events");
         let encoded = serde_json::to_string(&events).expect("encode");
         assert!(!encoded.contains("secret-prompt"));
         assert!(events.iter().all(|event| event.version == 2));
@@ -1429,7 +1841,7 @@ mod tests {
         );
         assert_eq!(
             service
-                .get_run_status(key)
+                .get_run_status(&test_principal(), key)
                 .await
                 .expect("status")
                 .disposition,
@@ -1440,10 +1852,14 @@ mod tests {
     #[tokio::test]
     async fn draining_rejects_new_work_and_waits_for_active_tasks() {
         let (_directory, service, invocations) = fixture(Duration::from_millis(50)).await;
-        let session = service.create_session().await.expect("session");
+        let session = service
+            .create_session(&test_principal())
+            .await
+            .expect("session");
         let workflow = WorkflowId::new("test").expect("workflow");
         service
             .start_run(
+                &test_principal(),
                 session,
                 Uuid::new_v4(),
                 &workflow,
@@ -1456,7 +1872,7 @@ mod tests {
         assert_eq!(service.lifecycle(), ServiceLifecycleV1::Draining);
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
         assert!(matches!(
-            service.create_session().await,
+            service.create_session(&test_principal()).await,
             Err(ServiceError::Draining)
         ));
     }
@@ -1464,10 +1880,14 @@ mod tests {
     #[tokio::test]
     async fn restart_discovers_run_and_restores_its_session() {
         let (directory, first, _) = fixture(Duration::from_millis(1)).await;
-        let session = first.create_session().await.expect("session");
+        let session = first
+            .create_session(&test_principal())
+            .await
+            .expect("session");
         let workflow_id = WorkflowId::new("test").expect("workflow");
         let run = first
             .start_run(
+                &test_principal(),
                 session,
                 Uuid::new_v4(),
                 &workflow_id,
@@ -1479,7 +1899,7 @@ mod tests {
         let mut completed = false;
         for _ in 0..100 {
             if first
-                .get_run_status(key)
+                .get_run_status(&test_principal(), key)
                 .await
                 .is_ok_and(|view| view.disposition == RunDispositionV1::Completed)
             {
@@ -1511,13 +1931,26 @@ mod tests {
             invocations: Arc::new(AtomicUsize::new(0)),
             delay: Duration::from_millis(1),
         });
-        let second =
-            Arc::new(AgentService::new(harness, store, vec![workflow]).expect("restarted service"));
+        let second = Arc::new(
+            AgentService::new(
+                harness,
+                store.clone(),
+                store,
+                Arc::new(policy(
+                    ["test".to_owned()],
+                    ApprovalSeparation::RequesterMayApprove,
+                )),
+                Arc::new(InMemorySecurityAudit::default()),
+                vec![workflow],
+            )
+            .expect("restarted service"),
+        );
         let discovered = second.discover_runs().await.expect("discover");
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].disposition, RunDispositionV1::Completed);
         second
             .start_run(
+                &test_principal(),
                 session,
                 Uuid::new_v4(),
                 &workflow_id,
@@ -1525,5 +1958,160 @@ mod tests {
             )
             .await
             .expect("recovered session accepts new run");
+    }
+
+    #[tokio::test]
+    async fn durable_owner_blocks_cross_principal_run_access() {
+        let (_directory, service, _) = fixture(Duration::from_millis(20)).await;
+        let owner = test_principal();
+        let stranger = principal("other-user", &[PrincipalRole::User]);
+        let session = service.create_session(&owner).await.expect("session");
+        let run = service
+            .start_run(
+                &owner,
+                session,
+                Uuid::new_v4(),
+                &WorkflowId::new("test").expect("workflow"),
+                RunInput::new(b"owned".to_vec()).expect("input"),
+            )
+            .await
+            .expect("start");
+        let key = RunKey::new(run.run_id, session);
+
+        assert!(matches!(
+            service.get_run_status(&stranger, key).await,
+            Err(ServiceError::Unauthorized)
+        ));
+        assert!(matches!(
+            service.read_events(&stranger, key, None, 16).await,
+            Err(ServiceError::Unauthorized)
+        ));
+    }
+
+    #[tokio::test]
+    async fn required_security_audit_failure_prevents_session_mutation() {
+        let directory = tempfile::tempdir().expect("directory");
+        let store = Arc::new(
+            SqliteRunPersistence::open(directory.path().join("runs.sqlite3"))
+                .await
+                .expect("store"),
+        );
+        let harness = Arc::new(
+            ExecutionHarness::new(
+                Arc::new(FakeModelPort::scripted(Vec::new())),
+                ToolRegistry::new(),
+                Arc::new(M0ReadOnlyPolicy),
+                Arc::new(InMemoryAuditSink::new()),
+                HarnessConfig::new(AuditFailurePolicy::FailClosed, Duration::from_secs(1))
+                    .expect("config"),
+            )
+            .with_persistence_port(store.clone()),
+        );
+        let workflow: Arc<dyn ConfiguredWorkflow> = Arc::new(TestWorkflow {
+            id: WorkflowId::new("test").expect("workflow"),
+            invocations: Arc::new(AtomicUsize::new(0)),
+            delay: Duration::from_millis(1),
+        });
+        let service = AgentService::new(
+            harness,
+            store.clone(),
+            store,
+            Arc::new(policy(
+                ["test".to_owned()],
+                ApprovalSeparation::RequesterMayApprove,
+            )),
+            Arc::new(InMemorySecurityAudit::failing()),
+            vec![workflow],
+        )
+        .expect("service");
+
+        assert!(matches!(
+            service.create_session(&test_principal()).await,
+            Err(ServiceError::SecurityAudit)
+        ));
+        assert!(service.sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn security_audit_orders_authorization_before_durable_mutation_commit() {
+        let directory = tempfile::tempdir().expect("directory");
+        let store = Arc::new(
+            SqliteRunPersistence::open(directory.path().join("runs.sqlite3"))
+                .await
+                .expect("store"),
+        );
+        let harness = Arc::new(
+            ExecutionHarness::new(
+                Arc::new(FakeModelPort::scripted(Vec::new())),
+                ToolRegistry::new(),
+                Arc::new(M0ReadOnlyPolicy),
+                Arc::new(InMemoryAuditSink::new()),
+                HarnessConfig::new(AuditFailurePolicy::FailClosed, Duration::from_secs(1))
+                    .expect("config"),
+            )
+            .with_persistence_port(store.clone()),
+        );
+        let workflow: Arc<dyn ConfiguredWorkflow> = Arc::new(TestWorkflow {
+            id: WorkflowId::new("test").expect("workflow"),
+            invocations: Arc::new(AtomicUsize::new(0)),
+            delay: Duration::from_millis(1),
+        });
+        let security_audit = Arc::new(InMemorySecurityAudit::default());
+        let service = AgentService::new(
+            harness,
+            store.clone(),
+            store.clone(),
+            Arc::new(policy(
+                ["test".to_owned()],
+                ApprovalSeparation::RequesterMayApprove,
+            )),
+            security_audit.clone(),
+            vec![workflow],
+        )
+        .expect("service");
+        let actor = test_principal();
+
+        let session_id = service.create_session(&actor).await.expect("session");
+        assert_eq!(
+            security_audit
+                .events()
+                .iter()
+                .map(|event| event.phase)
+                .collect::<Vec<_>>(),
+            [
+                SecurityAuditPhase::AuthorizationGranted,
+                SecurityAuditPhase::MutationRequested,
+                SecurityAuditPhase::MutationCommitted,
+            ]
+        );
+        assert_eq!(
+            store
+                .load_session(session_id)
+                .await
+                .expect("ownership")
+                .expect("durable session")
+                .owner(),
+            actor.id()
+        );
+    }
+
+    #[test]
+    fn legacy_unowned_waiting_is_never_exposed_as_resumable_waiting() {
+        let mut view = RunView {
+            session_id: SessionId::new(),
+            run_id: RunId::new(),
+            disposition: RunDispositionV1::Waiting,
+            last_sequence: None,
+            outcome: None,
+            workflow_id: None,
+            result: None,
+            duration_millis: None,
+        };
+
+        project_legacy_unowned(true, &mut view);
+        assert_eq!(
+            view.disposition,
+            RunDispositionV1::ManualReconciliationRequired
+        );
     }
 }

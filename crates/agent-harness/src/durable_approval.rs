@@ -2,8 +2,8 @@ use std::fmt;
 
 use agent_core::{
     ActionDigest, ActionProposalId, ApprovalRequestId, DurableApprovalOutcome,
-    DurableApprovalWaitId, GraphNodeAttemptId, GraphNodeId, RunId, SessionId, ToolCallId,
-    ToolContractDigest, WorkspaceBindingId,
+    DurableApprovalWaitId, GraphNodeAttemptId, GraphNodeId, PrincipalId, RunId, SessionId,
+    ToolCallId, ToolContractDigest, WorkspaceBindingId,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -103,6 +103,8 @@ pub struct ActionSealBinding {
     action_digest: ActionDigest,
     workspace_binding_id: WorkspaceBindingId,
     tool_contract_digest: ToolContractDigest,
+    #[serde(default)]
+    requester: Option<PrincipalId>,
     capsule_version: u16,
 }
 
@@ -136,8 +138,15 @@ impl ActionSealBinding {
             action_digest,
             workspace_binding_id,
             tool_contract_digest,
+            requester: None,
             capsule_version: LOCAL_WRITE_CAPSULE_VERSION,
         }
+    }
+
+    #[must_use]
+    pub fn with_requester(mut self, requester: PrincipalId) -> Self {
+        self.requester = Some(requester);
+        self
     }
 
     #[must_use]
@@ -188,6 +197,10 @@ impl ActionSealBinding {
     #[must_use]
     pub const fn tool_contract_digest(&self) -> ToolContractDigest {
         self.tool_contract_digest
+    }
+    #[must_use]
+    pub const fn requester(&self) -> Option<&PrincipalId> {
+        self.requester.as_ref()
     }
     #[must_use]
     pub const fn capsule_version(&self) -> u16 {
@@ -334,6 +347,10 @@ pub struct DurableApprovalRecord {
     sealed_action: SealedLocalWriteAction,
     status: DurableApprovalStatus,
     row_version: u64,
+    #[serde(default)]
+    decision_actor: Option<PrincipalId>,
+    #[serde(default)]
+    decision_timestamp_unix_millis: Option<u64>,
 }
 
 impl DurableApprovalRecord {
@@ -344,6 +361,8 @@ impl DurableApprovalRecord {
             sealed_action,
             status: DurableApprovalStatus::Waiting,
             row_version: 0,
+            decision_actor: None,
+            decision_timestamp_unix_millis: None,
         }
     }
     #[must_use]
@@ -362,10 +381,28 @@ impl DurableApprovalRecord {
     pub const fn row_version(&self) -> u64 {
         self.row_version
     }
+    #[must_use]
+    pub const fn decision_actor(&self) -> Option<&PrincipalId> {
+        self.decision_actor.as_ref()
+    }
+    #[must_use]
+    pub const fn decision_timestamp_unix_millis(&self) -> Option<u64> {
+        self.decision_timestamp_unix_millis
+    }
 
     pub fn restore_store_state(mut self, status: DurableApprovalStatus, row_version: u64) -> Self {
         self.status = status;
         self.row_version = row_version;
+        self
+    }
+
+    pub fn restore_decision_identity(
+        mut self,
+        actor: Option<PrincipalId>,
+        timestamp_unix_millis: Option<u64>,
+    ) -> Self {
+        self.decision_actor = actor;
+        self.decision_timestamp_unix_millis = timestamp_unix_millis;
         self
     }
 }
@@ -422,7 +459,7 @@ impl DurableApprovalView {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DurableApprovalDecisionCommand {
     pub key: RunKey,
     pub wait_id: DurableApprovalWaitId,
@@ -432,6 +469,8 @@ pub struct DurableApprovalDecisionCommand {
     pub action_digest: ActionDigest,
     pub expected_row_version: u64,
     pub outcome: DurableApprovalOutcome,
+    pub actor: Option<PrincipalId>,
+    pub decided_at_unix_millis: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -16,16 +16,20 @@ use agent_core::{
     ToolCall, ToolDefinition, ToolInput, ToolResult, WorkspaceBindingId,
 };
 use agent_deployment::{
-    BuildInfoV1, DependencyReadinessV1, DeploymentConfigV1, DeploymentLock, EnvironmentEntryV1,
+    BuildInfoV1, DependencyReadinessV1, DeploymentConfigV2, DeploymentLock, EnvironmentEntryV1,
     KnowledgeConfigV1, ListenerConfigV1, LocalWriteConfigV1, MetricLatencyKind, ModelAuthConfigV1,
-    ModelConfigV1, OperationalMetrics, OperationsState, ReadinessCache, ReadinessSnapshotV1,
-    ReadinessStatusV1, WorkflowReadinessV1,
+    ModelConfigV1, OperationalMetrics, OperationsState, PrincipalConfigV1, ReadinessCache,
+    ReadinessSnapshotV1, ReadinessStatusV1, WorkflowReadinessV1,
 };
 use agent_harness::{
     ApprovalPreview, AuditFailurePolicy, AuditPortError, AuditSink, ContainedInvocation,
     ContainedToolPort, ContainmentPortError, ExecutionHarness, HarnessConfig, M6ApprovalPolicy,
     ModelPort, ModelPortError, PortFuture, RecoveredRun, RecoveredWaitingRun, RecoveryContract,
     RunContext, RunKey, ToolRegistry, compute_tool_contract_digest,
+};
+use agent_identity::{
+    AuthenticationClass, AuthorizationPolicyFingerprint, DefaultDenyServiceAuthorizationPolicy,
+    IdentityFuture, SecurityAuditError, SecurityAuditEvent, SecurityAuditPort, VerifiedPrincipal,
 };
 use agent_knowledge::{
     EvidenceSet, FederatedFailurePolicy, KnowledgeBackendPort, KnowledgeError, KnowledgeFuture,
@@ -46,10 +50,24 @@ use agent_service::{
     WorkflowId,
 };
 use agent_service_http::{HttpSecurity, router_with_operations};
+use agent_service_http::{UnixPeerCredentials, UnixPrincipalMapping};
 use anyhow::{Context, bail};
 use sha2::{Digest, Sha256};
 
 const DEPLOYMENT_CONFIG_ENV: &str = "ELA_DEPLOYMENT_CONFIG";
+
+fn verified_principal(
+    config: &PrincipalConfigV1,
+    authentication_class: AuthenticationClass,
+) -> anyhow::Result<VerifiedPrincipal> {
+    VerifiedPrincipal::new(
+        config.principal_id.clone(),
+        config.kind,
+        config.roles.iter().copied(),
+        authentication_class,
+    )
+    .map_err(|_| anyhow::anyhow!("invalid trusted principal configuration"))
+}
 
 struct MeteredModel {
     inner: Arc<dyn ModelPort>,
@@ -252,6 +270,29 @@ impl AuditSink for MetadataAudit {
     }
 }
 
+impl SecurityAuditPort for MetadataAudit {
+    fn record<'a>(
+        &'a self,
+        event: &'a SecurityAuditEvent,
+    ) -> IdentityFuture<'a, Result<(), SecurityAuditError>> {
+        let file = self.file.clone();
+        let event = event.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let bytes = serde_json::to_vec(&event).map_err(|_| SecurityAuditError)?;
+                let mut file = file.lock().map_err(|_| SecurityAuditError)?;
+                file.write_all(&bytes)
+                    .and_then(|_| file.write_all(b"\n"))
+                    .and_then(|_| file.sync_data())
+                    .map_err(|_| SecurityAuditError)
+            })
+            .await
+            .map_err(|_| SecurityAuditError)??;
+            Ok(())
+        })
+    }
+}
+
 struct HealthWorkflow {
     id: WorkflowId,
     budget: RunBudget,
@@ -317,7 +358,7 @@ async fn main() -> anyhow::Result<()> {
     let config_path = env::var_os(DEPLOYMENT_CONFIG_ENV)
         .map(PathBuf::from)
         .context("ELA_DEPLOYMENT_CONFIG is required")?;
-    let config = DeploymentConfigV1::load(&config_path)?;
+    let config = DeploymentConfigV2::load(&config_path)?;
     let fingerprint = config.fingerprint()?.to_hex();
     let metrics = OperationalMetrics::new();
     let _data = DeploymentLock::acquire(&config.storage.data_directory)?;
@@ -390,9 +431,29 @@ async fn main() -> anyhow::Result<()> {
     }
     let harness = Arc::new(harness);
     let workflows = workflow_catalog(route, localwrite_enabled)?;
+    let authorization = Arc::new(
+        DefaultDenyServiceAuthorizationPolicy::new(
+            config.identity.policy_version,
+            AuthorizationPolicyFingerprint::from_bytes(
+                Sha256::digest(fingerprint.as_bytes()).into(),
+            ),
+            workflows
+                .iter()
+                .map(|workflow| workflow.id().as_str().to_owned()),
+            config.identity.approval_separation,
+        )
+        .map_err(|_| anyhow::anyhow!("invalid authorization policy configuration"))?,
+    );
     let service = Arc::new(
-        AgentService::new(harness, persistence, workflows)?
-            .with_observer(Arc::new(metrics.clone())),
+        AgentService::new(
+            harness,
+            persistence.clone(),
+            persistence,
+            authorization,
+            audit.clone(),
+            workflows,
+        )?
+        .with_observer(Arc::new(metrics.clone())),
     );
     let discovered = service.discover_runs().await?;
     for run in &discovered {
@@ -508,8 +569,21 @@ async fn main() -> anyhow::Result<()> {
                 listener,
                 router_with_operations(
                     service.clone(),
-                    HttpSecurity::loopback(bearer, allowed_hosts.clone(), allowed_origins.clone())
-                        .map_err(|_| anyhow::anyhow!("invalid loopback security configuration"))?,
+                    HttpSecurity::loopback(
+                        bearer,
+                        allowed_hosts.clone(),
+                        allowed_origins.clone(),
+                        verified_principal(
+                            config
+                                .identity
+                                .principals
+                                .iter()
+                                .find(|principal| principal.loopback_bearer)
+                                .context("loopback principal is not configured")?,
+                            AuthenticationClass::LoopbackBearer,
+                        )?,
+                    )
+                    .map_err(|_| anyhow::anyhow!("invalid loopback security configuration"))?,
                     operations,
                 ),
             )
@@ -525,7 +599,30 @@ async fn main() -> anyhow::Result<()> {
                 .context("failed to restrict service socket")?;
             let result = axum::serve(
                 listener,
-                router_with_operations(service.clone(), HttpSecurity::unix_socket(), operations),
+                router_with_operations(
+                    service.clone(),
+                    HttpSecurity::unix_socket(
+                        config
+                            .identity
+                            .principals
+                            .iter()
+                            .filter_map(|principal| {
+                                principal
+                                    .unix_uid
+                                    .zip(principal.unix_gid)
+                                    .map(|(uid, gid)| {
+                                        verified_principal(principal, AuthenticationClass::UnixPeer)
+                                            .map(|verified| {
+                                                UnixPrincipalMapping::new(uid, gid, verified)
+                                            })
+                                    })
+                            })
+                            .collect::<anyhow::Result<Vec<_>>>()?,
+                    )
+                    .map_err(|_| anyhow::anyhow!("invalid Unix peer security configuration"))?,
+                    operations,
+                )
+                .into_make_service_with_connect_info::<UnixPeerCredentials>(),
             )
             .with_graceful_shutdown(shutdown_sequence(service, audit, shutdown_grace))
             .await;

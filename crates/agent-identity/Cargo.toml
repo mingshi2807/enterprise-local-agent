@@ -1,0 +1,12 @@
+[package]
+name = "agent-identity"
+version.workspace = true
+edition.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+agent-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true

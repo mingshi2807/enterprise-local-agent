@@ -3,6 +3,77 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub const MAX_PRINCIPAL_ID_BYTES: usize = 128;
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct PrincipalId(String);
+
+impl PrincipalId {
+    pub fn new(value: impl Into<String>) -> Result<Self, PrincipalIdError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > MAX_PRINCIPAL_ID_BYTES
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'@')
+            })
+        {
+            return Err(PrincipalIdError);
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for PrincipalId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PrincipalId([REDACTED])")
+    }
+}
+
+impl fmt::Display for PrincipalId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for PrincipalId {
+    type Err = PrincipalIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for PrincipalId {
+    type Error = PrincipalIdError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<PrincipalId> for String {
+    fn from(value: PrincipalId) -> Self {
+        value.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrincipalIdError;
+
+impl fmt::Display for PrincipalIdError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("principal identifier is invalid")
+    }
+}
+
+impl std::error::Error for PrincipalIdError {}
+
 macro_rules! define_id {
     ($name:ident) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -175,5 +246,15 @@ mod tests {
             .expect("WorkspaceBindingId must deserialize"),
             workspace_binding_id
         );
+    }
+
+    #[test]
+    fn principal_id_is_bounded_and_redacted() {
+        let id = PrincipalId::new("local:engineering-user").expect("valid principal");
+        assert_eq!(id.as_str(), "local:engineering-user");
+        assert_eq!(format!("{id:?}"), "PrincipalId([REDACTED])");
+        assert!(PrincipalId::new("").is_err());
+        assert!(PrincipalId::new("contains space").is_err());
+        assert!(PrincipalId::new("x".repeat(MAX_PRINCIPAL_ID_BYTES + 1)).is_err());
     }
 }

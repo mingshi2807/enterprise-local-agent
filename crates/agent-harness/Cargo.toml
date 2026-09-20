@@ -8,6 +8,7 @@ test-support = []
 
 [dependencies]
 agent-core.workspace = true
+agent-identity.workspace = true
 agent-knowledge.workspace = true
 jsonschema.workspace = true
 serde.workspace = true

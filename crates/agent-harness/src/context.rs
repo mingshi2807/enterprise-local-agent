@@ -323,6 +323,13 @@ impl RunContext {
         )
     }
 
+    pub(crate) fn run_record_with_authorization(
+        &self,
+        authorization: agent_identity::DurableRunAuthorization,
+    ) -> crate::RunRecord {
+        self.run_record().with_authorization(authorization)
+    }
+
     pub(crate) fn durable_checkpoint(&self) -> crate::DurableCheckpoint {
         crate::DurableCheckpoint::new(self.durable_state.clone())
     }

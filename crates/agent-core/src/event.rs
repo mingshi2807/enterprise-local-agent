@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ActionDigest, ActionProposalId, ActionRejectionReason, ApprovalRequestId, CapabilityKind,
     DurableApprovalWaitId, GraphProgressEvent, KnowledgeRetrievalId, LoopEventKind, ModelCallId,
-    RunId, RunOutcome, TokenUsage, ToolCallId, ToolContractDigest, ToolDomainFailureKind, ToolName,
-    WorkspaceBindingId,
+    PrincipalId, RunId, RunOutcome, TokenUsage, ToolCallId, ToolContractDigest,
+    ToolDomainFailureKind, ToolName, WorkspaceBindingId,
 };
 
 pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(9);
@@ -197,6 +197,8 @@ pub enum AgentEventKind {
         approval_request_id: ApprovalRequestId,
         outcome: DurableApprovalOutcome,
         row_version: u64,
+        #[serde(default)]
+        actor: Option<PrincipalId>,
     },
     DurableApprovalGranted {
         wait_id: DurableApprovalWaitId,

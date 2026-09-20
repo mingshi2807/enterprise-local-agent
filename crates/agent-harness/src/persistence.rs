@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use agent_core::DurableApprovalWaitId;
+use agent_identity::DurableRunAuthorization;
 
 use crate::{DurableApprovalDecisionCommand, DurableApprovalRecord, DurableApprovalStatus};
 
@@ -61,6 +62,8 @@ pub struct RunRecord {
     key: RunKey,
     budget: RunBudget,
     recovery_contract: RecoveryContract,
+    #[serde(default)]
+    authorization: Option<DurableRunAuthorization>,
 }
 
 impl RunRecord {
@@ -72,7 +75,14 @@ impl RunRecord {
             key,
             budget,
             recovery_contract,
+            authorization: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_authorization(mut self, authorization: DurableRunAuthorization) -> Self {
+        self.authorization = Some(authorization);
+        self
     }
 
     #[must_use]
@@ -98,6 +108,11 @@ impl RunRecord {
     #[must_use]
     pub const fn recovery_contract(&self) -> RecoveryContract {
         self.recovery_contract
+    }
+
+    #[must_use]
+    pub const fn authorization(&self) -> Option<&DurableRunAuthorization> {
+        self.authorization.as_ref()
     }
 }
 
@@ -233,8 +248,8 @@ impl RecordDurableApprovalDecision {
         &self.transition
     }
     #[must_use]
-    pub const fn command(&self) -> DurableApprovalDecisionCommand {
-        self.command
+    pub const fn command(&self) -> &DurableApprovalDecisionCommand {
+        &self.command
     }
 }
 

@@ -295,14 +295,14 @@ service. It does not acquire model, tool, approval, policy, containment, or
 recovery authority from `ExecutionHarness`.
 
 The daemon now requires an absolute `ELA_DEPLOYMENT_CONFIG` path naming a
-strict, versioned `DeploymentConfigV1` TOML document. Unknown fields and
+strict, versioned `DeploymentConfigV2` TOML document. Unknown fields and
 unbounded values are rejected. Configuration covers listener security,
 persistence and audit paths, workflow profiles, model and knowledge adapters,
 MCP fingerprints, LocalWrite workspace and artifact bindings, external secret
 references, and operational limits. Secret values remain outside the document.
 A deterministic SHA-256 deployment fingerprint covers security-relevant
 non-secret configuration. See
-[`docs/deployment-config-v1.example.toml`](docs/deployment-config-v1.example.toml).
+[`docs/deployment-config-v2.example.toml`](docs/deployment-config-v2.example.toml).
 
 ReadOnly and LocalWrite readiness are evaluated independently. Startup performs
 bounded deep checks for the dependencies used by configured workflows, then

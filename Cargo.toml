@@ -9,6 +9,7 @@ members = [
     "crates/agent-core",
     "crates/agent-harness",
     "crates/agent-graph",
+    "crates/agent-identity",
     "crates/agent-knowledge",
     "crates/agent-knowledge-adapters",
     "crates/agent-loop",
@@ -32,6 +33,7 @@ agent-containment-linux = { path = "crates/agent-containment-linux" }
 agent-deployment = { path = "crates/agent-deployment" }
 agent-harness = { path = "crates/agent-harness" }
 agent-graph = { path = "crates/agent-graph" }
+agent-identity = { path = "crates/agent-identity" }
 agent-knowledge = { path = "crates/agent-knowledge" }
 agent-knowledge-adapters = { path = "crates/agent-knowledge-adapters" }
 agent-loop = { path = "crates/agent-loop" }

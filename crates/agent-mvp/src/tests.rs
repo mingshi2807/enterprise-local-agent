@@ -16,16 +16,58 @@ use agent_harness::{
     ModelPortError, RunPersistencePort, ToolRegistry,
     testing::{FakeContainedToolPort, FakeModelPort, InMemoryAuditSink},
 };
+use agent_identity::{
+    ApprovalSeparation, PrincipalRole, VerifiedPrincipal,
+    testing::{InMemorySecurityAudit, policy, principal},
+};
 use agent_knowledge::{
     BackendEvidenceSet, Evidence, EvidenceMetadata, EvidenceSet, EvidenceSource, KnowledgeError,
     KnowledgeFuture, KnowledgePort,
 };
 use agent_persistence_sqlite::SqliteRunPersistence;
-use agent_service::{AgentService, ApprovalDecisionV1, RunDispositionV1};
+use agent_service::{AgentService, ApprovalDecisionV1, ConfiguredWorkflow, RunDispositionV1};
 use serde_json::json;
 use uuid::Uuid;
 
 use super::*;
+
+fn test_principal() -> VerifiedPrincipal {
+    principal(
+        "mvp-test-user",
+        &[PrincipalRole::User, PrincipalRole::Approver],
+    )
+}
+
+fn requester_principal() -> VerifiedPrincipal {
+    principal("mvp-requester", &[PrincipalRole::User])
+}
+
+fn approver_principal() -> VerifiedPrincipal {
+    principal("mvp-approver", &[PrincipalRole::Approver])
+}
+
+fn build_service(
+    harness: Arc<ExecutionHarness>,
+    persistence: Arc<SqliteRunPersistence>,
+    workflows: Vec<Arc<dyn ConfiguredWorkflow>>,
+) -> AgentService {
+    let workflow_ids = workflows
+        .iter()
+        .map(|workflow| workflow.id().as_str().to_owned())
+        .collect::<Vec<_>>();
+    AgentService::new(
+        harness,
+        persistence.clone(),
+        persistence,
+        Arc::new(policy(
+            workflow_ids,
+            ApprovalSeparation::RequesterMayApprove,
+        )),
+        Arc::new(InMemorySecurityAudit::default()),
+        workflows,
+    )
+    .expect("service")
+}
 
 struct FixedKnowledge {
     evidence: EvidenceSet,
@@ -144,11 +186,12 @@ fn write_definition() -> ToolDefinition {
 
 async fn wait_for(
     service: &Arc<AgentService>,
+    principal: &VerifiedPrincipal,
     key: RunKey,
     expected: RunDispositionV1,
 ) -> agent_service::RunView {
     for _ in 0..200 {
-        if let Ok(view) = service.get_run_status(key).await
+        if let Ok(view) = service.get_run_status(principal, key).await
             && view.disposition == expected
         {
             return view;
@@ -220,11 +263,12 @@ async fn readonly_workflow_completes_without_containment_and_binds_citations() {
         EnterpriseMvpWorkflow::readonly(KnowledgeRoute::single(KnowledgeBackendId::OcppRagKag))
             .expect("workflow"),
     );
-    let service =
-        Arc::new(AgentService::new(harness, persistence, vec![workflow]).expect("service"));
-    let session = service.create_session().await.expect("session");
+    let service = Arc::new(build_service(harness, persistence, vec![workflow]));
+    let principal = test_principal();
+    let session = service.create_session(&principal).await.expect("session");
     let view = service
         .start_run(
+            &principal,
             session,
             Uuid::new_v4(),
             &WorkflowId::new(READONLY_WORKFLOW_ID).expect("id"),
@@ -234,6 +278,7 @@ async fn readonly_workflow_completes_without_containment_and_binds_citations() {
         .expect("start");
     let completed = wait_for(
         &service,
+        &principal,
         RunKey::new(view.run_id, session),
         RunDispositionV1::Completed,
     )
@@ -248,7 +293,7 @@ async fn readonly_workflow_completes_without_containment_and_binds_citations() {
     assert_eq!(fake_model.invocation_count(), 1);
     assert_eq!(knowledge.calls.load(Ordering::SeqCst), 1);
     let events = service
-        .read_events(RunKey::new(view.run_id, session), None, 64)
+        .read_events(&principal, RunKey::new(view.run_id, session), None, 64)
         .await
         .expect("events");
     let serialized = serde_json::to_string(&events).expect("event JSON");
@@ -287,27 +332,26 @@ async fn model_knowledge_and_citation_failures_terminalize_without_results() {
     ];
     for (model, knowledge) in cases {
         let (_directory, persistence) = store().await;
-        let service = Arc::new(
-            AgentService::new(
-                Arc::new(build_harness(
-                    model,
-                    ToolRegistry::new(),
-                    knowledge,
-                    persistence.clone(),
-                )),
-                persistence,
-                vec![Arc::new(
-                    EnterpriseMvpWorkflow::readonly(KnowledgeRoute::single(
-                        KnowledgeBackendId::OcppRagKag,
-                    ))
-                    .expect("workflow"),
-                )],
-            )
-            .expect("service"),
-        );
-        let session = service.create_session().await.expect("session");
+        let service = Arc::new(build_service(
+            Arc::new(build_harness(
+                model,
+                ToolRegistry::new(),
+                knowledge,
+                persistence.clone(),
+            )),
+            persistence,
+            vec![Arc::new(
+                EnterpriseMvpWorkflow::readonly(KnowledgeRoute::single(
+                    KnowledgeBackendId::OcppRagKag,
+                ))
+                .expect("workflow"),
+            )],
+        ));
+        let principal = test_principal();
+        let session = service.create_session(&principal).await.expect("session");
         let run = service
             .start_run(
+                &principal,
                 session,
                 Uuid::new_v4(),
                 &WorkflowId::new(READONLY_WORKFLOW_ID).expect("id"),
@@ -317,6 +361,7 @@ async fn model_knowledge_and_citation_failures_terminalize_without_results() {
             .expect("start");
         let terminal = wait_for(
             &service,
+            &principal,
             RunKey::new(run.run_id, session),
             RunDispositionV1::Failed,
         )
@@ -330,27 +375,24 @@ async fn oversized_mvp_input_is_rejected_before_run_or_model_invocation() {
     let (_directory, persistence) = store().await;
     let knowledge = Arc::new(FixedKnowledge::new());
     let fake_model = model(r#"{"final_answer":"unused","citations":[]}"#);
-    let service = Arc::new(
-        AgentService::new(
-            Arc::new(build_harness(
-                fake_model.clone(),
-                ToolRegistry::new(),
-                knowledge.clone(),
-                persistence.clone(),
-            )),
-            persistence,
-            vec![Arc::new(
-                EnterpriseMvpWorkflow::readonly(KnowledgeRoute::single(
-                    KnowledgeBackendId::OcppRagKag,
-                ))
+    let service = Arc::new(build_service(
+        Arc::new(build_harness(
+            fake_model.clone(),
+            ToolRegistry::new(),
+            knowledge.clone(),
+            persistence.clone(),
+        )),
+        persistence,
+        vec![Arc::new(
+            EnterpriseMvpWorkflow::readonly(KnowledgeRoute::single(KnowledgeBackendId::OcppRagKag))
                 .expect("workflow"),
-            )],
-        )
-        .expect("service"),
-    );
-    let session = service.create_session().await.expect("session");
+        )],
+    ));
+    let requester = requester_principal();
+    let session = service.create_session(&requester).await.expect("session");
     let result = service
         .start_run(
+            &requester,
             session,
             Uuid::new_v4(),
             &WorkflowId::new(READONLY_WORKFLOW_ID).expect("id"),
@@ -395,11 +437,13 @@ async fn localwrite_fixture(
         EnterpriseMvpWorkflow::localwrite(KnowledgeRoute::single(KnowledgeBackendId::OcppRagKag))
             .expect("workflow"),
     );
-    let service =
-        Arc::new(AgentService::new(harness, persistence.clone(), vec![workflow]).expect("service"));
-    let session = service.create_session().await.expect("session");
+    let service = Arc::new(build_service(harness, persistence.clone(), vec![workflow]));
+    let requester = requester_principal();
+    let approver = approver_principal();
+    let session = service.create_session(&requester).await.expect("session");
     let start = service
         .start_run(
+            &requester,
             session,
             Uuid::new_v4(),
             &WorkflowId::new(LOCALWRITE_WORKFLOW_ID).expect("id"),
@@ -408,8 +452,11 @@ async fn localwrite_fixture(
         .await
         .expect("start");
     let key = RunKey::new(start.run_id, session);
-    wait_for(&service, key, RunDispositionV1::Waiting).await;
-    let (waiting, _) = service.waiting_page(None, 8).await.expect("waiting page");
+    wait_for(&service, &requester, key, RunDispositionV1::Waiting).await;
+    let (waiting, _) = service
+        .waiting_page(&approver, None, 8)
+        .await
+        .expect("waiting page");
     let wait = waiting.first().expect("wait").clone();
 
     drop(service);
@@ -426,16 +473,24 @@ async fn localwrite_fixture(
         EnterpriseMvpWorkflow::localwrite(KnowledgeRoute::single(KnowledgeBackendId::OcppRagKag))
             .expect("workflow"),
     );
-    let restarted = Arc::new(
-        AgentService::new(restarted_harness, persistence, vec![workflow]).expect("restart service"),
-    );
+    let restarted = Arc::new(build_service(
+        restarted_harness,
+        persistence.clone(),
+        vec![workflow],
+    ));
     restarted.discover_runs().await.expect("discover");
     restarted
-        .submit_decision(key, wait.wait_id, wait.row_version, decision)
+        .submit_decision(&approver, key, wait.wait_id, wait.row_version, decision)
         .await
         .expect("decision");
+    let persisted = persistence
+        .load_durable_approval_wait(key, wait.wait_id)
+        .await
+        .expect("persisted decision");
+    assert_eq!(persisted.decision_actor(), Some(approver.id()));
+    assert!(persisted.decision_timestamp_unix_millis().is_some());
     restarted
-        .resume_run(key, Some(wait.wait_id))
+        .resume_run(&requester, key, Some(wait.wait_id))
         .await
         .expect("resume");
     let expected = if decision == ApprovalDecisionV1::Approve {
@@ -443,7 +498,7 @@ async fn localwrite_fixture(
     } else {
         RunDispositionV1::Failed
     };
-    let terminal = wait_for(&restarted, key, expected).await;
+    let terminal = wait_for(&restarted, &requester, key, expected).await;
     (
         tool.invocation_count(),
         terminal.disposition,

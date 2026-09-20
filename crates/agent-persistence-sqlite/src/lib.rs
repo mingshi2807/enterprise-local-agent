@@ -16,6 +16,9 @@ use agent_harness::{
     PersistenceFuture, PersistencePortError, ReadFuture, RecordDurableApprovalDecision, RunKey,
     RunPageCursor, RunPersistencePort, RunReadPort, RunRecord, WaitingPageCursor,
 };
+use agent_identity::{
+    IdentityFuture, IdentityStoreError, SessionOwnershipPort, SessionOwnershipRecord,
+};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, backup::Backup, params};
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
@@ -474,6 +477,43 @@ impl RunPersistencePort for SqliteRunPersistence {
     }
 }
 
+impl SessionOwnershipPort for SqliteRunPersistence {
+    fn create_session<'a>(
+        &'a self,
+        record: &'a SessionOwnershipRecord,
+    ) -> IdentityFuture<'a, Result<(), IdentityStoreError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        let record = record.clone();
+        Box::pin(async move {
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| IdentityStoreError::Unavailable)?;
+            tokio::task::spawn_blocking(move || create_session_ownership(&path, &record))
+                .await
+                .map_err(|_| IdentityStoreError::Unavailable)?
+        })
+    }
+
+    fn load_session<'a>(
+        &'a self,
+        session_id: SessionId,
+    ) -> IdentityFuture<'a, Result<Option<SessionOwnershipRecord>, IdentityStoreError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        Box::pin(async move {
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| IdentityStoreError::Unavailable)?;
+            tokio::task::spawn_blocking(move || load_session_ownership(&path, session_id))
+                .await
+                .map_err(|_| IdentityStoreError::Unavailable)?
+        })
+    }
+}
+
 impl RunReadPort for SqliteRunPersistence {
     fn find_run<'a>(
         &'a self,
@@ -593,6 +633,7 @@ fn find_run(path: &Path, key: RunKey) -> Result<Option<DurableRunSummary>, Persi
         record.recovery_contract(),
         decode_optional_sequence(last_sequence.as_deref())?,
         terminal == 1,
+        record.authorization().cloned(),
     )))
 }
 
@@ -651,6 +692,7 @@ fn list_runs(
             record.recovery_contract(),
             decode_optional_sequence(last_sequence.as_deref())?,
             terminal == 1,
+            record.authorization().cloned(),
         ));
     }
     let next = has_more
@@ -828,6 +870,11 @@ fn initialize(path: &Path) -> Result<(), PersistencePortError> {
                    UNIQUE(key_id, nonce),
                    FOREIGN KEY(run_id) REFERENCES runs(run_id)
                  );
+                 CREATE TABLE service_sessions(
+                   session_id TEXT PRIMARY KEY NOT NULL,
+                   record BLOB NOT NULL,
+                   checksum BLOB NOT NULL
+                 );
                  CREATE TRIGGER events_no_update BEFORE UPDATE ON events
                    BEGIN SELECT RAISE(ABORT, 'append-only events'); END;
                  CREATE TRIGGER events_no_delete BEFORE DELETE ON events
@@ -838,6 +885,15 @@ fn initialize(path: &Path) -> Result<(), PersistencePortError> {
     } else if version != CURRENT_STORE_SCHEMA_VERSION {
         return Err(PersistencePortError::UnsupportedVersion);
     }
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS service_sessions(
+               session_id TEXT PRIMARY KEY NOT NULL,
+               record BLOB NOT NULL,
+               checksum BLOB NOT NULL
+             );",
+        )
+        .map_err(map_failed)?;
     let application_id: i32 = connection
         .pragma_query_value(None, "application_id", |row| row.get(0))
         .map_err(map_failed)?;
@@ -846,6 +902,68 @@ fn initialize(path: &Path) -> Result<(), PersistencePortError> {
     }
     std::fs::set_permissions(path, Permissions::from_mode(0o600)).map_err(map_unavailable)?;
     Ok(())
+}
+
+fn create_session_ownership(
+    path: &Path,
+    record: &SessionOwnershipRecord,
+) -> Result<(), IdentityStoreError> {
+    let connection = Connection::open(path).map_err(|_| IdentityStoreError::Unavailable)?;
+    configure(&connection).map_err(map_identity_error)?;
+    validate_store_identity(&connection).map_err(map_identity_error)?;
+    let bytes = serde_json::to_vec(record).map_err(|_| IdentityStoreError::Corrupt)?;
+    connection
+        .execute(
+            "INSERT INTO service_sessions(session_id,record,checksum) VALUES(?1,?2,?3)",
+            params![record.session_id().to_string(), bytes, checksum(&bytes)],
+        )
+        .map_err(|error| {
+            if matches!(error, rusqlite::Error::SqliteFailure(_, _)) {
+                IdentityStoreError::Conflict
+            } else {
+                IdentityStoreError::Unavailable
+            }
+        })?;
+    Ok(())
+}
+
+fn load_session_ownership(
+    path: &Path,
+    session_id: SessionId,
+) -> Result<Option<SessionOwnershipRecord>, IdentityStoreError> {
+    let connection = Connection::open(path).map_err(|_| IdentityStoreError::Unavailable)?;
+    configure(&connection).map_err(map_identity_error)?;
+    validate_store_identity(&connection).map_err(map_identity_error)?;
+    let stored: Option<(Vec<u8>, Vec<u8>)> = connection
+        .query_row(
+            "SELECT record,checksum FROM service_sessions WHERE session_id=?1",
+            [session_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| IdentityStoreError::Unavailable)?;
+    let Some((bytes, stored_checksum)) = stored else {
+        return Ok(None);
+    };
+    if checksum(&bytes) != stored_checksum {
+        return Err(IdentityStoreError::Corrupt);
+    }
+    let record: SessionOwnershipRecord =
+        serde_json::from_slice(&bytes).map_err(|_| IdentityStoreError::Corrupt)?;
+    if record.session_id() != session_id {
+        return Err(IdentityStoreError::Corrupt);
+    }
+    Ok(Some(record))
+}
+
+fn map_identity_error(error: PersistencePortError) -> IdentityStoreError {
+    match error {
+        PersistencePortError::Conflict => IdentityStoreError::Conflict,
+        PersistencePortError::Corrupt => IdentityStoreError::Corrupt,
+        PersistencePortError::Unavailable
+        | PersistencePortError::UnsupportedVersion
+        | PersistencePortError::Failed => IdentityStoreError::Unavailable,
+    }
 }
 
 fn configure(connection: &Connection) -> Result<(), PersistencePortError> {
@@ -1026,9 +1144,12 @@ fn create_durable_approval_wait(
     path: &Path,
     request: &CreateDurableApprovalWait,
 ) -> Result<(), PersistencePortError> {
+    let run = load_run(path, request.transition().key())?;
+    let durable_requester = run.record().authorization().map(|value| value.requester());
     if request.record().status() != DurableApprovalStatus::Waiting
         || request.record().row_version() != 0
         || request.record().binding().key() != request.transition().key()
+        || request.record().binding().requester() != durable_requester
         || !matches!(
             request.transition().event().kind(),
             AgentEventKind::Graph {
@@ -1157,10 +1278,11 @@ fn record_durable_approval_decision(
         || binding.tool_call_id() != command.tool_call_id
         || binding.action_digest() != command.action_digest
         || !matches!(request.transition().event().kind(), AgentEventKind::DurableApprovalDecisionRecorded {
-            wait_id, approval_request_id, outcome, row_version
+            wait_id, approval_request_id, outcome, row_version, actor
         } if *wait_id == command.wait_id
             && *approval_request_id == command.approval_request_id
             && *outcome == command.outcome
+            && actor.as_ref() == command.actor.as_ref()
             && *row_version == command.expected_row_version.saturating_add(1))
     {
         return Err(PersistencePortError::Conflict);
@@ -1175,12 +1297,18 @@ fn record_durable_approval_decision(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(map_failed)?;
     append_transition_in_transaction(&transaction, request.transition())?;
+    let persisted_record = record
+        .restore_store_state(next, command.expected_row_version.saturating_add(1))
+        .restore_decision_identity(command.actor.clone(), command.decided_at_unix_millis);
+    let bytes = encode(&persisted_record)?;
     let changed = transaction
         .execute(
-            "UPDATE durable_approvals SET status=?1,row_version=row_version+1
-         WHERE run_id=?2 AND wait_id=?3 AND session_id=?4 AND status=?5 AND row_version=?6",
+            "UPDATE durable_approvals SET status=?1,row_version=row_version+1,record=?2,checksum=?3
+         WHERE run_id=?4 AND wait_id=?5 AND session_id=?6 AND status=?7 AND row_version=?8",
             params![
                 status_code(next),
+                bytes,
+                checksum(&bytes),
                 command.key.run_id().to_string(),
                 command.wait_id.to_string(),
                 command.key.session_id().to_string(),
@@ -1704,6 +1832,50 @@ mod tests {
         let loaded = store.load_run(record.key()).await.expect("run must load");
         assert!(loaded.events().is_empty());
         assert_eq!(loaded.checkpoint().state().last_sequence(), None);
+    }
+
+    #[tokio::test]
+    async fn session_ownership_survives_restart_and_detects_corruption() {
+        let (directory, _, _) = fixture();
+        let first_store = store(&directory).await;
+        let session_id = SessionId::new();
+        let record = SessionOwnershipRecord::new(
+            session_id,
+            agent_core::PrincipalId::new("owner-1").expect("principal"),
+        );
+        first_store
+            .create_session(&record)
+            .await
+            .expect("create session");
+        assert_eq!(
+            first_store
+                .load_session(session_id)
+                .await
+                .expect("load session"),
+            Some(record.clone())
+        );
+        drop(first_store);
+
+        let reopened = store(&directory).await;
+        assert_eq!(
+            reopened
+                .load_session(session_id)
+                .await
+                .expect("load after restart"),
+            Some(record)
+        );
+
+        let connection = Connection::open(reopened.path()).expect("database must open");
+        connection
+            .execute(
+                "UPDATE service_sessions SET checksum=x'00' WHERE session_id=?1",
+                [session_id.to_string()],
+            )
+            .expect("corrupt checksum");
+        assert_eq!(
+            reopened.load_session(session_id).await,
+            Err(IdentityStoreError::Corrupt)
+        );
     }
 
     #[tokio::test]

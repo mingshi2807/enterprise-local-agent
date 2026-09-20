@@ -157,11 +157,31 @@ impl ExecutionHarness {
         &self,
         context: &mut RunContext,
     ) -> Result<RunCancellationHandle, HarnessError> {
+        self.start_run_record(context, context.run_record()).await
+    }
+
+    pub async fn start_run_with_authorization(
+        &self,
+        context: &mut RunContext,
+        authorization: agent_identity::DurableRunAuthorization,
+    ) -> Result<RunCancellationHandle, HarnessError> {
+        self.start_run_record(
+            context,
+            context.run_record_with_authorization(authorization),
+        )
+        .await
+    }
+
+    async fn start_run_record(
+        &self,
+        context: &mut RunContext,
+        record: crate::RunRecord,
+    ) -> Result<RunCancellationHandle, HarnessError> {
         self.require_status(context, HarnessOperation::StartRun, RequiredStatus::Pending)?;
 
         if let Some(persistence) = &self.persistence {
             persistence
-                .create_run(&context.run_record(), &context.durable_checkpoint())
+                .create_run(&record, &context.durable_checkpoint())
                 .await
                 .map_err(HarnessError::Persistence)?;
         }
@@ -761,7 +781,7 @@ impl ExecutionHarness {
             .await;
             return Err(error.into());
         }
-        let seal_binding = ActionSealBinding::new(
+        let mut seal_binding = ActionSealBinding::new(
             RunKey::new(context.run_id(), context.session_id()),
             durable.program_version,
             durable.graph_digest,
@@ -775,6 +795,13 @@ impl ExecutionHarness {
             workspace_binding_id,
             tool_contract_digest,
         );
+        let loaded = persistence
+            .load_run(RunKey::new(context.run_id(), context.session_id()))
+            .await
+            .map_err(HarnessError::Persistence)?;
+        if let Some(authorization) = loaded.record().authorization() {
+            seal_binding = seal_binding.with_requester(authorization.requester().clone());
+        }
         let event = context.next_event(AgentEventKind::DurableApprovalPrepared {
             wait_id,
             approval_request_id,
@@ -885,6 +912,7 @@ impl ExecutionHarness {
             approval_request_id: command.approval_request_id,
             outcome: command.outcome,
             row_version: next_version,
+            actor: command.actor.clone(),
         })?;
         let transition = self.transition_for_event(&context, &event, true);
         if let Err(error) = self
@@ -931,6 +959,37 @@ impl ExecutionHarness {
             action_digest: waiting.4,
             expected_row_version,
             outcome,
+            actor: None,
+            decided_at_unix_millis: None,
+        })
+        .await
+    }
+
+    pub async fn record_durable_approval_outcome_as(
+        &self,
+        key: RunKey,
+        wait_id: DurableApprovalWaitId,
+        expected_row_version: u64,
+        outcome: DurableApprovalOutcome,
+        actor: agent_core::PrincipalId,
+        decided_at_unix_millis: u64,
+    ) -> Result<(), HarnessError> {
+        let recovered = match self.recover_run(key).await? {
+            RecoveryDisposition::Waiting(recovered) => recovered,
+            _ => return Err(HarnessError::DurableApprovalMismatch),
+        };
+        let waiting = waiting_position(recovered.state(), wait_id)?;
+        self.record_durable_approval_decision(DurableApprovalDecisionCommand {
+            key,
+            wait_id,
+            approval_request_id: waiting.1,
+            action_proposal_id: waiting.2,
+            tool_call_id: waiting.3,
+            action_digest: waiting.4,
+            expected_row_version,
+            outcome,
+            actor: Some(actor),
+            decided_at_unix_millis: Some(decided_at_unix_millis),
         })
         .await
     }

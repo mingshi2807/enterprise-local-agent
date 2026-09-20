@@ -28,7 +28,8 @@ pub use graph_control::{
 };
 pub use ids::{
     ActionProposalId, ApprovalRequestId, DurableApprovalWaitId, GraphNodeAttemptId,
-    KnowledgeRetrievalId, ModelCallId, RunId, SessionId, ToolCallId, WorkspaceBindingId,
+    KnowledgeRetrievalId, MAX_PRINCIPAL_ID_BYTES, ModelCallId, PrincipalId, PrincipalIdError,
+    RunId, SessionId, ToolCallId, WorkspaceBindingId,
 };
 pub use loop_control::{
     LoopDecisionKind, LoopEventKind, LoopFailureKind, LoopPhase, LoopProgressEvent,

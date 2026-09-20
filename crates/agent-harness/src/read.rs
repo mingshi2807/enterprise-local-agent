@@ -1,6 +1,7 @@
 use std::{future::Future, pin::Pin};
 
 use agent_core::{AgentEvent, DurableApprovalWaitId, EventSequence, RunId};
+use agent_identity::DurableRunAuthorization;
 
 use crate::{DurableApprovalStatus, PersistencePortError, RecoveryContract, RunKey};
 
@@ -54,6 +55,7 @@ pub struct DurableRunSummary {
     recovery_contract: RecoveryContract,
     last_sequence: Option<EventSequence>,
     terminal: bool,
+    authorization: Option<DurableRunAuthorization>,
 }
 
 impl DurableRunSummary {
@@ -63,12 +65,14 @@ impl DurableRunSummary {
         recovery_contract: RecoveryContract,
         last_sequence: Option<EventSequence>,
         terminal: bool,
+        authorization: Option<DurableRunAuthorization>,
     ) -> Self {
         Self {
             key,
             recovery_contract,
             last_sequence,
             terminal,
+            authorization,
         }
     }
 
@@ -87,6 +91,10 @@ impl DurableRunSummary {
     #[must_use]
     pub const fn terminal(&self) -> bool {
         self.terminal
+    }
+    #[must_use]
+    pub const fn authorization(&self) -> Option<&DurableRunAuthorization> {
+        self.authorization.as_ref()
     }
 }
 

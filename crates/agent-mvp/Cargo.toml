@@ -15,6 +15,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 agent-action-seal-local.workspace = true
+agent-identity = { workspace = true, features = ["test-support"] }
 agent-containment-linux.workspace = true
 agent-harness = { workspace = true, features = ["test-support"] }
 agent-knowledge-adapters.workspace = true

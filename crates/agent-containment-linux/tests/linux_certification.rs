@@ -251,6 +251,8 @@ async fn certify_durable_local_write(
             action_digest: wait.action_digest(),
             expected_row_version: view.row_version(),
             outcome: DurableApprovalOutcome::Approve,
+            actor: None,
+            decided_at_unix_millis: None,
         })
         .await
         .expect("record approval");

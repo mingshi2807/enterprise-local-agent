@@ -1610,3 +1610,91 @@
 - MCP entries unused by the M13 workflows are reported as configured but degraded, rather than falsely reported ready.
 - The host lacked the musl target; the certification container built the exact current worker after installing the target inside that ephemeral environment.
 - No commit created.
+
+# M15 implementation reporting
+
+• Implemented M15 without committing.
+
+  1. Tree
+      - Added agent-identity (crates/agent-identity/src/lib.rs:1).
+      - Integrated identity into service, HTTP transport, harness, SQLite persistence, deployment configuration, daemon composition, M10 capsules, and MVP tests.
+      - Core contains only bounded PrincipalId (crates/agent-core/src/ids.rs:10).
+
+  2. Principal/Authentication
+      - Added VerifiedPrincipal, Human | Service | LocalProcess, trusted roles, and authentication classes.
+      - Unix sockets authenticate through real SO_PEERCRED UID/GID mapping in agent-service-http (crates/agent-service-http/src/lib.rs:79).
+      - Loopback bearer authentication maps to exactly one configured service principal.
+      - PID, credentials, tokens, emails, and arbitrary claims are not persisted.
+
+  3. Authorization
+      - Added typed default-deny ServiceAuthorizationPolicy.
+      - Every client-facing service operation receives a VerifiedPrincipal.
+      - Durable ownership controls run/status/event/cancel/resume access.
+      - Approval authorization is separate from ownership and supports RequesterMayApprove and RequesterMustDiffer.
+      - Operator role grants inspection only, not workflow execution or approval authority.
+
+  4. Durable Ownership
+      - Session ownership is checksum-protected in SQLite through SessionOwnershipPort.
+      - Run owner, requester, workflow, policy version, and policy fingerprint are atomically persisted with run creation.
+      - Restarted services authorize using durable metadata rather than client-provided IDs.
+
+  5. Legacy Strategy
+      - Existing unowned M14 records are never assigned inferred owners.
+      - Legacy Waiting runs are projected as ManualReconciliationRequired.
+      - Normal approval/resume access fails closed; operator inspection remains available.
+      - No offline ownership migration utility was added.
+
+  6. Approval Identity
+      - Durable Approve/Deny records now include actor and decision timestamp.
+      - Requester identity is authenticated in LocalWriteActionCapsuleV1 AAD.
+      - Exact M10 request/proposal/tool/action digest bindings remain unchanged.
+      - Duplicate, stale, wrong-principal, and requester-separation rules fail closed.
+
+  7. Audit
+      - Security mutations follow:
+        AuthorizationGranted → MutationRequested → durable mutation → MutationCommitted/Failed.
+
+      - Required pre-mutation audit failure produces zero mutation.
+      - Principal correlation is limited to security-relevant audit/approval metadata.
+      - M6 LocalWrite audit remains separate and authoritative.
+
+  8. Recovery
+      - Replay restores durable identity metadata without authentication or authorization calls.
+      - New commands authenticate and evaluate current trusted policy.
+      - Replay performs no model, knowledge, tool, containment, capsule, or identity-provider invocation.
+
+  9. Tests
+      - Workspace: 310 unit/integration tests and 4 compile-fail doctests passed.
+      - Covered principal validation/redaction, default deny, cross-principal isolation, delegated approval, requester separation, restart ownership, legacy Waiting, capsule requester tampering, audit ordering/
+        failure, SQLite corruption, spoofed identity headers, and operator restrictions.
+
+      - cargo fmt --all -- --check: passed.
+      - Strict workspace Clippy: passed.
+      - SQLite transaction-fault tests: passed.
+      - Codebase Memory blast-radius and dependency scans: passed.
+
+  10. M6.1 Certification
+
+- enterprise-local-agent-m6-cert:2541e5c: PASS, no skip.
+- Bubblewrap 0.11.2, root-owned mode 0755.
+- Static PIE worker, root-owned mode 0555, SHA-256 9e6a0b61e70f36efdc93b73ea462fdb479dfe10b19c9380140a2e6b439db7dfd.
+- Landlock: PartiallyEnforced.
+- Full containment and process-tree reaping test: 1 passed; 0 failed.
+
+  1. Guarantees/Deviations
+
+- Identity authorizes service requests but cannot bypass M5 validation, M6 policy/approval/audit, M7 recovery, M10 exact-action binding, or M6.1 containment.
+- No OIDC, generic IAM engine, automatic legacy migration, or distributed identity cache.
+- Deployment schema advanced to version 2 for mandatory identity configuration, while the existing DeploymentConfigV1 Rust type name was retained.
+- Existing untracked .codebase-memory/ and crates/agent-mvp/knowledge/ remain uncommitted.
+- No commit created.
+
+• Cleaned up the schema naming:
+
+- Renamed DeploymentConfigV1 to DeploymentConfigV2.
+- Renamed example to docs/deployment-config-v2.example.toml.
+- Updated daemon, operator, tests, and README references.
+- No compatibility alias retains the misleading V1 name.
+- Historical M14 documentation remains unchanged.
+
+  Verification passed: fmt, strict Clippy, full workspace tests, and git diff --check. No commit created.

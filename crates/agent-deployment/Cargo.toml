@@ -7,6 +7,7 @@ edition.workspace = true
 agent-core.workspace = true
 agent-containment-linux.workspace = true
 agent-harness.workspace = true
+agent-identity.workspace = true
 agent-knowledge.workspace = true
 agent-mvp.workspace = true
 agent-persistence-sqlite.workspace = true

@@ -13,6 +13,7 @@ use std::{
 
 use agent_core::WorkspaceBindingId;
 use agent_harness::RecoveryContract;
+use agent_identity::{ApprovalSeparation, PrincipalKind, PrincipalRole};
 use agent_knowledge::{FederatedFailurePolicy, KnowledgeRoute};
 use agent_mvp::EnterpriseMvpWorkflow;
 use agent_persistence_sqlite::{SqliteStoreAdmin, StoreInspection};
@@ -25,7 +26,7 @@ use thiserror::Error;
 use url::Url;
 use zeroize::Zeroize;
 
-pub const DEPLOYMENT_CONFIG_SCHEMA_VERSION: u16 = 1;
+pub const DEPLOYMENT_CONFIG_SCHEMA_VERSION: u16 = 2;
 pub const MAX_DEPLOYMENT_CONFIG_BYTES: usize = 64 * 1024;
 pub const BACKUP_MANIFEST_VERSION: u16 = 1;
 const MAX_SECRET_BYTES: usize = 16 * 1024;
@@ -35,9 +36,10 @@ const MAX_MCP_SERVERS: usize = 16;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeploymentConfigV1 {
+pub struct DeploymentConfigV2 {
     pub schema_version: u16,
     pub listener: ListenerConfigV1,
+    pub identity: IdentityConfigV1,
     pub storage: StorageConfigV1,
     pub workflows: WorkflowConfigV1,
     pub model: ModelConfigV1,
@@ -49,12 +51,13 @@ pub struct DeploymentConfigV1 {
     pub limits: OperationalLimitsV1,
 }
 
-impl fmt::Debug for DeploymentConfigV1 {
+impl fmt::Debug for DeploymentConfigV2 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("DeploymentConfigV1")
+            .debug_struct("DeploymentConfigV2")
             .field("schema_version", &self.schema_version)
             .field("listener", &self.listener)
+            .field("identity", &self.identity)
             .field("storage", &self.storage)
             .field("workflows", &self.workflows)
             .field("model", &self.model)
@@ -66,7 +69,7 @@ impl fmt::Debug for DeploymentConfigV1 {
     }
 }
 
-impl DeploymentConfigV1 {
+impl DeploymentConfigV2 {
     pub fn parse(bytes: &[u8]) -> Result<Self, DeploymentConfigError> {
         if bytes.is_empty() || bytes.len() > MAX_DEPLOYMENT_CONFIG_BYTES {
             return Err(DeploymentConfigError::InvalidConfig);
@@ -98,6 +101,7 @@ impl DeploymentConfigV1 {
             return Err(DeploymentConfigError::InvalidConfig);
         }
         self.listener.validate()?;
+        self.identity.validate(&self.listener)?;
         self.storage.validate()?;
         self.model.validate()?;
         self.knowledge.validate()?;
@@ -118,6 +122,85 @@ impl DeploymentConfigV1 {
         hasher.update(b"enterprise-local-agent/deployment-config/v1\0");
         hasher.update(encoded);
         Ok(DeploymentFingerprint(hasher.finalize().into()))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityConfigV1 {
+    pub policy_version: u32,
+    pub approval_separation: ApprovalSeparation,
+    pub principals: Vec<PrincipalConfigV1>,
+}
+
+impl IdentityConfigV1 {
+    fn validate(&self, listener: &ListenerConfigV1) -> Result<(), DeploymentConfigError> {
+        if self.policy_version == 0 || self.principals.is_empty() || self.principals.len() > 32 {
+            return Err(DeploymentConfigError::InvalidConfig);
+        }
+        for (index, principal) in self.principals.iter().enumerate() {
+            principal.validate()?;
+            if self.principals[..index].iter().any(|existing| {
+                existing.principal_id == principal.principal_id
+                    || principal.unix_uid.zip(principal.unix_gid).is_some()
+                        && existing.unix_uid.zip(existing.unix_gid)
+                            == principal.unix_uid.zip(principal.unix_gid)
+            }) {
+                return Err(DeploymentConfigError::InvalidConfig);
+            }
+        }
+        match listener {
+            ListenerConfigV1::Unix { .. } => {
+                if !self
+                    .principals
+                    .iter()
+                    .any(|principal| principal.unix_uid.is_some() && principal.unix_gid.is_some())
+                {
+                    return Err(DeploymentConfigError::InvalidConfig);
+                }
+            }
+            ListenerConfigV1::LoopbackTcp { .. } => {
+                if self
+                    .principals
+                    .iter()
+                    .filter(|principal| principal.loopback_bearer)
+                    .count()
+                    != 1
+                {
+                    return Err(DeploymentConfigError::InvalidConfig);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrincipalConfigV1 {
+    pub principal_id: agent_core::PrincipalId,
+    pub kind: PrincipalKind,
+    pub roles: Vec<PrincipalRole>,
+    pub unix_uid: Option<u32>,
+    pub unix_gid: Option<u32>,
+    #[serde(default)]
+    pub loopback_bearer: bool,
+}
+
+impl PrincipalConfigV1 {
+    fn validate(&self) -> Result<(), DeploymentConfigError> {
+        if self.roles.is_empty()
+            || self.roles.len() > agent_identity::MAX_PRINCIPAL_ROLES
+            || self
+                .roles
+                .iter()
+                .enumerate()
+                .any(|(index, role)| self.roles[..index].contains(role))
+            || self.unix_uid.is_some() != self.unix_gid.is_some()
+        {
+            return Err(DeploymentConfigError::InvalidConfig);
+        }
+        Ok(())
     }
 }
 
@@ -961,7 +1044,7 @@ impl DeploymentLock {
 
 impl CompatibilityManifestV1 {
     pub fn from_config(
-        config: &DeploymentConfigV1,
+        config: &DeploymentConfigV2,
         build_identity: impl Into<String>,
         git_identity: Option<String>,
     ) -> Result<Self, DeploymentConfigError> {
@@ -1042,7 +1125,7 @@ impl CompatibilityManifestV1 {
 }
 
 pub async fn create_backup(
-    config: &DeploymentConfigV1,
+    config: &DeploymentConfigV2,
     destination: &Path,
     compatibility: CompatibilityManifestV1,
 ) -> Result<BackupManifestV1, DeploymentConfigError> {
@@ -1112,7 +1195,7 @@ pub async fn verify_backup(
 }
 
 pub async fn restore_backup(
-    config: &DeploymentConfigV1,
+    config: &DeploymentConfigV2,
     source: &Path,
     expected: &CompatibilityManifestV1,
 ) -> Result<(), DeploymentConfigError> {

@@ -75,6 +75,7 @@ dependencies = [
  "agent-containment-linux",
  "agent-core",
  "agent-harness",
+ "agent-identity",
  "agent-knowledge",
  "agent-mvp",
  "agent-persistence-sqlite",
@@ -114,6 +115,7 @@ name = "agent-harness"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "agent-identity",
  "agent-knowledge",
  "jsonschema",
  "serde",
@@ -122,6 +124,15 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "agent-identity"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]
@@ -186,6 +197,7 @@ dependencies = [
  "agent-core",
  "agent-graph",
  "agent-harness",
+ "agent-identity",
  "agent-knowledge",
  "agent-knowledge-adapters",
  "agent-persistence-sqlite",
@@ -217,6 +229,7 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "agent-harness",
+ "agent-identity",
  "rusqlite",
  "serde",
  "serde_json",
@@ -249,6 +262,7 @@ dependencies = [
  "agent-core",
  "agent-graph",
  "agent-harness",
+ "agent-identity",
  "agent-loop",
  "agent-persistence-sqlite",
  "serde",
@@ -270,6 +284,7 @@ dependencies = [
  "agent-core",
  "agent-deployment",
  "agent-harness",
+ "agent-identity",
  "agent-knowledge",
  "agent-knowledge-adapters",
  "agent-mvp",
@@ -297,6 +312,7 @@ dependencies = [
  "agent-core",
  "agent-deployment",
  "agent-harness",
+ "agent-identity",
  "agent-persistence-sqlite",
  "agent-service",
  "axum",

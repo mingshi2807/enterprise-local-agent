@@ -1506,6 +1506,8 @@ async fn durable_local_write_waits_restarts_previews_and_resumes_once() {
             action_digest: ActionDigest::from_bytes([0; 32]),
             expected_row_version: view.row_version(),
             outcome: DurableApprovalOutcome::Approve,
+            actor: None,
+            decided_at_unix_millis: None,
         })
         .await;
     assert!(wrong.is_err());
@@ -1518,23 +1520,25 @@ async fn durable_local_write_waits_restarts_previews_and_resumes_once() {
         action_digest: wait.action_digest(),
         expected_row_version: view.row_version(),
         outcome: DurableApprovalOutcome::Approve,
+        actor: None,
+        decided_at_unix_millis: None,
     };
     for wrong in [
         DurableApprovalDecisionCommand {
             approval_request_id: ApprovalRequestId::new(),
-            ..command
+            ..command.clone()
         },
         DurableApprovalDecisionCommand {
             action_proposal_id: ActionProposalId::new(),
-            ..command
+            ..command.clone()
         },
         DurableApprovalDecisionCommand {
             tool_call_id: ToolCallId::new(),
-            ..command
+            ..command.clone()
         },
         DurableApprovalDecisionCommand {
             key: RunKey::new(RunId::new(), session_id),
-            ..command
+            ..command.clone()
         },
     ] {
         assert!(
@@ -1691,6 +1695,8 @@ async fn durable_local_write_denial_after_restart_executes_zero_tools() {
             action_digest: wait.action_digest(),
             expected_row_version: view.row_version(),
             outcome: DurableApprovalOutcome::Deny,
+            actor: None,
+            decided_at_unix_millis: None,
         })
         .await
         .expect("deny");
