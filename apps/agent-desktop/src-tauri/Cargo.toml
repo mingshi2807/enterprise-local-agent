@@ -1,0 +1,29 @@
+[package]
+name = "agent-desktop"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[lib]
+name = "agent_desktop"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "agent-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri.workspace = true
+thiserror.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3.0"
+tokio = { workspace = true, features = ["io-util"] }

@@ -1698,3 +1698,65 @@
 - Historical M14 documentation remains unchanged.
 
   Verification passed: fmt, strict Clippy, full workspace tests, and git diff --check. No commit created.
+
+# M16.0 implementation architecture
+
+# M16.1 implementation reporting
+
+• 1. Changed Tree
+
+- Added apps/agent-desktop with React/Vite frontend and Tauri Rust application.
+- Updated workspace Cargo.toml, Cargo.lock, and .gitignore.
+- Added frontend configuration, tests, design tokens, shadcn foundation, Tauri capabilities, generated command permissions, and application icons.
+- Pre-existing untracked .codebase-memory/ and crates/agent-mvp/knowledge/ were not modified intentionally.
+
+  1. Tauri/Service Bridge
+
+  apps/agent-desktop/src-tauri/src/service_client.rs provides:
+
+- Unix-socket transport where supported.
+- Authenticated numeric-loopback HTTP fallback.
+- Named health, readiness, and version commands only.
+- Five-second timeouts, 64 KiB response limits, strict response decoding, sanitized errors, and disabled redirects/proxies.
+- Bearer credentials remain Rust-side, use redacted Debug, and are zeroized where practical.
+
+  1. Capability Boundary
+
+  apps/agent-desktop/src-tauri/capabilities/main.json grants only the three service commands.
+
+  There are no filesystem, shell, generic HTTP, SQL, model, MCP, persistence, or containment capabilities. Global Tauri access is disabled, CSP uses connect-src 'none', and native window decorations remain
+  enabled.
+
+  1. Theme/Design Foundation
+
+  apps/agent-desktop/src/app/App.tsx and apps/agent-desktop/src/styles/tokens.css implement:
+
+- Semantic light, dark, and system themes.
+- Neutral OKLCH surfaces, restrained accent, compact spacing, subtle borders, and visible focus states.
+- Empty developer-tool shell with top bar, activity rail, navigation area, workspace, readiness panel, and status bar.
+- TanStack Query providers, shadcn-compatible primitives, and Lucide icons.
+- Motion is installed but intentionally unused.
+
+  1. Service Connectivity
+
+  Health polls every 5 seconds and readiness every 15 seconds. Version metadata is cached indefinitely. The shell distinguishes connected, degraded, unavailable, and draining states without exposing transport
+  credentials or backend payloads.
+
+  1. Tests
+
+  Passed:
+
+- Frontend typecheck, ESLint, 2 Vitest tests, Vite production build, and npm audit with zero vulnerabilities.
+- Rust formatting and strict workspace Clippy.
+- Full workspace tests with all normal tests passing.
+- Four desktop bridge tests covering loopback authentication, endpoint rejection, Unix sockets, strict decoding, and response bounds.
+- Tauri check and debug build with --no-bundle.
+- Permission, forbidden-surface, dependency-direction, architecture, and change-impact scans.
+
+  1. Deviations
+
+- No shared agent-service-api crate was introduced because three narrow read-only DTOs do not yet justify changing the stable M12 HTTP boundary.
+- Linux Tauri checks ran inside a disposable Debian build container because the host lacks WebKitGTK/GLib development packages.
+- Distribution packaging and signing remain deferred; the verified Tauri build used --no-bundle.
+- Headless Firefox screenshot capture was unavailable due the host Snap/DBus environment; DOM tests and native compilation passed.
+- No commit was created.

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-service-version"
+description = "Enables the service_version command without any pre-configured scope."
+commands.allow = ["service_version"]
+
+[[permission]]
+identifier = "deny-service-version"
+description = "Denies the service_version command without any pre-configured scope."
+commands.deny = ["service_version"]

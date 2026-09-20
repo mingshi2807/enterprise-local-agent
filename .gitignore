@@ -1,5 +1,8 @@
 # Build output
 /target/
+apps/agent-desktop/dist/
+apps/agent-desktop/node_modules/
+apps/agent-desktop/*.tsbuildinfo
 
 # Keep Cargo.lock for applications.
 # Uncomment the next line only if this workspace is purely libraries.

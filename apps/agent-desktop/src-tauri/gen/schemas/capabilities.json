@@ -1,0 +1,1 @@
+{"main":{"identifier":"main","description":"Read-only access to the trusted local agent service status.","local":true,"windows":["main"],"permissions":["allow-service-health","allow-service-readiness","allow-service-version"],"platforms":["linux","macOS","windows"]}}

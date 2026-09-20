@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/agent-desktop/src-tauri",
     "apps/agent-service-daemon",
     "apps/agent-operator",
     "apps/agent-cli",
@@ -49,6 +50,8 @@ chacha20poly1305 = { version = "=0.11.0", default-features = false, features = [
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 jsonschema = { version = "=0.49.2", default-features = false }
 reqwest = { version = "=0.13.4", default-features = false }
+tauri = { version = "=2.11.6", default-features = false, features = ["wry"] }
+tauri-build = { version = "=2.6.3", default-features = false, features = ["config-json"] }
 landlock = { version = "=0.4.7", default-features = false }
 libc = "0.2"
 rig-core = { version = "=0.41.0", default-features = false, features = ["rustls"] }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-service-readiness"
+description = "Enables the service_readiness command without any pre-configured scope."
+commands.allow = ["service_readiness"]
+
+[[permission]]
+identifier = "deny-service-readiness"
+description = "Denies the service_readiness command without any pre-configured scope."
+commands.deny = ["service_readiness"]
