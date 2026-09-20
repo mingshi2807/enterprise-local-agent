@@ -356,6 +356,43 @@ runtime ports. Online commands use the configured Unix socket or authenticated
 loopback listener; backup and restore require exclusive data-directory
 ownership.
 
+## M15 enterprise identity and authorization
+
+M15 adds `agent-identity` as a provider-neutral service authorization boundary.
+Authentication remains in transport/deployment adapters: Unix sockets map
+trusted `SO_PEERCRED` UID/GID pairs to configured principals, while loopback
+bearer mode maps one configured credential to one fixed service principal.
+Root, PID, request headers, and client-supplied IDs confer no implicit role.
+
+Every client-facing service command receives a `VerifiedPrincipal` and applies
+a default-deny `ServiceAuthorizationPolicy`. User, Approver, and Operator roles
+are distinct. Run ownership controls status, events, cancellation, abort, and
+resume; configured approvers may inspect and decide eligible waits without
+owning the run. Optional `RequesterMustDiffer` separation prevents a requester
+from approving their own action. Operator access is inspection-only and grants
+no workflow, approval, model, tool, or execution authority.
+
+Session ownership and run owner/requester, workflow, authorization-policy
+version, and policy fingerprint are durable trusted metadata. Approval
+decisions durably record the actor and timestamp while preserving the existing
+M10 exact `ActionProposalId + ToolCallId + ActionDigest` binding. The requester
+is also authenticated in LocalWrite capsule AAD. Legacy M14 records are never
+assigned inferred owners; unowned Waiting state is operator-only and exposed as
+`ManualReconciliationRequired`.
+
+Security mutations use required metadata-only audit phases:
+`AuthorizationGranted -> MutationRequested -> durable mutation ->
+MutationCommitted/Failed`. A required pre-mutation audit failure causes zero
+mutation. This service authorization answers who may request an operation; M6
+`CapabilityPolicy` remains independently authoritative over whether an exact
+validated action may execute.
+
+M15 advances deployment configuration to schema 2 and the explicit
+`DeploymentConfigV2` type. See
+[`docs/deployment-config-v2.example.toml`](docs/deployment-config-v2.example.toml).
+No tokens, credentials, emails, claims blobs, action payloads, or unnecessary
+PII enter durable identity records, events, logs, or debug output.
+
 ## Deterministic demonstration
 
 The default CLI path is network-free. It uses `RigModelAdapter<FakeRigModel>`

@@ -1,6 +1,6 @@
 # Wiki Index
 
-> 15 pages | Last updated: 2026-09-20
+> 17 pages | Last updated: 2026-09-20
 
 ## architecture
 
@@ -19,6 +19,8 @@
 - [M11 Governed MCP Integration](m11-governed-mcp-integration.md) — # M11 Governed MCP Integration
 - [M12 Agent Service API and Client Boundary](m12-agent-service-api.md) — # M12 Agent Service API and Client Boundary
 - [M13 Local Enterprise Agent MVP and Real LLM Smoke Test](m13-local-enterprise-agent-mvp.md) — # M13 Local Enterprise Agent MVP and Real LLM Smoke Test
+- [M14 Deployment and Operations Hardening](m14-deployment-operations-hardening.md) — # M14 Deployment and Operations Hardening
+- [M15 Enterprise Identity and Authorization](m15-enterprise-identity-authorization.md) — # M15 Enterprise Identity and Authorization
 
 ## reference
 

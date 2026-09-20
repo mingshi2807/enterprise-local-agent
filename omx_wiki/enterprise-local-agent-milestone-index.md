@@ -4,7 +4,7 @@ tags: ["enterprise-local-agent", "milestones", "roadmap", "index"]
 created: 2026-08-15T13:34:09.996Z
 updated: 2026-09-20
 sources: ["docs/proposal/proposal.md", "docs/reports/reports_impl.md", "git history"]
-links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m6-1-production-linux-localwrite-containment.md", "m7-durable-event-persistence-and-recovery.md", "m8-enterprise-knowledge-integration.md", "m9-deterministic-graph-engine-poc.md", "m10-durable-graph-pause-resume-hitl.md", "m11-governed-mcp-integration.md", "m12-agent-service-api.md", "m13-local-enterprise-agent-mvp.md", "m14-deployment-operations-hardening.md"]
+links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m6-1-production-linux-localwrite-containment.md", "m7-durable-event-persistence-and-recovery.md", "m8-enterprise-knowledge-integration.md", "m9-deterministic-graph-engine-poc.md", "m10-durable-graph-pause-resume-hitl.md", "m11-governed-mcp-integration.md", "m12-agent-service-api.md", "m13-local-enterprise-agent-mvp.md", "m14-deployment-operations-hardening.md", "m15-enterprise-identity-authorization.md"]
 category: reference
 confidence: high
 schemaVersion: 1
@@ -32,6 +32,7 @@ This is the durable navigation page for architectural milestones. Git and the im
 | M12 Agent Service API and Client Boundary | Implemented and verified, uncommitted | Not tagged | [[m12-agent-service-api]] |
 | M13 Local Enterprise Agent MVP and Real LLM Smoke Test | Implemented, real-smoke verified, and Linux containment-certified, uncommitted | Not tagged | [[m13-local-enterprise-agent-mvp]] |
 | M14 Deployment and Operations Hardening | Implemented, verified, Linux containment-certified, and committed | Not tagged | [[m14-deployment-operations-hardening]] |
+| M15 Enterprise Identity and Authorization | Implemented, verified, and Linux containment-certified, uncommitted | Not tagged | [[m15-enterprise-identity-authorization]] |
 
 ## Stable architecture
 
@@ -64,6 +65,14 @@ offline SQLite backup and verified empty-target restore, fail-closed contract
 compatibility, containment artifact integrity checks, and a non-authoritative
 operator CLI. `agent-deployment` owns composition and operations only;
 `ExecutionHarness` remains the execution and recovery authority.
+
+M15 adds authenticated provider-neutral principals and default-deny service
+authorization. Transport adapters authenticate; `agent-service` authorizes
+each command against durable ownership and current trusted policy. Approval
+identity records who decided without changing the M10 exact-action binding.
+Legacy unowned records remain operator-only, and unowned Waiting is manual
+reconciliation rather than resumable authority. Identity cannot bypass M5-M14
+validation, policy, approval, audit, persistence, or containment.
 
 Provider and framework types remain outside agent-core, agent-harness, agent-loop,
 and agent-graph. ExecutionHarness remains the authority for lifecycle, budgets,

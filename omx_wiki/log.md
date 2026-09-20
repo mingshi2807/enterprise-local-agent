@@ -140,3 +140,6 @@
 - **Pages:** none
 - **Summary:** Lint: 0 issues (0 orphan, 0 stale, 0 broken, 0 contradictions)
 
+## [2026-09-20] update
+- **Pages:** enterprise-local-agent-milestone-index.md, m14-deployment-operations-hardening.md, m15-enterprise-identity-authorization.md, index.md
+- **Summary:** Added the implemented M15 identity and authorization dossier and refreshed milestone navigation

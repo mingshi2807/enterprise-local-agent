@@ -4,7 +4,7 @@ tags: ["m14", "deployment", "operations", "readiness", "backup", "restore"]
 created: 2026-09-20
 updated: 2026-09-20
 sources: ["crates/agent-deployment/src/lib.rs", "apps/agent-operator/src/main.rs", "apps/agent-service-daemon/src/main.rs", "crates/agent-service/src/lib.rs", "crates/agent-service-http/src/lib.rs", "crates/agent-persistence-sqlite/src/lib.rs"]
-links: ["enterprise-local-agent-milestone-index.md", "m13-local-enterprise-agent-mvp.md", "m12-agent-service-api.md", "m7-durable-event-persistence-and-recovery.md", "m6-1-production-linux-localwrite-containment.md"]
+links: ["enterprise-local-agent-milestone-index.md", "m13-local-enterprise-agent-mvp.md", "m15-enterprise-identity-authorization.md", "m12-agent-service-api.md", "m7-durable-event-persistence-and-recovery.md", "m6-1-production-linux-localwrite-containment.md"]
 category: architecture
 confidence: high
 schemaVersion: 1
@@ -39,7 +39,9 @@ budgets, cancellation, containment, persistence ordering, and recovery.
 
 ## Versioned Configuration
 
-`DeploymentConfigV1` is bounded to 64 KiB, rejects unknown fields, and validates
+M14 introduced `DeploymentConfigV1`, bounded to 64 KiB with unknown-field
+rejection. M15 advances the active configuration to schema 2 and
+`DeploymentConfigV2`; it validates
 listener security, storage/audit names, workflow profiles, model endpoint and
 explicit auth mode, knowledge route, MCP process/fingerprints, LocalWrite
 workspace/artifacts, secret references, and operational limits.
@@ -48,7 +50,7 @@ Secrets are supplied through absolute external file references. Resolution
 requires a regular file owned by the service effective user with no group/world
 permissions. Secret values use redacted debug output and are excluded from the
 deterministic SHA-256 deployment fingerprint. The checked-in ReadOnly example
-is `docs/deployment-config-v1.example.toml`.
+is now `docs/deployment-config-v2.example.toml`.
 
 ## Profiles and Readiness
 
