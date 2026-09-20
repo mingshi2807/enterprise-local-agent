@@ -1507,3 +1507,106 @@
   1. Recommendation
 
   M13 PASS.
+
+# M14 implementation reporting
+
+• Implemented M14 without committing.
+
+  1. Tree
+
+- Added agent-deployment (crates/agent-deployment/src/lib.rs:38).
+- Added agent-operator (apps/agent-operator/src/main.rs:14).
+- Added DeploymentConfigV1 example (docs/deployment-config-v1.example.toml).
+- Extended service, HTTP transport, daemon composition, SQLite administration, and containment metadata exports.
+
+  1. Config/Fingerprint
+
+- Strict, bounded DeploymentConfigV1; unknown fields rejected.
+- Covers listener security, storage/audit, workflows, model, knowledge, MCP, LocalWrite artifacts, seal reference, and operational limits.
+- Secrets resolve from protected external files and use redacted Debug.
+- SHA-256 deployment fingerprint includes security-relevant non-secret configuration only.
+
+  1. Profiles/Readiness
+
+- ReadOnly and LocalWrite readiness are independent.
+- Model and knowledge receive bounded startup probes.
+- LocalWrite registration additionally requires seal key, workspace binding, tool-contract digest, artifact hashes/trust properties, worker protocol, and M6.1 capability probe.
+- LocalWrite failure leaves ReadOnly available and is never silently downgraded.
+- /healthz reports lifecycle only; readiness is cached metadata.
+
+  1. Observability
+
+- Metadata-only fixed-bucket metrics for runs, model/retrieval/tool latency, approval decisions/wait observations, connections, and recovery classifications.
+- Post-workflow status is determined by replay-only durable recovery, so Waiting is not counted as completed.
+- Operational run views exclude application results and payloads.
+
+  1. Shutdown
+
+- Added Serving → Draining.
+- New sessions, starts, resumes, and decisions are rejected while draining.
+- Active cancellation handles are signalled and tracked tasks are awaited.
+- Audit is flushed even when the drain deadline expires.
+- Existing M7 unresolved-effect classification remains authoritative; shutdown does not manufacture Cancelled.
+
+  1. Backup/Restore
+
+- Added SqliteStoreAdmin using SQLite’s backup API.
+- Backup requires exclusive data-directory ownership and copies audit only while quiesced.
+- Manifest hashes database and audit and records build information plus compatibility-critical contracts.
+- Restore requires an empty target, verifies integrity first, and cleans partial output on failure.
+- Symlinked database/audit sources are rejected.
+
+  1. Compatibility
+
+- Fail-closed checks cover store/event/checkpoint versions, recovery contracts, graph digests, capsule version, tool contracts, key IDs, workspace bindings, MCP fingerprints, containment protocol, and artifact
+    hashes.
+
+- Different application builds are accepted when these critical contracts match.
+- No automatic migration or downgrade was added.
+
+  1. Containment
+
+- Runtime verifies root ownership, immutable executable mode, no setuid/setgid, configured SHA-256, worker protocol, tool-contract digest, and the existing bounded M6.1 probe.
+- Runtime readiness is not described as universal certification.
+
+- config validate
+- readiness
+- version
+- runs list/show
+- reconciliation list/show
+- backup create/verify
+- restore verify/apply
+
+  It has no approval, resume, policy, model, tool, or containment authority.
+
+  1. Verification
+
+- cargo fmt --all -- --check: passed.
+- Strict workspace Clippy with all targets/features: passed.
+- Workspace tests: 299 passed, plus 4 compile-fail doctests.
+- SQLite transaction-fault, corruption, backup/restore, tamper, and cross-build tests passed.
+- Dependency and forbidden-authority scans passed.
+- Codebase Memory blast-radius and coverage checks completed with no recorded source gaps.
+- Operator config-validation smoke passed.
+
+  M6.1 certification passed without skips:
+
+- Bubblewrap 0.11.2, SHA-256 52461e70…15581
+- Fresh static PIE worker, root-owned mode 0555, SHA-256 338dc225…cddae2
+- Landlock: PartiallyEnforced
+- Certification: 1 passed; 0 failed; 0 ignored
+
+  1. Guarantees/Non-Guarantees
+
+- Deployment operations do not acquire ExecutionHarness execution authority.
+- Backups are crash-consistent and integrity-checked, but hashes are not cryptographic authenticity signatures.
+- Metrics contain no payloads or high-cardinality run labels.
+- Approval waits spanning process restart do not have a complete duration metric because M10 intentionally persists no approval timestamp.
+- No HA, multi-process coordination, online backup, model lifecycle management, or exactly-once execution claim.
+
+  1. Deviations
+
+- None affecting the approved authority or security architecture.
+- MCP entries unused by the M13 workflows are reported as configured but degraded, rather than falsely reported ready.
+- The host lacked the musl target; the certification container built the exact current worker after installing the target inside that ephemeral environment.
+- No commit created.

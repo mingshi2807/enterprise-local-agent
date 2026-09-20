@@ -443,7 +443,7 @@ pub(crate) fn compute_action_digest(
     ActionDigest::from_bytes(bytes)
 }
 
-pub(crate) fn compute_tool_contract_digest(definition: &ToolDefinition) -> ToolContractDigest {
+pub fn compute_tool_contract_digest(definition: &ToolDefinition) -> ToolContractDigest {
     let mut hasher = Sha256::new();
     hasher.update(b"enterprise-local-agent/tool-contract/v1\0");
     encode_string(&mut hasher, definition.name().as_str());

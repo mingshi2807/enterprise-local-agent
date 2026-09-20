@@ -1,8 +1,10 @@
 [workspace]
 members = [
     "apps/agent-service-daemon",
+    "apps/agent-operator",
     "apps/agent-cli",
     "crates/agent-containment-linux",
+    "crates/agent-deployment",
     "crates/agent-action-seal-local",
     "crates/agent-core",
     "crates/agent-harness",
@@ -27,6 +29,7 @@ edition = "2024"
 agent-core = { path = "crates/agent-core" }
 agent-action-seal-local = { path = "crates/agent-action-seal-local" }
 agent-containment-linux = { path = "crates/agent-containment-linux" }
+agent-deployment = { path = "crates/agent-deployment" }
 agent-harness = { path = "crates/agent-harness" }
 agent-graph = { path = "crates/agent-graph" }
 agent-knowledge = { path = "crates/agent-knowledge" }
@@ -48,11 +51,12 @@ landlock = { version = "=0.4.7", default-features = false }
 libc = "0.2"
 rig-core = { version = "=0.41.0", default-features = false, features = ["rustls"] }
 rustix = { version = "=1.1.4", default-features = false }
-rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["backup", "bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = { version = "=0.11.0", default-features = false }
 thiserror = "2.0"
+toml = "0.9"
 tokio = { version = "1.0", default-features = false, features = ["rt", "macros", "time", "sync", "net", "signal"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 tracing = "0.1"

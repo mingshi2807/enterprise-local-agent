@@ -7,10 +7,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use agent_deployment::{
+    BuildInfoV1, OperationalMetrics, OperationsState, ReadinessCache, ReadinessSnapshotV1,
+    ReadinessStatusV1,
+};
 use agent_service::{
     AgentService, ApprovalDecisionV1, DurableApprovalWaitId, EventSequence, MAX_ACTIVE_RUNS,
-    MAX_COMMAND_QUEUE, RunId, RunInput, RunKey, ServiceError, ServiceEventV2, SessionId,
-    WaitingPageCursor, WorkflowId,
+    MAX_COMMAND_QUEUE, OperationalRunPageV1, OperationalRunViewV1, RunId, RunInput, RunKey,
+    ServiceError, ServiceEventV2, SessionId, WaitingPageCursor, WorkflowId,
 };
 use axum::{
     Json, Router,
@@ -78,6 +82,7 @@ struct HttpState {
     security: HttpSecurity,
     streams: StreamLimits,
     commands: Arc<Semaphore>,
+    operations: OperationsState,
 }
 
 impl HttpState {
@@ -135,13 +140,51 @@ struct StreamPermit {
 pub struct HttpConfigurationError;
 
 pub fn router(service: Arc<AgentService>, security: HttpSecurity) -> Router {
+    let operations = OperationsState::new(
+        ReadinessCache::new(ReadinessSnapshotV1 {
+            version: 1,
+            overall: ReadinessStatusV1::Unavailable,
+            dependencies: vec![],
+            workflows: vec![],
+        }),
+        OperationalMetrics::new(),
+        BuildInfoV1 {
+            application: "enterprise-local-agent".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            git_identity: None,
+            deployment_fingerprint: "unconfigured".to_owned(),
+            config_schema_version: 1,
+            store_schema_version: agent_harness::CURRENT_STORE_SCHEMA_VERSION,
+            event_schema_version: agent_core::CURRENT_EVENT_SCHEMA_VERSION.get(),
+            checkpoint_schema_version: agent_harness::CURRENT_CHECKPOINT_SCHEMA_VERSION,
+        },
+    );
+    router_with_operations(service, security, operations)
+}
+
+pub fn router_with_operations(
+    service: Arc<AgentService>,
+    security: HttpSecurity,
+    operations: OperationsState,
+) -> Router {
     let state = HttpState {
         service,
         security,
         streams: StreamLimits::new(),
         commands: Arc::new(Semaphore::new(MAX_COMMAND_QUEUE)),
+        operations,
     };
     Router::new()
+        .route("/healthz", get(health))
+        .route("/v1/operations/readiness", get(readiness))
+        .route("/v1/operations/metrics", get(metrics))
+        .route("/v1/operations/version", get(version))
+        .route("/v1/operations/runs", get(operational_runs))
+        .route(
+            "/v1/operations/runs/{session_id}/{run_id}",
+            get(operational_run),
+        )
+        .route("/v1/operations/reconciliation", get(reconciliation_runs))
         .route("/v1/sessions", post(create_session))
         .route("/v1/sessions/{session_id}/runs", post(start_run))
         .route("/v1/sessions/{session_id}/runs/{run_id}", get(run_status))
@@ -179,6 +222,100 @@ pub fn router(service: Arc<AgentService>, security: HttpSecurity) -> Router {
         .with_state(state)
 }
 
+#[derive(Serialize)]
+struct HealthResponse {
+    version: u16,
+    lifecycle: agent_service::ServiceLifecycleV1,
+}
+
+async fn health(State(state): State<HttpState>) -> Json<HealthResponse> {
+    Json(HealthResponse {
+        version: 1,
+        lifecycle: state.service.lifecycle(),
+    })
+}
+
+async fn readiness(State(state): State<HttpState>) -> Result<Json<ReadinessSnapshotV1>, ApiError> {
+    state
+        .operations
+        .readiness_cache()
+        .snapshot()
+        .map(Json)
+        .map_err(|_| ApiError::Internal)
+}
+
+async fn metrics(
+    State(state): State<HttpState>,
+) -> Result<Json<agent_deployment::OperationalMetricsSnapshotV1>, ApiError> {
+    state
+        .operations
+        .metrics()
+        .snapshot()
+        .map(Json)
+        .map_err(|_| ApiError::Internal)
+}
+
+async fn version(State(state): State<HttpState>) -> Json<BuildInfoV1> {
+    Json(state.operations.build().clone())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperationalRunsQuery {
+    after_run_id: Option<RunId>,
+    limit: Option<u16>,
+}
+
+async fn operational_runs(
+    State(state): State<HttpState>,
+    Query(query): Query<OperationalRunsQuery>,
+) -> Result<Json<OperationalRunPageV1>, ApiError> {
+    state
+        .service
+        .operational_run_page(
+            query.after_run_id.map(agent_harness::RunPageCursor::new),
+            query.limit.unwrap_or(64),
+            false,
+        )
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+async fn reconciliation_runs(
+    State(state): State<HttpState>,
+    Query(query): Query<OperationalRunsQuery>,
+) -> Result<Json<OperationalRunPageV1>, ApiError> {
+    state
+        .service
+        .operational_run_page(
+            query.after_run_id.map(agent_harness::RunPageCursor::new),
+            query.limit.unwrap_or(64),
+            true,
+        )
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+async fn operational_run(
+    State(state): State<HttpState>,
+    Path((session_id, run_id)): Path<(String, String)>,
+) -> Result<Json<OperationalRunViewV1>, ApiError> {
+    let view = state
+        .service
+        .get_run_status(key(&session_id, &run_id)?)
+        .await?;
+    Ok(Json(OperationalRunViewV1 {
+        session_id: view.session_id,
+        run_id: view.run_id,
+        disposition: view.disposition,
+        last_sequence: view.last_sequence,
+        workflow_id: view.workflow_id,
+        duration_millis: view.duration_millis,
+    }))
+}
+
 async fn authorize(
     State(state): State<HttpState>,
     request: Request<Body>,
@@ -198,7 +335,10 @@ async fn authorize(
         require_allowed_header(request.headers(), "host", &state.security.allowed_hosts)?;
         require_allowed_header(request.headers(), "origin", &state.security.allowed_origins)?;
     }
-    Ok(next.run(request).await)
+    let _ = state.operations.metrics().connection_opened();
+    let response = next.run(request).await;
+    let _ = state.operations.metrics().connection_closed();
+    Ok(response)
 }
 
 fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
@@ -529,6 +669,7 @@ enum ApiError {
     NotFound,
     Conflict,
     Capacity,
+    Unavailable,
     Internal,
 }
 
@@ -539,6 +680,7 @@ impl From<ServiceError> for ApiError {
             ServiceError::NotFound => Self::NotFound,
             ServiceError::Conflict => Self::Conflict,
             ServiceError::Capacity => Self::Capacity,
+            ServiceError::Draining => Self::Unavailable,
             ServiceError::WorkflowUnavailable => Self::NotFound,
             ServiceError::Configuration
             | ServiceError::Harness(_)
@@ -561,6 +703,7 @@ impl IntoResponse for ApiError {
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::Conflict => (StatusCode::CONFLICT, "state_conflict"),
             Self::Capacity => (StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted"),
+            Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "service_draining"),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable"),
         };
         (status, Json(ErrorBody { code })).into_response()
@@ -711,6 +854,25 @@ mod tests {
             security: HttpSecurity::unix_socket(),
             streams: StreamLimits::new(),
             commands: Arc::new(Semaphore::new(MAX_COMMAND_QUEUE)),
+            operations: OperationsState::new(
+                ReadinessCache::new(ReadinessSnapshotV1 {
+                    version: 1,
+                    overall: ReadinessStatusV1::Unavailable,
+                    dependencies: vec![],
+                    workflows: vec![],
+                }),
+                OperationalMetrics::new(),
+                BuildInfoV1 {
+                    application: "test".to_owned(),
+                    version: "test".to_owned(),
+                    git_identity: None,
+                    deployment_fingerprint: "test".to_owned(),
+                    config_schema_version: 1,
+                    store_schema_version: agent_harness::CURRENT_STORE_SCHEMA_VERSION,
+                    event_schema_version: agent_core::CURRENT_EVENT_SCHEMA_VERSION.get(),
+                    checkpoint_schema_version: agent_harness::CURRENT_CHECKPOINT_SCHEMA_VERSION,
+                },
+            ),
         };
         let permits = (0..MAX_COMMAND_QUEUE)
             .map(|_| state.acquire_command().expect("command permit"))
@@ -742,6 +904,51 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn operational_endpoints_are_metadata_only_and_cached() {
+        let (_directory, service) = service().await;
+        let app = router(service, HttpSecurity::unix_socket());
+        for path in [
+            "/healthz",
+            "/v1/operations/readiness",
+            "/v1/operations/metrics",
+            "/v1/operations/version",
+            "/v1/operations/runs?limit=64",
+            "/v1/operations/reconciliation?limit=64",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let text = std::str::from_utf8(&body).expect("UTF-8 JSON");
+            for forbidden in [
+                "prompt",
+                "final_answer",
+                "evidence",
+                "credential",
+                "ciphertext",
+                "capsule",
+                "action_content",
+                "tool_result",
+            ] {
+                assert!(!text.contains(forbidden), "{path} leaked {forbidden}");
+            }
+        }
     }
 
     #[tokio::test]

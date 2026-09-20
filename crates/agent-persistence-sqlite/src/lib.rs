@@ -1,4 +1,5 @@
-use std::fs::Permissions;
+use std::fs::{File, Permissions};
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use agent_harness::{
     PersistenceFuture, PersistencePortError, ReadFuture, RecordDurableApprovalDecision, RunKey,
     RunPageCursor, RunPersistencePort, RunReadPort, RunRecord, WaitingPageCursor,
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, backup::Backup, params};
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
@@ -36,6 +37,11 @@ impl SqliteRunPersistence {
         if !path.is_absolute() || path.parent().is_none_or(|parent| !parent.is_dir()) {
             return Err(PersistencePortError::Unavailable);
         }
+        if let Ok(metadata) = std::fs::symlink_metadata(&path)
+            && !metadata.file_type().is_file()
+        {
+            return Err(PersistencePortError::Unavailable);
+        }
         let initialize_path = path.clone();
         tokio::task::spawn_blocking(move || initialize(&initialize_path))
             .await
@@ -50,6 +56,276 @@ impl SqliteRunPersistence {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// Offline/quiesced administrative access to the SQLite store.
+///
+/// The caller must own the deployment data-directory lock. This type never
+/// starts, resumes, approves, or otherwise executes a run.
+#[derive(Clone, Debug)]
+pub struct SqliteStoreAdmin {
+    source: PathBuf,
+}
+
+impl SqliteStoreAdmin {
+    pub fn new(source: impl Into<PathBuf>) -> Result<Self, PersistencePortError> {
+        let source = source.into();
+        let trusted_file =
+            std::fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.file_type().is_file());
+        if !source.is_absolute() || !trusted_file {
+            return Err(PersistencePortError::Unavailable);
+        }
+        Ok(Self { source })
+    }
+
+    pub async fn backup_to(
+        &self,
+        destination: impl Into<PathBuf>,
+    ) -> Result<StoreInspection, PersistencePortError> {
+        let source = self.source.clone();
+        let destination = destination.into();
+        tokio::task::spawn_blocking(move || backup_store(&source, &destination))
+            .await
+            .map_err(|_| PersistencePortError::Unavailable)?
+    }
+
+    pub async fn inspect(&self) -> Result<StoreInspection, PersistencePortError> {
+        let source = self.source.clone();
+        tokio::task::spawn_blocking(move || inspect_store(&source))
+            .await
+            .map_err(|_| PersistencePortError::Unavailable)?
+    }
+
+    pub async fn inspect_path(
+        path: impl Into<PathBuf>,
+    ) -> Result<StoreInspection, PersistencePortError> {
+        let path = path.into();
+        tokio::task::spawn_blocking(move || inspect_store(&path))
+            .await
+            .map_err(|_| PersistencePortError::Unavailable)?
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreInspection {
+    pub store_schema_version: u16,
+    pub event_schema_versions: Vec<u16>,
+    pub checkpoint_schema_versions: Vec<u16>,
+    pub recovery_contracts: Vec<String>,
+    pub capsule_versions: Vec<u16>,
+    pub seal_key_ids: Vec<String>,
+    pub workspace_bindings: Vec<String>,
+    pub tool_contract_digests: Vec<String>,
+    pub sha256: String,
+}
+
+fn backup_store(
+    source: &Path,
+    destination: &Path,
+) -> Result<StoreInspection, PersistencePortError> {
+    if !destination.is_absolute()
+        || destination.exists()
+        || destination.parent().is_none_or(|parent| !parent.is_dir())
+    {
+        return Err(PersistencePortError::Unavailable);
+    }
+    let temporary = destination.with_extension("partial");
+    if temporary.exists() {
+        return Err(PersistencePortError::Unavailable);
+    }
+    let result = (|| {
+        let source_connection = Connection::open(source).map_err(map_unavailable)?;
+        configure(&source_connection)?;
+        validate_store_identity(&source_connection)?;
+        let mut destination_connection = Connection::open(&temporary).map_err(map_unavailable)?;
+        {
+            let backup =
+                Backup::new(&source_connection, &mut destination_connection).map_err(map_failed)?;
+            backup
+                .run_to_completion(64, std::time::Duration::from_millis(10), None)
+                .map_err(map_failed)?;
+        }
+        destination_connection.close().map_err(map_failed)?;
+        std::fs::set_permissions(&temporary, Permissions::from_mode(0o600))
+            .map_err(map_unavailable)?;
+        File::open(&temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(map_unavailable)?;
+        std::fs::rename(&temporary, destination).map_err(map_unavailable)?;
+        File::open(
+            destination
+                .parent()
+                .ok_or(PersistencePortError::Unavailable)?,
+        )
+        .and_then(|directory| directory.sync_all())
+        .map_err(map_unavailable)?;
+        inspect_store(destination)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn inspect_store(path: &Path) -> Result<StoreInspection, PersistencePortError> {
+    let trusted_file =
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file());
+    if !path.is_absolute() || !trusted_file {
+        return Err(PersistencePortError::Unavailable);
+    }
+    let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(map_unavailable)?;
+    validate_store_identity(&connection)?;
+    let integrity: String = connection
+        .pragma_query_value(None, "integrity_check", |row| row.get(0))
+        .map_err(map_failed)?;
+    if integrity != "ok" {
+        return Err(PersistencePortError::Corrupt);
+    }
+    let foreign_key_failure: Option<i64> = connection
+        .query_row(
+            "SELECT 1 FROM pragma_foreign_key_check LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_failed)?;
+    if foreign_key_failure.is_some() {
+        return Err(PersistencePortError::Corrupt);
+    }
+
+    let event_schema_versions = distinct_u16(
+        &connection,
+        "SELECT DISTINCT event_schema_version FROM events ORDER BY event_schema_version",
+    )?;
+    let checkpoint_schema_versions = distinct_u16(
+        &connection,
+        "SELECT DISTINCT checkpoint_schema_version FROM checkpoints ORDER BY checkpoint_schema_version",
+    )?;
+    if event_schema_versions
+        .iter()
+        .any(|version| *version != CURRENT_EVENT_SCHEMA_VERSION.get())
+        || checkpoint_schema_versions
+            .iter()
+            .any(|version| *version != CURRENT_CHECKPOINT_SCHEMA_VERSION)
+    {
+        return Err(PersistencePortError::UnsupportedVersion);
+    }
+
+    let mut recovery_contracts = Vec::new();
+    let mut statement = connection
+        .prepare("SELECT run_id, session_id FROM runs ORDER BY run_id")
+        .map_err(map_failed)?;
+    let keys = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(map_failed)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_failed)?;
+    for (run_id, session_id) in keys {
+        let key = RunKey::new(
+            run_id.parse().map_err(|_| PersistencePortError::Corrupt)?,
+            session_id
+                .parse()
+                .map_err(|_| PersistencePortError::Corrupt)?,
+        );
+        let loaded = load_run(path, key)?;
+        recovery_contracts
+            .push(serde_json::to_string(&loaded.record().recovery_contract()).map_err(map_failed)?);
+    }
+    recovery_contracts.sort();
+    recovery_contracts.dedup();
+
+    let mut seal_key_ids = Vec::new();
+    let mut capsule_versions = Vec::new();
+    let mut workspace_bindings = Vec::new();
+    let mut tool_contract_digests = Vec::new();
+    let mut approvals = connection
+        .prepare(
+            "SELECT run_id, session_id, wait_id FROM durable_approvals ORDER BY run_id, wait_id",
+        )
+        .map_err(map_failed)?;
+    let approval_keys = approvals
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(map_failed)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_failed)?;
+    for (run_id, session_id, wait_id) in approval_keys {
+        let key = RunKey::new(
+            run_id.parse().map_err(|_| PersistencePortError::Corrupt)?,
+            session_id
+                .parse()
+                .map_err(|_| PersistencePortError::Corrupt)?,
+        );
+        let wait_id = wait_id.parse().map_err(|_| PersistencePortError::Corrupt)?;
+        let record = load_durable_approval_wait(path, key, wait_id)?;
+        capsule_versions.push(record.binding().capsule_version());
+        seal_key_ids.push(record.sealed_action().key_id().to_owned());
+        workspace_bindings.push(record.binding().workspace_binding_id().to_string());
+        tool_contract_digests.push(hex(record.binding().tool_contract_digest().as_bytes()));
+    }
+    seal_key_ids.sort();
+    seal_key_ids.dedup();
+    workspace_bindings.sort();
+    workspace_bindings.dedup();
+    tool_contract_digests.sort();
+    tool_contract_digests.dedup();
+    capsule_versions.sort();
+    capsule_versions.dedup();
+
+    Ok(StoreInspection {
+        store_schema_version: CURRENT_STORE_SCHEMA_VERSION,
+        event_schema_versions,
+        checkpoint_schema_versions,
+        recovery_contracts,
+        capsule_versions,
+        seal_key_ids,
+        workspace_bindings,
+        tool_contract_digests,
+        sha256: file_sha256(path)?,
+    })
+}
+
+fn distinct_u16(connection: &Connection, sql: &str) -> Result<Vec<u16>, PersistencePortError> {
+    let mut statement = connection.prepare(sql).map_err(map_failed)?;
+    statement
+        .query_map([], |row| row.get(0))
+        .map_err(map_failed)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_failed)
+}
+
+fn file_sha256(path: &Path) -> Result<String, PersistencePortError> {
+    let mut file = File::open(path).map_err(map_unavailable)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(map_unavailable)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        value.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        value.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    value
 }
 
 impl RunPersistencePort for SqliteRunPersistence {
@@ -1187,6 +1463,41 @@ mod tests {
                 .await
                 .expect("store must open"),
         )
+    }
+
+    #[tokio::test]
+    async fn offline_backup_is_verified_and_tampering_fails() {
+        let (directory, record, checkpoint) = fixture();
+        let store = store(&directory).await;
+        store
+            .create_run(&record, &checkpoint)
+            .await
+            .expect("create run");
+        let backup_directory = tempfile::tempdir().expect("backup directory");
+        let backup_path = backup_directory.path().join("backup.sqlite3");
+        let admin = SqliteStoreAdmin::new(store.path()).expect("admin");
+        let inspection = admin.backup_to(&backup_path).await.expect("backup");
+        assert_eq!(
+            inspection.store_schema_version,
+            CURRENT_STORE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            inspection.checkpoint_schema_versions,
+            vec![CURRENT_CHECKPOINT_SCHEMA_VERSION]
+        );
+        assert_eq!(
+            SqliteStoreAdmin::inspect_path(&backup_path)
+                .await
+                .expect("inspect")
+                .sha256,
+            inspection.sha256
+        );
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&backup_path)
+            .expect("open backup");
+        file.set_len(64).expect("truncate backup");
+        assert!(SqliteStoreAdmin::inspect_path(&backup_path).await.is_err());
     }
 
     #[tokio::test]

@@ -1,0 +1,37 @@
+schema_version = 1
+
+[listener]
+kind = "unix"
+socket_path = "/run/user/1000/enterprise-local-agent.sock"
+
+[storage]
+data_directory = "/var/lib/enterprise-local-agent"
+database_file = "runs.sqlite3"
+audit_file = "audit.jsonl"
+
+[workflows]
+readonly_enabled = true
+readonly_required = true
+local_write_enabled = false
+local_write_required = false
+
+[model]
+base_url = "http://127.0.0.1:18080/v1"
+model_id = "trusted-local-model"
+provider_label = "local-openai-compatible"
+disable_reasoning = true
+readiness_timeout_ms = 10000
+
+[model.auth]
+kind = "no_auth_loopback"
+
+[knowledge]
+route = "ocpp"
+base_url = "http://127.0.0.1:18081"
+readiness_query = "deployment readiness"
+
+[limits]
+max_active_runs = 32
+max_connections = 64
+shutdown_grace_seconds = 30
+readiness_cache_seconds = 30

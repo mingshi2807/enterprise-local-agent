@@ -3,8 +3,11 @@ use std::{
     fmt,
     future::Future,
     pin::Pin,
-    sync::Arc,
-    time::Instant,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use agent_core::{AgentEvent, AgentEventKind, DurableApprovalOutcome, RunOutcome};
@@ -20,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::Mutex;
+use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 pub const MAX_RUN_INPUT_BYTES: usize = 8 * 1024;
@@ -31,6 +35,15 @@ pub const MAX_FINAL_ANSWER_BYTES: usize = 8 * 1024;
 pub const MAX_RESULT_CITATIONS: usize = 8;
 pub const MAX_CITATION_FIELD_BYTES: usize = 512;
 pub const SERVICE_EVENT_VERSION: u16 = 2;
+
+pub trait ServiceObserver: Send + Sync {
+    fn run_started(&self) {}
+    fn run_settled(&self, _disposition: Option<RunDispositionV1>, _duration: Duration) {}
+}
+
+struct NoopServiceObserver;
+
+impl ServiceObserver for NoopServiceObserver {}
 
 pub type ServiceFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -111,6 +124,24 @@ pub struct RunView {
     pub workflow_id: Option<WorkflowId>,
     pub result: Option<ApplicationResultV1>,
     pub duration_millis: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationalRunViewV1 {
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    pub disposition: RunDispositionV1,
+    pub last_sequence: Option<u64>,
+    pub workflow_id: Option<WorkflowId>,
+    pub duration_millis: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationalRunPageV1 {
+    pub items: Vec<OperationalRunViewV1>,
+    pub next_run_id: Option<RunId>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +332,26 @@ pub struct AgentService {
     sessions: Mutex<HashSet<SessionId>>,
     active: Mutex<HashMap<SessionId, ActiveRun>>,
     results: Mutex<HashMap<RunKey, StoredApplicationResult>>,
+    lifecycle: AtomicU8,
+    tasks: TaskTracker,
+    observer: Arc<dyn ServiceObserver>,
+}
+
+const LIFECYCLE_SERVING: u8 = 1;
+const LIFECYCLE_DRAINING: u8 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceLifecycleV1 {
+    Serving,
+    Draining,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShutdownReportV1 {
+    pub cancelled_active_runs: u16,
+    pub remaining_active_runs: u16,
 }
 
 impl AgentService {
@@ -333,10 +384,63 @@ impl AgentService {
             sessions: Mutex::new(HashSet::new()),
             active: Mutex::new(HashMap::new()),
             results: Mutex::new(HashMap::new()),
+            lifecycle: AtomicU8::new(LIFECYCLE_SERVING),
+            tasks: TaskTracker::new(),
+            observer: Arc::new(NoopServiceObserver),
+        })
+    }
+
+    #[must_use]
+    pub fn with_observer(mut self, observer: Arc<dyn ServiceObserver>) -> Self {
+        self.observer = observer;
+        self
+    }
+
+    #[must_use]
+    pub fn lifecycle(&self) -> ServiceLifecycleV1 {
+        if self.lifecycle.load(Ordering::Acquire) == LIFECYCLE_DRAINING {
+            ServiceLifecycleV1::Draining
+        } else {
+            ServiceLifecycleV1::Serving
+        }
+    }
+
+    fn ensure_serving(&self) -> Result<(), ServiceError> {
+        (self.lifecycle() == ServiceLifecycleV1::Serving)
+            .then_some(())
+            .ok_or(ServiceError::Draining)
+    }
+
+    pub async fn drain(&self, deadline: Duration) -> Result<ShutdownReportV1, ServiceError> {
+        self.lifecycle.store(LIFECYCLE_DRAINING, Ordering::Release);
+        self.tasks.close();
+        let handles = {
+            let active = self.active.lock().await;
+            active
+                .values()
+                .filter_map(|run| run.cancellation.clone())
+                .collect::<Vec<_>>()
+        };
+        let cancelled_active_runs = u16::try_from(handles.len()).unwrap_or(u16::MAX);
+        for handle in handles {
+            handle.request_cancel();
+        }
+        tokio::time::timeout(deadline, self.tasks.wait())
+            .await
+            .map_err(|_| ServiceError::Conflict)?;
+        let remaining_active_runs =
+            u16::try_from(self.active.lock().await.len()).unwrap_or(u16::MAX);
+        if remaining_active_runs != 0 {
+            return Err(ServiceError::Conflict);
+        }
+        Ok(ShutdownReportV1 {
+            cancelled_active_runs,
+            remaining_active_runs,
         })
     }
 
     pub async fn create_session(&self) -> Result<SessionId, ServiceError> {
+        self.ensure_serving()?;
         let mut sessions = self.sessions.lock().await;
         if sessions.len() >= MAX_SESSIONS {
             return Err(ServiceError::Capacity);
@@ -353,6 +457,7 @@ impl AgentService {
         workflow_id: &WorkflowId,
         input: RunInput,
     ) -> Result<RunView, ServiceError> {
+        self.ensure_serving()?;
         workflow_id.validate()?;
         if !self.sessions.lock().await.contains(&session_id) {
             return Err(ServiceError::NotFound);
@@ -368,6 +473,7 @@ impl AgentService {
         let key = RunKey::new(derive_run_id(session_id, start_request_id), session_id);
         {
             let mut active = self.active.lock().await;
+            self.ensure_serving()?;
             if let Some(existing) = active.get(&session_id) {
                 if existing.key == key {
                     return Ok(active_view(existing));
@@ -419,14 +525,32 @@ impl AgentService {
             slot.disposition = RunDispositionV1::Running;
             slot.cancellation = Some(cancellation);
         }
+        self.observer.run_started();
+        if self.lifecycle() == ServiceLifecycleV1::Draining
+            && let Some(handle) = self
+                .active
+                .lock()
+                .await
+                .get(&session_id)
+                .and_then(|run| run.cancellation.clone())
+        {
+            handle.request_cancel();
+        }
         let service = self.clone();
         let harness = self.harness.clone();
-        tokio::spawn(async move {
-            if let Ok(WorkflowCompletion::ApplicationResult(result)) =
-                workflow.run(harness, context, input).await
-            {
-                service.store_result(key, result).await;
+        self.tasks.spawn(async move {
+            let started = Instant::now();
+            let completion = workflow.run(harness, context, input).await;
+            if let Ok(WorkflowCompletion::ApplicationResult(result)) = completion.as_ref() {
+                service.store_result(key, result.clone()).await;
             }
+            let disposition = service
+                .harness
+                .recover_run(key)
+                .await
+                .ok()
+                .map(|value| disposition_kind(&value));
+            service.observer.run_settled(disposition, started.elapsed());
             service.active.lock().await.remove(&session_id);
         });
         Ok(RunView {
@@ -497,6 +621,39 @@ impl AgentService {
         self.read.list_runs(after, limit).await.map_err(Into::into)
     }
 
+    pub async fn operational_run_page(
+        &self,
+        after: Option<RunPageCursor>,
+        limit: u16,
+        reconciliation_only: bool,
+    ) -> Result<OperationalRunPageV1, ServiceError> {
+        validate_read_limit(limit)?;
+        let page = self.read.list_runs(after, limit).await?;
+        let mut items = Vec::new();
+        for summary in page.items() {
+            let view = self
+                .view_for_disposition(self.harness.recover_run(summary.key()).await?)
+                .await?;
+            if reconciliation_only
+                && view.disposition != RunDispositionV1::ManualReconciliationRequired
+            {
+                continue;
+            }
+            items.push(OperationalRunViewV1 {
+                session_id: view.session_id,
+                run_id: view.run_id,
+                disposition: view.disposition,
+                last_sequence: view.last_sequence,
+                workflow_id: view.workflow_id,
+                duration_millis: view.duration_millis,
+            });
+        }
+        Ok(OperationalRunPageV1 {
+            items,
+            next_run_id: page.next().map(RunPageCursor::run_id),
+        })
+    }
+
     pub async fn waiting_page(
         &self,
         after: Option<WaitingPageCursor>,
@@ -539,6 +696,7 @@ impl AgentService {
         expected_row_version: u64,
         decision: ApprovalDecisionV1,
     ) -> Result<(), ServiceError> {
+        self.ensure_serving()?;
         let outcome = match decision {
             ApprovalDecisionV1::Approve => DurableApprovalOutcome::Approve,
             ApprovalDecisionV1::Deny => DurableApprovalOutcome::Deny,
@@ -555,6 +713,7 @@ impl AgentService {
         wait_id: DurableApprovalWaitId,
         expected_row_version: u64,
     ) -> Result<(), ServiceError> {
+        self.ensure_serving()?;
         self.harness
             .abort_durable_waiting(key, wait_id, expected_row_version)
             .await
@@ -566,6 +725,7 @@ impl AgentService {
         key: RunKey,
         wait_id: Option<DurableApprovalWaitId>,
     ) -> Result<(), ServiceError> {
+        self.ensure_serving()?;
         let disposition = self.harness.recover_run(key).await?;
         if matches!(&disposition, RecoveryDisposition::Waiting(_)) && wait_id.is_none()
             || matches!(&disposition, RecoveryDisposition::Resumable(_)) && wait_id.is_some()
@@ -594,6 +754,7 @@ impl AgentService {
         };
         {
             let mut active = self.active.lock().await;
+            self.ensure_serving()?;
             if active.contains_key(&key.session_id()) || active.len() >= MAX_ACTIVE_RUNS {
                 return Err(ServiceError::Conflict);
             }
@@ -608,28 +769,38 @@ impl AgentService {
                 },
             );
         }
+        self.observer.run_started();
         let service = self.clone();
         let harness = self.harness.clone();
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
+            let started = Instant::now();
             let completion = match disposition {
                 RecoveryDisposition::Waiting(recovered) => {
                     if let Some(wait_id) = wait_id {
                         workflow
                             .resume_waiting(harness, *recovered, wait_id)
                             .await
-                            .ok()
+                            .map(Some)
                     } else {
-                        None
+                        Ok(None)
                     }
                 }
-                RecoveryDisposition::Resumable(recovered) => {
-                    workflow.resume_recovered(harness, *recovered).await.ok()
-                }
-                _ => None,
+                RecoveryDisposition::Resumable(recovered) => workflow
+                    .resume_recovered(harness, *recovered)
+                    .await
+                    .map(Some),
+                _ => Ok(None),
             };
-            if let Some(WorkflowCompletion::ApplicationResult(result)) = completion {
-                service.store_result(key, result).await;
+            if let Ok(Some(WorkflowCompletion::ApplicationResult(result))) = completion.as_ref() {
+                service.store_result(key, result.clone()).await;
             }
+            let disposition = service
+                .harness
+                .recover_run(key)
+                .await
+                .ok()
+                .map(|value| disposition_kind(&value));
+            service.observer.run_settled(disposition, started.elapsed());
             service.active.lock().await.remove(&key.session_id());
         });
         Ok(())
@@ -716,6 +887,18 @@ fn recovery_contract(disposition: &RecoveryDisposition) -> Option<RecoveryContra
         }
         RecoveryDisposition::Resumable(run) => Some(run.recovery_contract()),
         RecoveryDisposition::Waiting(run) => Some(run.recovery_contract()),
+    }
+}
+
+fn disposition_kind(disposition: &RecoveryDisposition) -> RunDispositionV1 {
+    match disposition {
+        RecoveryDisposition::Completed { .. } => RunDispositionV1::Completed,
+        RecoveryDisposition::TerminalFailure { .. } => RunDispositionV1::Failed,
+        RecoveryDisposition::Resumable(_) => RunDispositionV1::Resumable,
+        RecoveryDisposition::Waiting(_) => RunDispositionV1::Waiting,
+        RecoveryDisposition::ManualReconciliationRequired { .. } => {
+            RunDispositionV1::ManualReconciliationRequired
+        }
     }
 }
 
@@ -1046,6 +1229,8 @@ pub enum ServiceError {
     Conflict,
     #[error("service capacity exhausted")]
     Capacity,
+    #[error("service is draining")]
+    Draining,
     #[error("workflow unavailable")]
     WorkflowUnavailable,
     #[error("service configuration is invalid")]
@@ -1250,6 +1435,30 @@ mod tests {
                 .disposition,
             RunDispositionV1::Failed
         );
+    }
+
+    #[tokio::test]
+    async fn draining_rejects_new_work_and_waits_for_active_tasks() {
+        let (_directory, service, invocations) = fixture(Duration::from_millis(50)).await;
+        let session = service.create_session().await.expect("session");
+        let workflow = WorkflowId::new("test").expect("workflow");
+        service
+            .start_run(
+                session,
+                Uuid::new_v4(),
+                &workflow,
+                RunInput::new(b"bounded".to_vec()).expect("input"),
+            )
+            .await
+            .expect("start");
+        let report = service.drain(Duration::from_secs(1)).await.expect("drain");
+        assert_eq!(report.remaining_active_runs, 0);
+        assert_eq!(service.lifecycle(), ServiceLifecycleV1::Draining);
+        assert_eq!(invocations.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            service.create_session().await,
+            Err(ServiceError::Draining)
+        ));
     }
 
     #[tokio::test]

@@ -8,6 +8,8 @@ mod launcher;
 mod path;
 mod protocol;
 
+pub const LOCAL_WRITE_PROTOCOL_VERSION: u16 = protocol::PROTOCOL_VERSION;
+
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::{AsFd, OwnedFd};

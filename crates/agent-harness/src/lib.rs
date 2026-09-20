@@ -23,7 +23,8 @@ pub use action::{
     MAX_ACTION_ARGUMENT_ARRAY_ELEMENTS, MAX_ACTION_ARGUMENT_BYTES, MAX_ACTION_ARGUMENT_DEPTH,
     MAX_ACTION_ARGUMENT_KEYS, MAX_ACTION_ARGUMENT_NODES, MAX_ACTION_TOOL_NAME_BYTES,
     MAX_PLANNING_RESPONSE_BYTES, MAX_TOOL_SCHEMA_BYTES, MAX_TOOL_SCHEMA_DEPTH,
-    MAX_TOOL_SCHEMA_KEYS, ToolSchemaRegistrationError, ValidatedAction, validate_tool_schema,
+    MAX_TOOL_SCHEMA_KEYS, ToolSchemaRegistrationError, ValidatedAction,
+    compute_tool_contract_digest, validate_tool_schema,
 };
 pub use approval::{
     ApprovalDecision, ApprovalOutcome, ApprovalPort, ApprovalPortError, ApprovalPreview,

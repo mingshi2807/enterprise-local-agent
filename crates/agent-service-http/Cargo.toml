@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+agent-core.workspace = true
+agent-deployment.workspace = true
+agent-harness.workspace = true
 agent-service.workspace = true
 axum.workspace = true
 futures-util.workspace = true
