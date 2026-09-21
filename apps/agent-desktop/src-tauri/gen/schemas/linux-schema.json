@@ -177,6 +177,36 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the conversation_cancel_run command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-conversation-cancel-run",
+          "markdownDescription": "Enables the conversation_cancel_run command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the conversation_create_session command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-conversation-create-session",
+          "markdownDescription": "Enables the conversation_create_session command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the conversation_read_events command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-conversation-read-events",
+          "markdownDescription": "Enables the conversation_read_events command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the conversation_run_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-conversation-run-status",
+          "markdownDescription": "Enables the conversation_run_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the conversation_start_readonly_run command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-conversation-start-readonly-run",
+          "markdownDescription": "Enables the conversation_start_readonly_run command without any pre-configured scope."
+        },
+        {
           "description": "Enables the service_health command without any pre-configured scope.",
           "type": "string",
           "const": "allow-service-health",
@@ -193,6 +223,36 @@
           "type": "string",
           "const": "allow-service-version",
           "markdownDescription": "Enables the service_version command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the conversation_cancel_run command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-conversation-cancel-run",
+          "markdownDescription": "Denies the conversation_cancel_run command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the conversation_create_session command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-conversation-create-session",
+          "markdownDescription": "Denies the conversation_create_session command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the conversation_read_events command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-conversation-read-events",
+          "markdownDescription": "Denies the conversation_read_events command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the conversation_run_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-conversation-run-status",
+          "markdownDescription": "Denies the conversation_run_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the conversation_start_readonly_run command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-conversation-start-readonly-run",
+          "markdownDescription": "Denies the conversation_start_readonly_run command without any pre-configured scope."
         },
         {
           "description": "Denies the service_health command without any pre-configured scope.",

@@ -20,6 +20,7 @@ import { ReadinessInspector } from "@/components/ReadinessInspector";
 import { SessionSidebar } from "@/components/SessionSidebar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
+import { useConversationController } from "@/queries/conversation";
 import { serviceQueryKeys, useServiceState } from "@/queries/service";
 
 const nextTheme: Record<ThemePreference, ThemePreference> = {
@@ -65,14 +66,20 @@ export function App() {
   const [inspectorOpen, setInspectorOpen] = useState(() => window.matchMedia("(min-width: 1041px)").matches);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [composerFocusNonce, setComposerFocusNonce] = useState(0);
+  const conversation = useConversationController(selectedSessionId, setSelectedSessionId);
 
   const connected = health.isSuccess;
   const draining = health.data?.lifecycle === "draining";
   const readinessStatus = readiness.data?.overall ?? "unavailable";
   const serviceState = !connected ? "unavailable" : draining ? "draining" : readinessStatus;
+  const readonlyReady = connected && !draining && readiness.data?.workflows.some(
+    (workflow) => workflow.workflow === "enterprise-engineering-readonly-v1" && workflow.enabled && workflow.status === "ready",
+  ) === true;
 
   const newTask = useCallback(() => {
     setSelectedSessionId(null);
+    setComposerFocusNonce((value) => value + 1);
     setPaletteOpen(false);
   }, []);
 
@@ -186,6 +193,7 @@ export function App() {
         >
           <SessionSidebar
             expanded={sidebarOpen}
+            conversations={conversation.conversations}
             selectedSessionId={selectedSessionId}
             onSelectSession={setSelectedSessionId}
             onNewTask={newTask}
@@ -194,10 +202,17 @@ export function App() {
 
         <main className="min-w-0 flex-1 bg-background">
           <ConversationWorkspace
-            selectedSessionId={selectedSessionId}
+            conversation={conversation.selected}
             serviceState={serviceState}
+            readonlyReady={readonlyReady}
+            sending={conversation.sending}
+            cancelling={conversation.cancelling}
+            focusNonce={composerFocusNonce}
+            onSend={conversation.send}
+            onCancel={conversation.cancel}
             onNewTask={newTask}
-            onRetry={() => void refresh()}
+            onRetryRun={conversation.retry}
+            onRetryConnection={() => void refresh()}
           />
         </main>
 

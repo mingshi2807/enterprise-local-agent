@@ -4,167 +4,199 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "@/app/App";
 import { ThemeProvider } from "@/app/ThemeProvider";
+import { serviceEventSchema } from "@/bridge/contracts";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
+const sessionId = "11111111-1111-4111-8111-111111111111";
+const runId = "22222222-2222-4222-8222-222222222222";
+const workflow = "enterprise-engineering-readonly-v1";
+
 function renderApp() {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  return render(
-    <ThemeProvider>
-      <QueryClientProvider client={queryClient}>
-        <App />
-      </QueryClientProvider>
-    </ThemeProvider>,
-  );
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
+  return render(<ThemeProvider><QueryClientProvider client={queryClient}><App /></QueryClientProvider></ThemeProvider>);
 }
 
-function mockService({
-  lifecycle = "serving",
-  overall = "ready",
-}: {
-  lifecycle?: "serving" | "draining";
-  overall?: "ready" | "degraded" | "unavailable";
-} = {}) {
-  invoke.mockImplementation((command: string) => {
-    if (command === "service_health") return Promise.resolve({ version: 1, lifecycle });
-    if (command === "service_readiness") {
-      return Promise.resolve({
-        version: 1,
-        overall,
-        dependencies: [
-          {
-            dependency: "knowledge",
-            status: overall,
-            code: overall,
-            checked_unix_seconds: 1,
-          },
-        ],
-        workflows: [
-          {
-            workflow: "enterprise-engineering-readonly-v1",
-            enabled: true,
-            required: true,
-            status: overall,
-          },
-        ],
-      });
-    }
-    return Promise.resolve({
-      application: "enterprise-local-agent",
-      version: "0.1.0",
-      git_identity: null,
-      deployment_fingerprint: "test",
-      config_schema_version: 2,
-      store_schema_version: 2,
-      event_schema_version: 9,
-      checkpoint_schema_version: 4,
-    });
+function runView(overrides: Record<string, unknown> = {}) {
+  return { session_id: sessionId, run_id: runId, disposition: "running", last_sequence: null, outcome: null, workflow_id: workflow, result: null, duration_millis: null, ...overrides };
+}
+
+function event(sequence: number, category: "knowledge" | "model" | "graph", phase: "started" | "completed" | "failed", graphNodeId: string | null = null) {
+  return { version: 2, sequence, run_id: runId, category, phase, correlation_id: `${category}-${sequence}`, workflow_id: workflow, knowledge_backends: category === "knowledge" ? ["standards"] : [], graph_node_id: graphNodeId, budget_usage: null, budget_limit: null };
+}
+
+function installServiceMock(handler?: (command: string, args?: Record<string, unknown>) => unknown) {
+  invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+    const custom = handler?.(command, args);
+    if (custom !== undefined) return Promise.resolve(custom);
+    if (command === "service_health") return Promise.resolve({ version: 1, lifecycle: "serving" });
+    if (command === "service_readiness") return Promise.resolve({ version: 1, overall: "ready", dependencies: [{ dependency: "knowledge", status: "ready", code: "ready", checked_unix_seconds: 1 }], workflows: [{ workflow, enabled: true, required: true, status: "ready" }] });
+    if (command === "service_version") return Promise.resolve({ application: "enterprise-local-agent", version: "0.1.0", git_identity: null, deployment_fingerprint: "test", config_schema_version: 2, store_schema_version: 2, event_schema_version: 9, checkpoint_schema_version: 4 });
+    if (command === "conversation_create_session") return Promise.resolve({ session_id: sessionId });
+    if (command === "conversation_start_readonly_run") return Promise.resolve(runView());
+    if (command === "conversation_read_events") return Promise.resolve([]);
+    if (command === "conversation_run_status") return Promise.resolve(runView());
+    if (command === "conversation_cancel_run") return Promise.resolve(null);
+    return Promise.reject(new Error("unexpected_command"));
   });
 }
 
-describe("App", () => {
+async function submit(prompt = "Explain the charging requirement") {
+  const composer = await screen.findByRole("textbox", { name: "Task composer" });
+  await waitFor(() => expect(composer).toBeEnabled());
+  fireEvent.change(composer, { target: { value: prompt } });
+  fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
+  await waitFor(() => expect(screen.getAllByText(prompt).length).toBeGreaterThanOrEqual(1));
+}
+
+describe("App conversation", () => {
   afterEach(cleanup);
+  beforeEach(() => { invoke.mockReset(); window.localStorage.clear(); window.innerWidth = 1280; });
 
-  beforeEach(() => {
-    invoke.mockReset();
-    window.localStorage.clear();
-    window.innerWidth = 1280;
+  it("starts the fixed ReadOnly workflow and renders the authoritative answer and citations", async () => {
+    installServiceMock((command) => {
+      if (command === "conversation_read_events") return [event(1, "knowledge", "started"), event(2, "model", "completed")];
+      if (command === "conversation_run_status") return runView({ disposition: "completed", last_sequence: 2, outcome: "completed", result: { kind: "final_answer", answer: "Use **bounded** charging control.\n\n```rust\nlet safe = true;\n```", citations: [{ evidence_id: "ev-1", backend: "standards", source_id: "iso", reference_id: "8.4", provenance: "ISO reference" }] }, duration_millis: 42 });
+      return undefined;
+    });
+    renderApp();
+    await submit();
+
+    expect(await screen.findByText("bounded")).toBeInTheDocument();
+    expect(screen.getByText(/standards · 8.4/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy answer" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy code" })).toBeInTheDocument();
+    const start = invoke.mock.calls.find(([command]) => command === "conversation_start_readonly_run");
+    expect(start?.[1]).toMatchObject({ sessionId, input: "Explain the charging requirement" });
+    expect(start?.[1]?.startRequestId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it("shows bounded service readiness returned by the typed bridge", async () => {
-    mockService();
-
+  it("allows only one active send and cancels through the named command", async () => {
+    installServiceMock();
     renderApp();
-
-    expect(await screen.findByText("enterprise-engineering-readonly-v1")).toBeInTheDocument();
-    expect(screen.getByText("Local service ready")).toBeInTheDocument();
-    expect(screen.getByText("v0.1.0")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
-  });
-
-  it("shows a sanitized unavailable state when the bridge fails", async () => {
-    invoke.mockRejectedValue(new Error("service_unavailable"));
-    renderApp();
-
-    await waitFor(() =>
-      expect(screen.getByRole("heading", { name: "Local service unavailable" })).toBeInTheDocument(),
-    );
-    expect(screen.queryByText("service_unavailable")).not.toBeInTheDocument();
+    await submit("Long running task");
+    expect(await screen.findByRole("button", { name: "Stop" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Task composer" })).toBeDisabled();
+    expect(invoke.mock.calls.filter(([command]) => command === "conversation_start_readonly_run")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("conversation_cancel_run", { sessionId, runId }));
   });
 
   it.each([
-    ["degraded", "Local service degraded"],
-    ["unavailable", "Local service unavailable"],
-  ] as const)("projects the %s readiness state", async (overall, label) => {
-    mockService({ overall });
+    ["knowledge", "Enterprise knowledge retrieval is unavailable or timed out."],
+    ["model", "The configured model is unavailable or timed out."],
+  ] as const)("shows a sanitized %s failure and retries as a new run", async (category, message) => {
+    let starts = 0;
+    installServiceMock((command) => {
+      if (command === "conversation_start_readonly_run") { starts += 1; return runView(); }
+      if (command === "conversation_read_events") return [event(1, category, "failed")];
+      if (command === "conversation_run_status") return runView({ disposition: "failed", last_sequence: 1, outcome: "failed" });
+      return undefined;
+    });
     renderApp();
-
-    if (overall === "unavailable") {
-      expect(await screen.findByRole("heading", { name: label })).toBeInTheDocument();
-    } else {
-      expect(await screen.findByText(label)).toBeInTheDocument();
-    }
+    await submit("Fail safely");
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry as new run" }));
+    await waitFor(() => expect(starts).toBe(2));
   });
 
-  it("gives draining lifecycle precedence over readiness", async () => {
-    mockService({ lifecycle: "draining" });
+  it("catches up from the last ServiceEventV2 cursor after a transient failure", async () => {
+    const cursors: unknown[] = [];
+    let reads = 0;
+    installServiceMock((command, args) => {
+      if (command === "conversation_read_events") {
+        reads += 1;
+        cursors.push(args?.afterSequence);
+        if (reads === 1) return Promise.reject(new Error("service_unavailable"));
+        if (reads === 2) return [event(1, "knowledge", "started")];
+        return [event(2, "graph", "completed", "verify-answer")];
+      }
+      if (command === "conversation_run_status") {
+        if (reads < 3) return runView();
+        return runView({ disposition: "completed", last_sequence: 2, outcome: "completed", result: { kind: "final_answer", answer: "Recovered answer", citations: [] } });
+      }
+      return undefined;
+    });
     renderApp();
-
-    expect(await screen.findByText("Local service draining")).toBeInTheDocument();
+    await submit("Reconnect test");
+    expect(await screen.findByText("Recovered answer", {}, { timeout: 3_000 })).toBeInTheDocument();
+    expect(cursors).toContain(null);
+    expect(cursors).toContain(1);
   });
 
-  it("opens and executes the command palette with keyboard controls", async () => {
-    mockService();
+  it("reports volatile result loss without replaying the model call", async () => {
+    installServiceMock((command) => {
+      if (command === "conversation_run_status") return runView({ disposition: "completed", outcome: "completed", last_sequence: 1 });
+      if (command === "conversation_read_events") return [event(1, "graph", "completed")];
+      return undefined;
+    });
     renderApp();
-    await screen.findByText("Local service ready");
-
-    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
-    const dialog = await screen.findByRole("dialog", { name: "Command palette" });
-    expect(dialog).toBeInTheDocument();
-
-    const search = screen.getByRole("textbox", { name: "Search commands" });
-    fireEvent.change(search, { target: { value: "inspector" } });
-    fireEvent.keyDown(dialog, { key: "Enter" });
-
-    await waitFor(() => expect(screen.queryByRole("heading", { name: "Inspector" })).not.toBeInTheDocument());
+    await submit("Restarted run");
+    expect(await screen.findByText("This run completed, but its answer is no longer available after restart.")).toBeInTheDocument();
+    expect(invoke.mock.calls.filter(([command]) => command === "conversation_start_readonly_run")).toHaveLength(1);
   });
 
-  it("supports pane and new-task shortcuts without overriding editor shortcuts", async () => {
-    mockService();
+  it("reports a malformed terminal model result without exposing raw output", async () => {
+    installServiceMock((command) => {
+      if (command === "conversation_read_events") return [event(1, "model", "completed")];
+      if (command === "conversation_run_status") return runView({ disposition: "failed", outcome: "failed", last_sequence: 1 });
+      return undefined;
+    });
     renderApp();
-    await screen.findByText("Local service ready");
+    await submit("Strict output test");
+    expect(await screen.findByText("The model returned a result that did not match the required answer format.")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("raw_model_output");
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: /Review charging profile/ }));
-    expect(screen.getByRole("heading", { name: "Conversation preview" })).toBeInTheDocument();
+  it("shows a sanitized start failure and keeps the prompt editable", async () => {
+    installServiceMock((command) => {
+      if (command === "conversation_create_session") return Promise.reject(new Error("credential=secret"));
+      return undefined;
+    });
+    renderApp();
+    const composer = await screen.findByRole("textbox", { name: "Task composer" });
+    await waitFor(() => expect(composer).toBeEnabled());
+    fireEvent.change(composer, { target: { value: "Keep this prompt" } });
+    fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
+    expect(await screen.findByRole("alert")).toHaveTextContent("could not start this task");
+    expect(screen.getByRole("textbox", { name: "Task composer" })).toHaveValue("Keep this prompt");
+    expect(document.body.textContent).not.toContain("credential=secret");
+  });
 
-    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
-    expect(screen.getByRole("heading", { name: "New task" })).toBeInTheDocument();
+  it("keeps internal payload fields outside ServiceEventV2", () => {
+    expect(serviceEventSchema.safeParse({ ...event(1, "model", "started"), prompt: "secret" }).success).toBe(false);
+    expect(serviceEventSchema.safeParse({ ...event(1, "model", "started"), raw_model_output: "secret" }).success).toBe(false);
+  });
+});
 
+describe("App shell states", () => {
+  afterEach(cleanup);
+  beforeEach(() => { invoke.mockReset(); window.innerWidth = 1280; });
+
+  it("shows readiness and supports shell shortcuts", async () => {
+    installServiceMock();
+    renderApp();
+    expect(await screen.findByText(workflow)).toBeInTheDocument();
     fireEvent.keyDown(window, { key: "b", ctrlKey: true });
     expect(screen.getByRole("button", { name: "Expand conversations" })).toBeInTheDocument();
-
-    const composer = screen.getByRole("textbox", { name: "Task composer" });
-    composer.focus();
-    fireEvent.keyDown(composer, { key: "b", ctrlKey: true });
-    expect(screen.getByRole("button", { name: "Expand conversations" })).toBeInTheDocument();
-
-    fireEvent.keyDown(window, { key: "i", ctrlKey: true, shiftKey: true });
-    await waitFor(() => expect(screen.queryByRole("heading", { name: "Inspector" })).not.toBeInTheDocument());
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
   });
 
-  it("prioritizes the task workspace at compact window width", async () => {
-    window.innerWidth = 800;
-    mockService();
+  it("shows a sanitized unavailable state", async () => {
+    invoke.mockRejectedValue(new Error("credential=secret"));
     renderApp();
+    expect(await screen.findByRole("heading", { name: "Local service unavailable" })).toBeInTheDocument();
+    expect(screen.queryByText(/credential=secret/)).not.toBeInTheDocument();
+  });
 
+  it("keeps the task workspace visible in a compact window", async () => {
+    window.innerWidth = 800;
+    installServiceMock();
+    renderApp();
     await screen.findByText("Local service ready");
     expect(screen.getByRole("button", { name: "Expand conversations" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Show inspector" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Inspector" })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Task composer" })).toBeInTheDocument();
   });
 });

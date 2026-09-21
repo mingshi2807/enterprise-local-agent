@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-conversation-start-readonly-run"
+description = "Enables the conversation_start_readonly_run command without any pre-configured scope."
+commands.allow = ["conversation_start_readonly_run"]
+
+[[permission]]
+identifier = "deny-conversation-start-readonly-run"
+description = "Denies the conversation_start_readonly_run command without any pre-configured scope."
+commands.deny = ["conversation_start_readonly_run"]

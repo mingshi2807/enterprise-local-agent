@@ -1,6 +1,6 @@
 use std::{env, fmt, net::IpAddr, path::PathBuf, time::Duration};
 
-use reqwest::{Client, StatusCode, header};
+use reqwest::{Client, Method, StatusCode, header};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use url::{Host, Url};
 use zeroize::Zeroize;
@@ -8,6 +8,12 @@ use zeroize::Zeroize;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_ITEMS: usize = 64;
 const MAX_TEXT_BYTES: usize = 256;
+const MAX_RUN_INPUT_BYTES: usize = 8 * 1024;
+const MAX_FINAL_ANSWER_BYTES: usize = 8 * 1024;
+const MAX_CITATION_FIELD_BYTES: usize = 1_024;
+const MAX_RESULT_CITATIONS: usize = 8;
+const MAX_KNOWLEDGE_BACKENDS: usize = 8;
+const READONLY_WORKFLOW_ID: &str = "enterprise-engineering-readonly-v1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +78,154 @@ pub struct BuildInfoV1 {
     checkpoint_schema_version: u16,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionV1 {
+    session_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunDispositionV1 {
+    Starting,
+    Running,
+    Waiting,
+    Resumable,
+    Completed,
+    Failed,
+    ManualReconciliationRequired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOutcomeV1 {
+    Completed,
+    Cancelled,
+    BudgetExceeded,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationCitationV1 {
+    evidence_id: String,
+    backend: String,
+    source_id: String,
+    reference_id: String,
+    provenance: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum ReadonlyApplicationResultV1 {
+    FinalAnswer {
+        answer: String,
+        citations: Vec<ApplicationCitationV1>,
+    },
+}
+
+impl fmt::Debug for ReadonlyApplicationResultV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FinalAnswer { answer, citations } => formatter
+                .debug_struct("FinalAnswer")
+                .field("answer", &"[REDACTED]")
+                .field("answer_bytes", &answer.len())
+                .field("citation_count", &citations.len())
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunViewV1 {
+    session_id: String,
+    run_id: String,
+    disposition: RunDispositionV1,
+    last_sequence: Option<u64>,
+    outcome: Option<RunOutcomeV1>,
+    workflow_id: Option<String>,
+    result: Option<ReadonlyApplicationResultV1>,
+    duration_millis: Option<u64>,
+}
+
+impl fmt::Debug for RunViewV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RunViewV1")
+            .field("session_id", &self.session_id)
+            .field("run_id", &self.run_id)
+            .field("disposition", &self.disposition)
+            .field("last_sequence", &self.last_sequence)
+            .field("outcome", &self.outcome)
+            .field("workflow_id", &self.workflow_id)
+            .field("result", &self.result.as_ref().map(|_| "[REDACTED]"))
+            .field("duration_millis", &self.duration_millis)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceEventCategoryV2 {
+    Run,
+    Model,
+    Action,
+    Tool,
+    Approval,
+    Containment,
+    Knowledge,
+    Loop,
+    Graph,
+    Audit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceEventPhaseV2 {
+    Started,
+    Completed,
+    Failed,
+    Proposed,
+    Validated,
+    Rejected,
+    Bound,
+    Denied,
+    Granted,
+    Prepared,
+    DecisionRecorded,
+    Degraded,
+    Progress,
+    Suspended,
+    Resumed,
+    Finished,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceEventV2 {
+    version: u16,
+    sequence: u64,
+    run_id: String,
+    category: ServiceEventCategoryV2,
+    phase: ServiceEventPhaseV2,
+    correlation_id: Option<String>,
+    workflow_id: Option<String>,
+    knowledge_backends: Vec<String>,
+    graph_node_id: Option<String>,
+    budget_usage: Option<u32>,
+    budget_limit: Option<u32>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct StartReadonlyRunBody<'a> {
+    start_request_id: &'a str,
+    workflow_id: &'static str,
+    input: &'a str,
+}
+
 trait BoundedResponse {
     fn validate(&self) -> Result<(), LocalServiceError>;
 }
@@ -118,6 +272,98 @@ impl BoundedResponse for BuildInfoV1 {
             .then_some(())
             .ok_or(LocalServiceError::InvalidResponse)
     }
+}
+
+impl BoundedResponse for SessionV1 {
+    fn validate(&self) -> Result<(), LocalServiceError> {
+        valid_uuid(&self.session_id)
+            .then_some(())
+            .ok_or(LocalServiceError::InvalidResponse)
+    }
+}
+
+impl BoundedResponse for RunViewV1 {
+    fn validate(&self) -> Result<(), LocalServiceError> {
+        if !valid_uuid(&self.session_id)
+            || !valid_uuid(&self.run_id)
+            || self
+                .workflow_id
+                .as_deref()
+                .is_some_and(|workflow| workflow != READONLY_WORKFLOW_ID)
+            || self
+                .result
+                .as_ref()
+                .is_some_and(|result| !valid_application_result(result))
+        {
+            return Err(LocalServiceError::InvalidResponse);
+        }
+        Ok(())
+    }
+}
+
+impl BoundedResponse for Vec<ServiceEventV2> {
+    fn validate(&self) -> Result<(), LocalServiceError> {
+        if self.len() > MAX_ITEMS
+            || self.iter().any(|event| {
+                event.version != 2
+                    || event.sequence == 0
+                    || !valid_uuid(&event.run_id)
+                    || event
+                        .correlation_id
+                        .as_deref()
+                        .is_some_and(|value| !bounded_text(value))
+                    || event
+                        .workflow_id
+                        .as_deref()
+                        .is_some_and(|value| value != READONLY_WORKFLOW_ID)
+                    || event.knowledge_backends.len() > MAX_KNOWLEDGE_BACKENDS
+                    || event
+                        .knowledge_backends
+                        .iter()
+                        .any(|value| !bounded_text(value))
+                    || event
+                        .graph_node_id
+                        .as_deref()
+                        .is_some_and(|value| !bounded_text(value))
+                    || matches!((event.budget_usage, event.budget_limit), (Some(used), Some(limit)) if used > limit)
+                    || event.budget_usage.is_some() != event.budget_limit.is_some()
+            })
+        {
+            return Err(LocalServiceError::InvalidResponse);
+        }
+        Ok(())
+    }
+}
+
+fn valid_application_result(result: &ReadonlyApplicationResultV1) -> bool {
+    match result {
+        ReadonlyApplicationResultV1::FinalAnswer { answer, citations } => {
+            !answer.is_empty()
+                && answer.len() <= MAX_FINAL_ANSWER_BYTES
+                && citations.len() <= MAX_RESULT_CITATIONS
+                && citations.iter().all(|citation| {
+                    [
+                        citation.evidence_id.as_str(),
+                        citation.backend.as_str(),
+                        citation.source_id.as_str(),
+                        citation.reference_id.as_str(),
+                    ]
+                    .into_iter()
+                    .chain(citation.provenance.as_deref())
+                    .all(bounded_citation_text)
+                })
+        }
+    }
+}
+
+fn bounded_citation_text(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_CITATION_FIELD_BYTES
+        && value.chars().all(|character| !character.is_control())
+}
+
+fn valid_uuid(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok()
 }
 
 fn bounded_text(value: &str) -> bool {
@@ -290,15 +536,125 @@ impl LocalServiceClient {
         self.get("v1/operations/version").await
     }
 
-    async fn get<T>(&self, path: &'static str) -> Result<T, LocalServiceError>
+    pub async fn create_session(&self) -> Result<SessionV1, LocalServiceError> {
+        let response = self
+            .request(Method::POST, "v1/sessions")?
+            .header(header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|_| LocalServiceError::Unavailable)?;
+        self.decode_json(response, StatusCode::OK).await
+    }
+
+    pub async fn start_readonly_run(
+        &self,
+        session_id: &str,
+        start_request_id: &str,
+        input: &str,
+    ) -> Result<RunViewV1, LocalServiceError> {
+        if !valid_uuid(session_id)
+            || !valid_uuid(start_request_id)
+            || input.is_empty()
+            || input.len() > MAX_RUN_INPUT_BYTES
+        {
+            return Err(LocalServiceError::InvalidRequest);
+        }
+        let body = StartReadonlyRunBody {
+            start_request_id,
+            workflow_id: READONLY_WORKFLOW_ID,
+            input,
+        };
+        let body = serde_json::to_vec(&body).map_err(|_| LocalServiceError::InvalidRequest)?;
+        let response = self
+            .request(Method::POST, &format!("v1/sessions/{session_id}/runs"))?
+            .header(header::ACCEPT, "application/json")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| LocalServiceError::Unavailable)?;
+        let run: RunViewV1 = self.decode_json(response, StatusCode::OK).await?;
+        if run.session_id != session_id || run.workflow_id.as_deref() != Some(READONLY_WORKFLOW_ID)
+        {
+            return Err(LocalServiceError::InvalidResponse);
+        }
+        Ok(run)
+    }
+
+    pub async fn run_status(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<RunViewV1, LocalServiceError> {
+        validate_run_key(session_id, run_id)?;
+        let run: RunViewV1 = self
+            .get(&format!("v1/sessions/{session_id}/runs/{run_id}"))
+            .await?;
+        if run.session_id != session_id || run.run_id != run_id {
+            return Err(LocalServiceError::InvalidResponse);
+        }
+        Ok(run)
+    }
+
+    pub async fn cancel_run(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<(), LocalServiceError> {
+        validate_run_key(session_id, run_id)?;
+        let response = self
+            .request(
+                Method::POST,
+                &format!("v1/sessions/{session_id}/runs/{run_id}/cancel"),
+            )?
+            .send()
+            .await
+            .map_err(|_| LocalServiceError::Unavailable)?;
+        self.require_status(response.status(), StatusCode::ACCEPTED)
+    }
+
+    pub async fn read_events(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        after: Option<u64>,
+    ) -> Result<Vec<ServiceEventV2>, LocalServiceError> {
+        validate_run_key(session_id, run_id)?;
+        let cursor = after.unwrap_or(0);
+        let path = format!(
+            "v1/sessions/{session_id}/runs/{run_id}/events?after={cursor}&limit={MAX_ITEMS}"
+        );
+        let events: Vec<ServiceEventV2> = self.get(&path).await?;
+        validate_event_page(&events, run_id, cursor)?;
+        Ok(events)
+    }
+
+    async fn get<T>(&self, path: &str) -> Result<T, LocalServiceError>
     where
         T: DeserializeOwned + BoundedResponse,
     {
-        let mut request = match &self.transport {
+        let response = self
+            .request(Method::GET, path)?
+            .header(header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|_| LocalServiceError::Unavailable)?;
+        self.decode_json(response, StatusCode::OK).await
+    }
+
+    fn request(
+        &self,
+        method: Method,
+        path: &str,
+    ) -> Result<reqwest::RequestBuilder, LocalServiceError> {
+        if path.is_empty() || path.starts_with('/') || path.len() > 1_024 {
+            return Err(LocalServiceError::InvalidConfiguration);
+        }
+        Ok(match &self.transport {
             #[cfg(unix)]
-            LocalServiceTransport::UnixSocket { .. } => {
-                self.client.get(format!("http://localhost/{path}"))
-            }
+            LocalServiceTransport::UnixSocket { .. } => self
+                .client
+                .request(method, format!("http://localhost/{path}")),
             LocalServiceTransport::Loopback {
                 base_url,
                 bearer,
@@ -308,19 +664,33 @@ impl LocalServiceClient {
                     .join(path)
                     .map_err(|_| LocalServiceError::InvalidConfiguration)?;
                 self.client
-                    .get(url)
+                    .request(method, url)
                     .bearer_auth(bearer.expose())
                     .header(header::ORIGIN, origin.clone())
             }
-        };
-        request = request.header(header::ACCEPT, "application/json");
-        let mut response = request
-            .send()
-            .await
-            .map_err(|_| LocalServiceError::Unavailable)?;
-        if response.status() != StatusCode::OK {
-            return Err(LocalServiceError::Unavailable);
+        })
+    }
+
+    fn require_status(
+        &self,
+        actual: StatusCode,
+        expected: StatusCode,
+    ) -> Result<(), LocalServiceError> {
+        if actual == expected {
+            return Ok(());
         }
+        Err(error_for_status(actual))
+    }
+
+    async fn decode_json<T>(
+        &self,
+        mut response: reqwest::Response,
+        expected: StatusCode,
+    ) -> Result<T, LocalServiceError>
+    where
+        T: DeserializeOwned + BoundedResponse,
+    {
+        self.require_status(response.status(), expected)?;
         if response
             .content_length()
             .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
@@ -345,6 +715,40 @@ impl LocalServiceClient {
     }
 }
 
+fn validate_run_key(session_id: &str, run_id: &str) -> Result<(), LocalServiceError> {
+    if !valid_uuid(session_id) || !valid_uuid(run_id) {
+        return Err(LocalServiceError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn validate_event_page(
+    events: &[ServiceEventV2],
+    run_id: &str,
+    cursor: u64,
+) -> Result<(), LocalServiceError> {
+    let mut expected = cursor.saturating_add(1);
+    for event in events {
+        if event.run_id != run_id || event.sequence != expected {
+            return Err(LocalServiceError::InvalidResponse);
+        }
+        expected = expected.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn error_for_status(status: StatusCode) -> LocalServiceError {
+    match status {
+        StatusCode::BAD_REQUEST => LocalServiceError::InvalidRequest,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => LocalServiceError::Unauthorized,
+        StatusCode::NOT_FOUND => LocalServiceError::NotFound,
+        StatusCode::CONFLICT => LocalServiceError::Conflict,
+        StatusCode::TOO_MANY_REQUESTS => LocalServiceError::Capacity,
+        StatusCode::SERVICE_UNAVAILABLE => LocalServiceError::Draining,
+        _ => LocalServiceError::Unavailable,
+    }
+}
+
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 pub enum LocalServiceError {
     #[error("invalid desktop service configuration")]
@@ -355,6 +759,18 @@ pub enum LocalServiceError {
     ResponseTooLarge,
     #[error("invalid local service response")]
     InvalidResponse,
+    #[error("invalid desktop conversation request")]
+    InvalidRequest,
+    #[error("desktop principal is not authorized")]
+    Unauthorized,
+    #[error("conversation resource was not found")]
+    NotFound,
+    #[error("conversation state conflict")]
+    Conflict,
+    #[error("local service capacity exhausted")]
+    Capacity,
+    #[error("local service is draining")]
+    Draining,
 }
 
 impl LocalServiceError {
@@ -364,6 +780,12 @@ impl LocalServiceError {
             Self::Unavailable => "service_unavailable",
             Self::ResponseTooLarge => "service_response_too_large",
             Self::InvalidResponse => "invalid_service_response",
+            Self::InvalidRequest => "invalid_request",
+            Self::Unauthorized => "unauthorized",
+            Self::NotFound => "not_found",
+            Self::Conflict => "state_conflict",
+            Self::Capacity => "capacity_exhausted",
+            Self::Draining => "service_draining",
         }
     }
 }
@@ -511,5 +933,68 @@ mod tests {
             checkpoint_schema_version: 4,
         };
         assert!(response.validate().is_err());
+    }
+
+    #[test]
+    fn conversation_contract_is_bounded_strict_and_redacted() {
+        let result = ReadonlyApplicationResultV1::FinalAnswer {
+            answer: "sensitive answer".to_owned(),
+            citations: vec![ApplicationCitationV1 {
+                evidence_id: "evidence-1".to_owned(),
+                backend: "standards".to_owned(),
+                source_id: "iso".to_owned(),
+                reference_id: "8.4".to_owned(),
+                provenance: Some("trusted reference".to_owned()),
+            }],
+        };
+        let run = RunViewV1 {
+            session_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            run_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            disposition: RunDispositionV1::Completed,
+            last_sequence: Some(2),
+            outcome: Some(RunOutcomeV1::Completed),
+            workflow_id: Some(READONLY_WORKFLOW_ID.to_owned()),
+            result: Some(result),
+            duration_millis: Some(42),
+        };
+
+        assert!(run.validate().is_ok());
+        let debug = format!("{run:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("sensitive answer"));
+        assert!(
+            serde_json::from_str::<RunViewV1>(
+                r#"{"session_id":"11111111-1111-4111-8111-111111111111","run_id":"22222222-2222-4222-8222-222222222222","disposition":"running","last_sequence":null,"outcome":null,"workflow_id":"enterprise-engineering-readonly-v1","result":null,"duration_millis":null,"prompt":"secret"}"#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn service_events_require_metadata_only_v2_contract() {
+        let event = ServiceEventV2 {
+            version: 2,
+            sequence: 1,
+            run_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            category: ServiceEventCategoryV2::Knowledge,
+            phase: ServiceEventPhaseV2::Started,
+            correlation_id: Some("retrieval-1".to_owned()),
+            workflow_id: Some(READONLY_WORKFLOW_ID.to_owned()),
+            knowledge_backends: vec!["standards".to_owned()],
+            graph_node_id: Some("retrieve".to_owned()),
+            budget_usage: Some(1),
+            budget_limit: Some(8),
+        };
+        assert!(vec![event.clone()].validate().is_ok());
+        assert!(validate_event_page(std::slice::from_ref(&event), &event.run_id, 0).is_ok());
+        let mut gap = event;
+        gap.sequence = 2;
+        assert!(validate_event_page(&[gap], "22222222-2222-4222-8222-222222222222", 0).is_err());
+        assert!(
+            serde_json::from_str::<ServiceEventV2>(
+                r#"{"version":2,"sequence":1,"run_id":"22222222-2222-4222-8222-222222222222","category":"model","phase":"started","correlation_id":null,"workflow_id":"enterprise-engineering-readonly-v1","knowledge_backends":[],"graph_node_id":null,"budget_usage":null,"budget_limit":null,"raw_model_output":"secret"}"#,
+            )
+            .is_err()
+        );
     }
 }

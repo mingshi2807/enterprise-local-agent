@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-conversation-run-status"
+description = "Enables the conversation_run_status command without any pre-configured scope."
+commands.allow = ["conversation_run_status"]
+
+[[permission]]
+identifier = "deny-conversation-run-status"
+description = "Denies the conversation_run_status command without any pre-configured scope."
+commands.deny = ["conversation_run_status"]

@@ -1842,3 +1842,76 @@
 - Browser screenshots show the unavailable state because a browser cannot access the Tauri command bridge. Ready, degraded, unavailable, and draining projections are covered by tests.
 - Vite reports a non-failing 529 kB bundle advisory. Code splitting is deferred until a real route or conversation boundary exists.
 - No Tauri capabilities or execution authority were added. No commit was created.
+
+# M16.3 implementation report
+
+• 1. Changed Tree
+
+- Tauri bridge (apps/agent-desktop/src-tauri/src/service_client.rs)
+- Conversation controller (apps/agent-desktop/src/queries/conversation.ts)
+- Conversation workspace (apps/agent-desktop/src/components/ConversationWorkspace.tsx)
+- Markdown answers (apps/agent-desktop/src/components/MarkdownAnswer.tsx)
+- Updated contracts, shell, sidebar, styles, tests, dependencies, and generated Tauri ACL schemas.
+
+  1. Service Commands
+
+  Added five allowlisted commands:
+
+- conversation_create_session
+- conversation_start_readonly_run
+- conversation_run_status
+- conversation_cancel_run
+- conversation_read_events
+
+  The workflow is fixed Rust-side to enterprise-engineering-readonly-v1. Credentials and transport configuration never enter JavaScript.
+
+  1. Conversation Flow
+
+  The composer supports multiline editing and Cmd/Ctrl+Enter. It enforces the 8 KiB input bound, permits one active run per conversation, supports cancellation, and retries by creating a new run.
+
+  Conversation payloads remain in the in-memory TanStack Query cache. Nothing is written to browser storage.
+
+  1. Streaming/Events
+
+  Bounded polling consumes strict ServiceEventV2 pages with sequence and run correlation validation. It projects only:
+
+- Searching knowledge
+- Thinking
+- Verifying
+- Finishing
+- Reconnecting/stopping
+
+  The terminal ApplicationResultV1::FinalAnswer remains authoritative.
+
+  1. Citation UX
+
+  Answers render bounded Markdown and GFM with inert model-generated links, copy-answer/code controls, and expandable citation chips using trusted service provenance.
+
+  1. Error/Cancel Behavior
+
+  Added sanitized states for service start failure, model/knowledge failure, malformed model output, cancellation, reconnecting, and result loss after service restart. Raw service errors and model payloads are
+  never displayed.
+
+  1. Tests
+
+  Passed:
+
+- Frontend typecheck and strict ESLint
+- 12 frontend tests
+- Production Vite build
+- Strict Rust Clippy
+- 6 Rust desktop tests
+- Tauri no-bundle build
+- cargo fmt --all -- --check
+- Tauri capability scan: eight named permissions and no generic bridge
+
+  1. Screenshots
+
+  No screenshot was captured because no live service/model composition was started for this implementation run.
+
+  1. Deviations
+
+- Event subscription uses bounded cursor polling rather than a persistent WebView SSE connection.
+- The service exposes no standalone session-load/list route. Existing in-memory sessions are selectable, and known runs are reloaded through status/event commands.
+- Vite reports a non-failing 696 KiB JavaScript chunk warning.
+- No commit was created.
