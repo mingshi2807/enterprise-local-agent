@@ -2,7 +2,7 @@
 title: "M15 Enterprise Identity and Authorization"
 tags: ["m15", "identity", "authentication", "authorization", "ownership", "approval"]
 created: 2026-09-20
-updated: 2026-09-20
+updated: 2026-09-21
 sources: ["crates/agent-identity/src/lib.rs", "crates/agent-core/src/ids.rs", "crates/agent-service/src/lib.rs", "crates/agent-service-http/src/lib.rs", "crates/agent-persistence-sqlite/src/lib.rs", "crates/agent-harness/src/durable_approval.rs", "apps/agent-service-daemon/src/main.rs"]
 links: ["enterprise-local-agent-milestone-index.md", "m14-deployment-operations-hardening.md", "m12-agent-service-api.md", "m10-durable-graph-pause-resume-hitl.md", "m6-approval-and-containment-boundary.md", "m6-1-production-linux-localwrite-containment.md"]
 category: architecture
@@ -14,8 +14,8 @@ schemaVersion: 1
 
 ## Status
 
-Implemented and verified in the current uncommitted worktree based on
-`06ce65d8826d01630d7d4c169ec68e88946763b9`. No M15 tag has been created.
+Completed, verified, and tagged as `m15-enterprise-identity`. The implementation
+commit is `326404d`; the documentation and tag commit is `f2fd702`.
 
 ## Boundary
 

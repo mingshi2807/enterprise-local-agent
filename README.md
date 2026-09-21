@@ -3,7 +3,8 @@
 Local-first Rust agent runtime with an enterprise execution harness, fixed-loop
 and graph orchestration, replaceable model/provider adapters, governed
 model-proposed actions, durable recovery, enterprise knowledge integration,
-bounded human-in-the-loop approval, and hardened local deployment operations.
+bounded human-in-the-loop approval, authenticated local service access,
+hardened deployment operations, and a thin Tauri desktop client.
 
 ## M5 action planning
 
@@ -392,6 +393,35 @@ M15 advances deployment configuration to schema 2 and the explicit
 [`docs/deployment-config-v2.example.toml`](docs/deployment-config-v2.example.toml).
 No tokens, credentials, emails, claims blobs, action payloads, or unnecessary
 PII enter durable identity records, events, logs, or debug output.
+
+## M16 desktop foundation and app shell
+
+M16 adds `apps/agent-desktop`, a Tauri 2 desktop client over the existing
+service boundary. The frontend uses React 19, TypeScript, Vite, Tailwind CSS 4,
+shadcn-compatible primitives, TanStack Query, Lucide, and restrained Motion
+transitions. It is a thin client and acquires no model, tool, approval, policy,
+persistence, MCP, containment, or execution authority.
+
+The Tauri Rust layer owns `LocalServiceClient`. It connects through the local
+Unix socket where supported or an explicitly configured authenticated numeric-
+loopback fallback. Transport credentials never enter JavaScript. The WebView
+can invoke only three named typed commands: service health, cached readiness,
+and build/version information. It has no filesystem, shell, generic HTTP, SQL,
+model, MCP, persistence, or containment capability, and native window
+decorations remain enabled.
+
+M16.2 provides a conversation-first application shell with a compact top bar,
+collapsible mock-session sidebar, central task workspace, read-only composer
+placeholder, optional readiness inspector, command palette, keyboard
+shortcuts, and a subtle connection footer. It supports semantic light, dark,
+and system themes, visible focus states, reduced motion, and compact windows
+from `760x520`. Operational information remains secondary in the inspector.
+
+No conversation execution, workflow start, event stream, approval, settings,
+or persistence UI is wired yet. The mock sessions are layout-only and the
+composer cannot dispatch work. Future desktop execution must continue through
+typed `agent-service` operations and cannot expand the Tauri capability surface
+into direct runtime access.
 
 ## Deterministic demonstration
 

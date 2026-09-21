@@ -143,3 +143,11 @@
 ## [2026-09-20] update
 - **Pages:** enterprise-local-agent-milestone-index.md, m14-deployment-operations-hardening.md, m15-enterprise-identity-authorization.md, index.md
 - **Summary:** Added the implemented M15 identity and authorization dossier and refreshed milestone navigation
+
+## [2026-09-21] update
+- **Pages:** enterprise-local-agent-milestone-index.md, m16-desktop-foundation.md, index.md
+- **Summary:** Added the M16 Tauri desktop foundation and conversation-first app-shell dossier and refreshed milestone navigation
+
+## [2026-09-21T12:31:50.484Z] lint
+- **Pages:** m0-foundation.md, m1-enterprise-harness.md, m2-deterministic-loop.md, m3-rig-model-adapter.md, m4-openai-compatible-gateway.md, m5-typed-action-planning.md, m6-approval-and-containment-boundary.md
+- **Summary:** Lint: 7 issues (0 orphan, 7 stale, 0 broken, 0 contradictions)

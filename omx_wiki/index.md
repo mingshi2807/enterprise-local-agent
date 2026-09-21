@@ -1,6 +1,6 @@
 # Wiki Index
 
-> 17 pages | Last updated: 2026-09-20
+> 18 pages | Last updated: 2026-09-21
 
 ## architecture
 
@@ -21,6 +21,7 @@
 - [M13 Local Enterprise Agent MVP and Real LLM Smoke Test](m13-local-enterprise-agent-mvp.md) — # M13 Local Enterprise Agent MVP and Real LLM Smoke Test
 - [M14 Deployment and Operations Hardening](m14-deployment-operations-hardening.md) — # M14 Deployment and Operations Hardening
 - [M15 Enterprise Identity and Authorization](m15-enterprise-identity-authorization.md) — # M15 Enterprise Identity and Authorization
+- [M16 Desktop Foundation and App Shell](m16-desktop-foundation.md) — # M16 Desktop Foundation and App Shell
 
 ## reference
 

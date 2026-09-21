@@ -2,9 +2,9 @@
 title: "Enterprise Local Agent Milestone Index"
 tags: ["enterprise-local-agent", "milestones", "roadmap", "index"]
 created: 2026-08-15T13:34:09.996Z
-updated: 2026-09-20
+updated: 2026-09-21
 sources: ["docs/proposal/proposal.md", "docs/reports/reports_impl.md", "git history"]
-links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m6-1-production-linux-localwrite-containment.md", "m7-durable-event-persistence-and-recovery.md", "m8-enterprise-knowledge-integration.md", "m9-deterministic-graph-engine-poc.md", "m10-durable-graph-pause-resume-hitl.md", "m11-governed-mcp-integration.md", "m12-agent-service-api.md", "m13-local-enterprise-agent-mvp.md", "m14-deployment-operations-hardening.md", "m15-enterprise-identity-authorization.md"]
+links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m6-1-production-linux-localwrite-containment.md", "m7-durable-event-persistence-and-recovery.md", "m8-enterprise-knowledge-integration.md", "m9-deterministic-graph-engine-poc.md", "m10-durable-graph-pause-resume-hitl.md", "m11-governed-mcp-integration.md", "m12-agent-service-api.md", "m13-local-enterprise-agent-mvp.md", "m14-deployment-operations-hardening.md", "m15-enterprise-identity-authorization.md", "m16-desktop-foundation.md"]
 category: reference
 confidence: high
 schemaVersion: 1
@@ -32,7 +32,8 @@ This is the durable navigation page for architectural milestones. Git and the im
 | M12 Agent Service API and Client Boundary | Implemented and verified, uncommitted | Not tagged | [[m12-agent-service-api]] |
 | M13 Local Enterprise Agent MVP and Real LLM Smoke Test | Implemented, real-smoke verified, and Linux containment-certified, uncommitted | Not tagged | [[m13-local-enterprise-agent-mvp]] |
 | M14 Deployment and Operations Hardening | Implemented, verified, Linux containment-certified, and committed | Not tagged | [[m14-deployment-operations-hardening]] |
-| M15 Enterprise Identity and Authorization | Implemented, verified, and Linux containment-certified, uncommitted | Not tagged | [[m15-enterprise-identity-authorization]] |
+| M15 Enterprise Identity and Authorization | Completed, verified, and Linux containment-certified | `m15-enterprise-identity` | [[m15-enterprise-identity-authorization]] |
+| M16 Desktop Foundation and App Shell | M16.0 approved; M16.1 and M16.2 implemented, verified, and committed | Not tagged | [[m16-desktop-foundation]] |
 
 ## Stable architecture
 
@@ -73,6 +74,15 @@ identity records who decided without changing the M10 exact-action binding.
 Legacy unowned records remain operator-only, and unowned Waiting is manual
 reconciliation rather than resumable authority. Identity cannot bypass M5-M14
 validation, policy, approval, audit, persistence, or containment.
+
+M16 adds a thin Tauri 2 desktop client over the M12 service boundary. Its Rust
+bridge owns Unix-socket or authenticated loopback connectivity and exposes only
+typed health, readiness, and version commands; credentials and generic
+transport access never enter the WebView. The React shell is conversation-first
+with collapsible session and inspector panes, a non-executing composer,
+keyboard command palette, semantic themes, compact-window behavior, and
+metadata-only service status. It has no direct runtime or infrastructure
+authority, and real conversation execution remains deferred.
 
 Provider and framework types remain outside agent-core, agent-harness, agent-loop,
 and agent-graph. ExecutionHarness remains the authority for lifecycle, budgets,
