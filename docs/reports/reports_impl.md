@@ -1760,3 +1760,85 @@
 - Distribution packaging and signing remain deferred; the verified Tauri build used --no-bundle.
 - Headless Firefox screenshot capture was unavailable due the host Snap/DBus environment; DOM tests and native compilation passed.
 - No commit was created.
+
+# M16.2 implementation report
+
+• 1. Changed UI Tree
+
+- apps/agent-desktop/src/app/App.tsx
+- apps/agent-desktop/src/app/CommandPalette.tsx
+- apps/agent-desktop/src/components/ConversationWorkspace.tsx
+- apps/agent-desktop/src/components/SessionSidebar.tsx
+- apps/agent-desktop/src/components/ReadinessInspector.tsx
+- Updated design tokens, responsive test setup, application tests, and minimum window dimensions.
+
+  1. Layout/Components
+
+  Implemented a conversation-first shell:
+
+- Compact application bar.
+- Collapsible conversation sidebar with mock sessions.
+- Dominant central task workspace.
+- Read-only composer placeholder.
+- Optional readiness inspector.
+- Subtle connection footer.
+- Accessible command palette.
+
+  Operational details remain confined to the inspector and status bar.
+
+  1. Interaction/Shortcuts
+
+- Cmd/Ctrl+K: command palette.
+- Cmd/Ctrl+N: new task placeholder.
+- Cmd/Ctrl+B: conversation sidebar.
+- Cmd/Ctrl+Shift+I: inspector.
+- Palette filtering, arrows, Enter, Escape, focus trapping, and focus restoration.
+- Editing-focused inputs do not trigger pane or task shortcuts.
+
+  1. Responsive Behavior
+
+- Wide: full sidebar, conversation workspace, and inspector.
+- Normal desktop: full three-pane layout.
+- Compact, from 760 px: 48 px conversation rail, inspector closed, workspace preserved.
+- Below 1041 px, an explicitly opened inspector becomes an overlay.
+- Tauri minimum window changed to 760x520.
+
+  1. Accessibility
+
+- Semantic landmarks and labelled navigation.
+- Accessible toggle states and command dialog.
+- Screen-reader service-state announcement.
+- Reduced-motion preference disables effective transition duration.
+- Disabled composer actions accurately communicate unavailable functionality.
+
+  1. Visual Design Decisions
+
+  Neutral light/dark surfaces, restrained teal accent, 1 px borders, compact typography, limited radii, and almost no shadows. Motion is restricted to sidebar, inspector, and command-palette transitions. No
+  gradients, decorative effects, or nested card layout were added.
+
+  1. Tests
+
+  Passed:
+
+- TypeScript typecheck.
+- ESLint with zero warnings.
+- Eight frontend tests covering service states, draining precedence, keyboard interactions, editing safeguards, command palette, and compact layout.
+- Vite production build.
+- Rust formatting.
+- Strict desktop Clippy.
+- Four Rust service-bridge tests.
+- Tauri debug build with --no-bundle.
+- Capability and forbidden-surface scan; Tauri permissions remain unchanged.
+
+  1. Screenshots
+
+- Compact light, 800x600 (/tmp/ela-m16-2-compact-light.png)
+- Normal light, 1280x800 (/tmp/ela-m16-2-normal-light.png)
+- Wide dark, 1600x900 (/tmp/ela-m16-2-wide-dark.png)
+
+  1. Deviations
+
+- Resizable panes were not added; collapse and overlay behavior provides reliable compact handling without another interaction dependency.
+- Browser screenshots show the unavailable state because a browser cannot access the Tauri command bridge. Ready, degraded, unavailable, and draining projections are covered by tests.
+- Vite reports a non-failing 529 kB bundle advisory. Code splitting is deferred until a real route or conversation boundary exists.
+- No Tauri capabilities or execution authority were added. No commit was created.

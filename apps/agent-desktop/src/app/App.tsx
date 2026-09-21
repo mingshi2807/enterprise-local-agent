@@ -1,19 +1,26 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
-  Activity,
-  CircleAlert,
-  Layers3,
+  Command,
   Monitor,
   Moon,
-  RefreshCw,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+  Search,
   Sun,
-  TerminalSquare,
 } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
+import { CommandPalette, type PaletteCommand } from "@/app/CommandPalette";
 import { useTheme, type ThemePreference } from "@/app/ThemeContext";
+import { ConversationWorkspace } from "@/components/ConversationWorkspace";
+import { ReadinessInspector } from "@/components/ReadinessInspector";
+import { SessionSidebar } from "@/components/SessionSidebar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { serviceQueryKeys, useServiceState } from "@/queries/service";
-import { useQueryClient } from "@tanstack/react-query";
 
 const nextTheme: Record<ThemePreference, ThemePreference> = {
   system: "light",
@@ -21,18 +28,14 @@ const nextTheme: Record<ThemePreference, ThemePreference> = {
   dark: "system",
 };
 
-const themeIcon = {
-  system: Monitor,
-  light: Sun,
-  dark: Moon,
-} as const;
+const themeIcon = { system: Monitor, light: Sun, dark: Moon } as const;
 
-function statusTone(status: "ready" | "degraded" | "unavailable") {
-  return {
-    ready: "bg-success",
-    degraded: "bg-warning",
-    unavailable: "bg-danger",
-  }[status];
+function isEditableTarget(target: EventTarget | null) {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
 }
 
 function ThemeButton() {
@@ -56,120 +59,192 @@ function ThemeButton() {
 
 export function App() {
   const queryClient = useQueryClient();
+  const reduceMotion = useReducedMotion();
   const { health, readiness, version } = useServiceState();
-  const connected = health.isSuccess;
-  const status = readiness.data?.overall ?? "unavailable";
-  const hasError = health.isError || readiness.isError || version.isError;
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.matchMedia("(min-width: 821px)").matches);
+  const [inspectorOpen, setInspectorOpen] = useState(() => window.matchMedia("(min-width: 1041px)").matches);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
 
-  const refresh = async () => {
+  const connected = health.isSuccess;
+  const draining = health.data?.lifecycle === "draining";
+  const readinessStatus = readiness.data?.overall ?? "unavailable";
+  const serviceState = !connected ? "unavailable" : draining ? "draining" : readinessStatus;
+
+  const newTask = useCallback(() => {
+    setSelectedSessionId(null);
+    setPaletteOpen(false);
+  }, []);
+
+  const refresh = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: serviceQueryKeys.all });
-  };
+  }, [queryClient]);
+
+  const commands = useMemo<PaletteCommand[]>(
+    () => [
+      { id: "new-task", label: "New task", shortcut: "Ctrl N", icon: Command, action: newTask },
+      {
+        id: "sidebar",
+        label: sidebarOpen ? "Collapse conversations" : "Expand conversations",
+        shortcut: "Ctrl B",
+        icon: sidebarOpen ? PanelLeftClose : PanelLeftOpen,
+        action: () => setSidebarOpen((value) => !value),
+      },
+      {
+        id: "inspector",
+        label: inspectorOpen ? "Hide inspector" : "Show inspector",
+        shortcut: "Ctrl Shift I",
+        icon: inspectorOpen ? PanelRightClose : PanelRightOpen,
+        action: () => setInspectorOpen((value) => !value),
+      },
+      { id: "refresh", label: "Refresh service status", icon: Search, action: () => void refresh() },
+    ],
+    [inspectorOpen, newTask, refresh, sidebarOpen],
+  );
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+
+      if (key === "k") {
+        event.preventDefault();
+        setPaletteOpen((value) => !value);
+        return;
+      }
+      if (isEditableTarget(event.target)) return;
+
+      if (key === "n" && !event.shiftKey) {
+        event.preventDefault();
+        newTask();
+      } else if (key === "b" && !event.shiftKey) {
+        event.preventDefault();
+        setSidebarOpen((value) => !value);
+      } else if (key === "i" && event.shiftKey) {
+        event.preventDefault();
+        setInspectorOpen((value) => !value);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [newTask]);
 
   return (
-    <div className="grid h-dvh min-h-[640px] grid-rows-[44px_1fr_24px] overflow-hidden bg-background text-foreground">
-      <header className="flex items-center justify-between border-b border-border bg-panel px-3">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <div className="grid size-7 place-items-center rounded-control bg-accent text-accent-foreground">
-            <TerminalSquare aria-hidden="true" className="size-4" />
-          </div>
-          <div className="min-w-0">
-            <h1 className="truncate text-sm font-semibold">Enterprise Local Agent</h1>
-            <p className="truncate text-xs text-muted">Desktop</p>
-          </div>
+    <div className="grid h-dvh min-h-[520px] grid-rows-[40px_minmax(0,1fr)_22px] overflow-hidden bg-background text-foreground">
+      <header className="flex items-center justify-between border-b border-border bg-panel px-2.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={sidebarOpen ? "Collapse conversations" : "Expand conversations"}
+            title="Toggle conversations (Ctrl+B)"
+            aria-pressed={sidebarOpen}
+            onClick={() => setSidebarOpen((value) => !value)}
+          >
+            {sidebarOpen ? <PanelLeftClose aria-hidden="true" /> : <PanelLeftOpen aria-hidden="true" />}
+          </Button>
+          <span className="mx-1 h-4 w-px bg-border" aria-hidden="true" />
+          <h1 className="truncate text-[13px] font-semibold">Enterprise Local Agent</h1>
+          <span className="hidden truncate text-xs text-muted sm:inline">/ Local workspace</span>
         </div>
-        <div className="flex items-center gap-1.5">
-          <div className="flex h-7 items-center gap-2 rounded-control border border-border px-2 text-xs text-secondary">
-            <span
-              className={cn("size-1.5 rounded-full", connected ? statusTone(status) : "bg-danger")}
-              aria-hidden="true"
-            />
-            <span>{connected ? (status === "ready" ? "Ready" : "Degraded") : "Unavailable"}</span>
-          </div>
+
+        <button
+          type="button"
+          className="absolute left-1/2 hidden h-7 w-64 -translate-x-1/2 items-center gap-2 rounded-control border border-border bg-background px-2.5 text-xs text-muted outline-none transition-colors hover:bg-selection hover:text-secondary focus-visible:ring-2 focus-visible:ring-focus lg:flex"
+          onClick={() => setPaletteOpen(true)}
+          aria-label="Open command palette"
+        >
+          <Search aria-hidden="true" className="size-3.5" />
+          <span>Search commands</span>
+          <kbd className="ml-auto">Ctrl K</kbd>
+        </button>
+
+        <div className="flex items-center gap-0.5">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={inspectorOpen ? "Hide inspector" : "Show inspector"}
+            title="Toggle inspector (Ctrl+Shift+I)"
+            aria-pressed={inspectorOpen}
+            onClick={() => setInspectorOpen((value) => !value)}
+          >
+            {inspectorOpen ? <PanelRightClose aria-hidden="true" /> : <PanelRightOpen aria-hidden="true" />}
+          </Button>
           <ThemeButton />
         </div>
       </header>
 
-      <div className="grid min-h-0 grid-cols-[52px_224px_minmax(420px,1fr)_288px]">
-        <nav aria-label="Primary" className="flex flex-col items-center gap-1 border-r border-border bg-panel py-2">
-          <Button variant="ghost" size="icon" aria-label="Runs" title="Runs" aria-current="page">
-            <Layers3 aria-hidden="true" className="size-4" />
-          </Button>
-          <Button variant="ghost" size="icon" aria-label="Operations" title="Operations" disabled>
-            <Activity aria-hidden="true" className="size-4" />
-          </Button>
-        </nav>
+      <div className="relative flex min-h-0 min-w-0 overflow-hidden">
+        <motion.div
+          className="sidebar-pane relative z-20 shrink-0 overflow-hidden border-r border-border bg-panel"
+          initial={false}
+          animate={{ width: sidebarOpen ? 244 : 48 }}
+          transition={reduceMotion ? { duration: 0 } : { duration: 0.16, ease: "easeOut" }}
+        >
+          <SessionSidebar
+            expanded={sidebarOpen}
+            selectedSessionId={selectedSessionId}
+            onSelectSession={setSelectedSessionId}
+            onNewTask={newTask}
+          />
+        </motion.div>
 
-        <aside className="min-h-0 border-r border-border bg-panel">
-          <div className="flex h-10 items-center border-b border-border px-3">
-            <h2 className="text-xs font-semibold uppercase text-secondary">Runs</h2>
-          </div>
-          <div className="px-3 py-4 text-sm text-muted">No active run</div>
-        </aside>
-
-        <main className="min-h-0 overflow-auto bg-background">
-          {hasError ? (
-            <div className="grid h-full place-items-center p-8">
-              <section aria-labelledby="service-unavailable-title" className="max-w-sm text-center">
-                <CircleAlert aria-hidden="true" className="mx-auto mb-3 size-6 text-danger" />
-                <h2 id="service-unavailable-title" className="text-base font-semibold">
-                  Local service unavailable
-                </h2>
-                <p className="mt-1 text-sm leading-6 text-secondary">
-                  The desktop could not read the local service status.
-                </p>
-                <Button className="mt-4" onClick={() => void refresh()}>
-                  <RefreshCw aria-hidden="true" className="size-3.5" />
-                  Retry
-                </Button>
-              </section>
-            </div>
-          ) : (
-            <div className="grid h-full place-items-center p-8">
-              <div className="text-center">
-                <div className="mx-auto mb-3 grid size-9 place-items-center rounded-control border border-border bg-panel">
-                  <TerminalSquare aria-hidden="true" className="size-4 text-secondary" />
-                </div>
-                <h2 className="text-sm font-medium">No active run</h2>
-              </div>
-            </div>
-          )}
+        <main className="min-w-0 flex-1 bg-background">
+          <ConversationWorkspace
+            selectedSessionId={selectedSessionId}
+            serviceState={serviceState}
+            onNewTask={newTask}
+            onRetry={() => void refresh()}
+          />
         </main>
 
-        <aside aria-labelledby="readiness-title" className="min-h-0 overflow-auto border-l border-border bg-panel">
-          <div className="flex h-10 items-center border-b border-border px-3">
-            <h2 id="readiness-title" className="text-xs font-semibold uppercase text-secondary">
-              Readiness
-            </h2>
-          </div>
-          <div className="divide-y divide-border">
-            {(readiness.data?.workflows ?? []).map((workflow) => (
-              <div key={workflow.workflow} className="px-3 py-2.5">
-                <div className="flex items-center gap-2">
-                  <span className={cn("size-1.5 rounded-full", statusTone(workflow.status))} aria-hidden="true" />
-                  <span className="min-w-0 truncate text-xs font-medium">{workflow.workflow}</span>
-                </div>
-                <p className="mt-1 text-xs capitalize text-muted">{workflow.status}</p>
-              </div>
-            ))}
-            {(readiness.data?.dependencies ?? []).map((dependency) => (
-              <div key={dependency.dependency} className="px-3 py-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="min-w-0 truncate text-xs text-secondary">{dependency.dependency}</span>
-                  <span className={cn("size-1.5 shrink-0 rounded-full", statusTone(dependency.status))} aria-hidden="true" />
-                </div>
-              </div>
-            ))}
-          </div>
-        </aside>
+        <AnimatePresence initial={false}>
+          {inspectorOpen && (
+            <motion.div
+              className="inspector-pane z-30 w-[300px] shrink-0 overflow-hidden border-l border-border bg-panel"
+              initial={reduceMotion ? false : { x: 18, opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              exit={reduceMotion ? { opacity: 0 } : { x: 18, opacity: 0 }}
+              transition={{ duration: reduceMotion ? 0 : 0.14, ease: "easeOut" }}
+            >
+              <ReadinessInspector
+                state={serviceState}
+                readiness={readiness.data}
+                version={version.data}
+                onClose={() => setInspectorOpen(false)}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
-      <footer className="flex items-center justify-between border-t border-border bg-panel px-3 text-[11px] text-muted">
-        <div className="flex items-center gap-2">
-          <span className={cn("size-1.5 rounded-full", connected ? "bg-success" : "bg-danger")} aria-hidden="true" />
-          <span>{connected ? `Service ${health.data.lifecycle}` : "Service disconnected"}</span>
+      <footer className="flex items-center justify-between border-t border-border bg-panel px-2.5 text-[11px] text-muted">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className={cn("status-dot", `status-dot-${serviceState}`)} aria-hidden="true" />
+          <span className="truncate">
+            {serviceState === "ready" && "Local service ready"}
+            {serviceState === "degraded" && "Local service degraded"}
+            {serviceState === "unavailable" && "Local service unavailable"}
+            {serviceState === "draining" && "Local service draining"}
+          </span>
         </div>
-        <span>{version.data === undefined ? "Version unavailable" : `v${version.data.version}`}</span>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            className="outline-none hover:text-foreground focus-visible:text-foreground focus-visible:underline"
+            onClick={() => setPaletteOpen(true)}
+          >
+            Commands
+          </button>
+          <span>{version.data === undefined ? "Version unavailable" : `v${version.data.version}`}</span>
+        </div>
       </footer>
+
+      <CommandPalette open={paletteOpen} commands={commands} onOpenChange={setPaletteOpen} />
+      <div className="sr-only" aria-live="polite">Service state: {serviceState}</div>
     </div>
   );
 }
