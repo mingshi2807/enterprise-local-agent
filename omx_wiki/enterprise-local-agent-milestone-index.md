@@ -33,7 +33,7 @@ This is the durable navigation page for architectural milestones. Git and the im
 | M13 Local Enterprise Agent MVP and Real LLM Smoke Test | Implemented, real-smoke verified, and Linux containment-certified, uncommitted | Not tagged | [[m13-local-enterprise-agent-mvp]] |
 | M14 Deployment and Operations Hardening | Implemented, verified, Linux containment-certified, and committed | Not tagged | [[m14-deployment-operations-hardening]] |
 | M15 Enterprise Identity and Authorization | Completed, verified, and Linux containment-certified | `m15-enterprise-identity` | [[m15-enterprise-identity-authorization]] |
-| M16 Desktop Foundation and App Shell | M16.0 approved; M16.1 and M16.2 implemented, verified, and committed | Not tagged | [[m16-desktop-foundation]] |
+| M16 Desktop Foundation and ReadOnly Conversation | M16.0 approved; M16.1-M16.2 committed; M16.3 implemented and verified | Not tagged | [[m16-desktop-foundation]] |
 
 ## Stable architecture
 
@@ -77,12 +77,12 @@ validation, policy, approval, audit, persistence, or containment.
 
 M16 adds a thin Tauri 2 desktop client over the M12 service boundary. Its Rust
 bridge owns Unix-socket or authenticated loopback connectivity and exposes only
-typed health, readiness, and version commands; credentials and generic
-transport access never enter the WebView. The React shell is conversation-first
-with collapsible session and inspector panes, a non-executing composer,
-keyboard command palette, semantic themes, compact-window behavior, and
-metadata-only service status. It has no direct runtime or infrastructure
-authority, and real conversation execution remains deferred.
+named status and ReadOnly conversation commands; credentials and generic
+transport access never enter the WebView. M16.3 runs only
+`enterprise-engineering-readonly-v1`, consumes bounded `ServiceEventV2` cursor
+pages, and renders the authoritative terminal answer with trusted citations.
+Conversation state is volatile and in-memory, retries create new runs, and the
+desktop has no direct runtime or infrastructure authority.
 
 Provider and framework types remain outside agent-core, agent-harness, agent-loop,
 and agent-graph. ExecutionHarness remains the authority for lifecycle, budgets,

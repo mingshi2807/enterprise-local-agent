@@ -405,23 +405,37 @@ persistence, MCP, containment, or execution authority.
 The Tauri Rust layer owns `LocalServiceClient`. It connects through the local
 Unix socket where supported or an explicitly configured authenticated numeric-
 loopback fallback. Transport credentials never enter JavaScript. The WebView
-can invoke only three named typed commands: service health, cached readiness,
-and build/version information. It has no filesystem, shell, generic HTTP, SQL,
-model, MCP, persistence, or containment capability, and native window
-decorations remain enabled.
+can invoke only named typed commands for service health, cached readiness,
+build/version information, and the reviewed ReadOnly conversation lifecycle.
+It has no filesystem, shell, generic HTTP, SQL, model, MCP, persistence, or
+containment capability, and native window decorations remain enabled.
 
 M16.2 provides a conversation-first application shell with a compact top bar,
-collapsible mock-session sidebar, central task workspace, read-only composer
-placeholder, optional readiness inspector, command palette, keyboard
-shortcuts, and a subtle connection footer. It supports semantic light, dark,
-and system themes, visible focus states, reduced motion, and compact windows
-from `760x520`. Operational information remains secondary in the inspector.
+collapsible session sidebar, central task workspace, composer surface, optional
+readiness inspector, command palette, keyboard shortcuts, and a subtle
+connection footer. It supports semantic light, dark, and system themes, visible
+focus states, reduced motion, and compact windows from `760x520`. Operational
+information remains secondary in the inspector.
 
-No conversation execution, workflow start, event stream, approval, settings,
-or persistence UI is wired yet. The mock sessions are layout-only and the
-composer cannot dispatch work. Future desktop execution must continue through
-typed `agent-service` operations and cannot expand the Tauri capability surface
-into direct runtime access.
+M16.3 wires the existing `enterprise-engineering-readonly-v1` workflow into a
+real conversation UX. The typed bridge can create a session, start the fixed
+ReadOnly run, read status and bounded `ServiceEventV2` pages, cancel an active
+run, and retrieve the terminal `ApplicationResultV1`. TanStack Query owns
+in-memory server state and cursor catch-up; prompts and answers are never stored
+in browser storage. Compact progress exposes only knowledge search, model,
+verification, finishing, reconnection, and cancellation states.
+
+Final answers render bounded Markdown with copy controls. Citation chips use
+trusted provenance returned by M13 rather than model-supplied citation
+metadata. Retry always starts a new run and never replays an old model call.
+The UI presents sanitized service, model, knowledge, malformed-result,
+cancellation, and volatile-result-loss states without exposing raw prompts,
+evidence, model output, internal events, credentials, or action data.
+
+M16.3 does not add LocalWrite, durable approval/HITL, settings, or desktop
+payload persistence. Event delivery uses bounded cursor polling over named
+commands rather than exposing generic HTTP or SSE transport to the WebView.
+`agent-service` and `ExecutionHarness` remain authoritative.
 
 ## Deterministic demonstration
 
