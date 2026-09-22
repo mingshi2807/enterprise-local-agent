@@ -476,6 +476,22 @@ same durable run. Deny and abort execute no tool, stale or unauthorized
 decisions fail closed, and restart reconstruction comes from service state
 rather than browser storage.
 
+M16.6 replaces process-local sidebar history with service-authoritative durable
+conversation metadata. Two named Tauri commands list owner-authorized sessions
+and bounded run pages through provider-neutral read ports; SQLite remains behind
+`agent-persistence-sqlite` and is never exposed to the desktop. The sidebar
+loads compact summaries first, then loads run metadata and events only for the
+selected conversation. Waiting, failed, completed, and reconciliation states
+therefore survive desktop and service restart without replaying model,
+knowledge, approval, tool, or containment effects.
+
+Conversation payloads still are not stored in the WebView. If a volatile M13
+terminal result remains available from the service, it is rendered as the
+authoritative answer. After service restart, a missing result is shown exactly
+as `Result unavailable`; the desktop never regenerates it. Previous run status
+metadata is available on demand in the inspector. Rename and archive remain
+deferred, and the only browser-stored value remains the theme preference.
+
 ## Deterministic demonstration
 
 The default CLI path is network-free. It uses `RigModelAdapter<FakeRigModel>`

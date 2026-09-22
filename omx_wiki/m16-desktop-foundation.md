@@ -1,6 +1,6 @@
 ---
-title: "M16 Desktop Foundation, Conversation, Run Inspector, and HITL"
-tags: ["m16", "desktop", "tauri", "react", "design-system", "app-shell", "conversation", "readonly", "activity", "inspector", "hitl", "localwrite", "approval"]
+title: "M16 Desktop Foundation, Conversation, HITL, and Durable History"
+tags: ["m16", "desktop", "tauri", "react", "design-system", "app-shell", "conversation", "readonly", "activity", "inspector", "hitl", "localwrite", "approval", "history", "recovery"]
 created: 2026-09-21
 updated: 2026-09-22
 sources: ["apps/agent-desktop/src-tauri/src/service_client.rs", "apps/agent-desktop/src-tauri/src/lib.rs", "apps/agent-desktop/src-tauri/capabilities/main.json", "apps/agent-desktop/src/app/App.tsx", "apps/agent-desktop/src/app/CommandPalette.tsx", "apps/agent-desktop/src/bridge/contracts.ts", "apps/agent-desktop/src/bridge/service.ts", "apps/agent-desktop/src/queries/conversation.ts", "apps/agent-desktop/src/features/runActivity.ts", "apps/agent-desktop/src/components/ApprovalPanel.tsx", "apps/agent-desktop/src/components/ConversationWorkspace.tsx", "apps/agent-desktop/src/components/MarkdownAnswer.tsx", "apps/agent-desktop/src/components/RunInspector.tsx", "apps/agent-desktop/src/components/SessionSidebar.tsx", "apps/agent-desktop/src/styles/tokens.css"]
@@ -10,12 +10,12 @@ confidence: high
 schemaVersion: 1
 ---
 
-# M16 Desktop Foundation, Conversation, Run Inspector, and HITL
+# M16 Desktop Foundation, Conversation, HITL, and Durable History
 
 ## Status
 
 M16.0 architecture was approved. M16.1 and M16.2 are implemented and committed
-as `29942c3` and `0672edf`. M16.3 through M16.5 are implemented and verified in
+as `29942c3` and `0672edf`. M16.3 through M16.6 are implemented and verified in
 the current worktree. No M16 milestone tag has been created.
 
 ## Boundary
@@ -185,6 +185,46 @@ Activity integrates Waiting, decision-ready, resuming, verifying, completed,
 failed, and aborted states using safe service metadata. Server state remains
 authoritative and the UI never optimistically reports execution success.
 
+## M16.6 Durable Conversations and History
+
+M16.6 adds passive, provider-neutral history reads without moving persistence
+or recovery authority into the desktop:
+
+```text
+owner-authorized session page -> selected session run page
+  -> safe status/event projections -> restored conversation UI
+```
+
+`SessionOwnershipPort` provides owner-filtered bounded session pages, while
+`RunReadPort` provides bounded newest-first run pages for one session. The
+SQLite adapter implements both behind the existing service boundary. The
+service authorizes list and history operations from `VerifiedPrincipal` plus
+durable ownership metadata; possession of a SessionId or RunId is insufficient.
+No SQLite type, query, row identifier, or mutation handle crosses the port.
+
+The HTTP adapter and Tauri bridge expose only `conversation_list_sessions` and
+`conversation_list_runs`. Responses contain deterministic conversation titles,
+last-activity metadata, latest disposition, workflow, event cursor, outcome,
+result-availability flag, and bounded prior-run summaries. Strict Rust and Zod
+decoders reject unknown fields, oversized pages, invalid IDs, and unsupported
+workflow identifiers. No generic URL, method, SQL, or persistence command was
+added to the WebView capability set.
+
+TanStack Query loads session summaries first and run metadata only when a
+conversation is selected. A restored run catches up through the existing
+bounded event cursor and status commands; it never calls a start command or
+replays model, knowledge, approval, tool, or containment work. Durable Waiting
+continues through the M16.5 approval projection. Failed and manual
+reconciliation runs remain visibly non-successful and are not client-repaired.
+
+M13 application results remain intentionally volatile. A result still held by
+the service is rendered authoritatively. If it was lost across service restart,
+the desktop displays `Result unavailable` and does not regenerate an answer.
+Conversation prompts, answers, citations, approval payloads, and run payloads
+remain absent from browser storage; only the theme preference is local.
+Previous run status metadata is available in the optional inspector. Rename,
+archive, folders, tags, and search remain deferred.
+
 ## Service States
 
 The shell presents ready, degraded, unavailable, and draining states from the
@@ -194,22 +234,22 @@ a status refresh; it does not add retries or execution behavior to the UI.
 
 ## Verification
 
-The current M16.5 implementation passed:
+The current M16.6 implementation passed:
 
 - TypeScript typecheck and ESLint with zero warnings;
-- twenty-three frontend tests, including five focused approval tests covering
-  durable Waiting discovery, trusted preview, Approve, Deny, explicit Resume,
-  abort, stale and unauthorized failures, and payload rejection;
+- twenty-six frontend tests, including durable restoration, pagination,
+  no-duplicate-start, unavailable-result, and focused approval coverage;
 - Vite production builds and Tauri debug build with `--no-bundle`;
-- strict workspace Rust Clippy and eight Rust service-bridge tests;
+- eight Rust service-bridge tests;
 - capability, dependency-direction, and forbidden-surface scans;
-- `cargo fmt --all -- --check` and a full workspace test pass.
+- `cargo fmt --all -- --check`, strict workspace Clippy, and all workspace tests
+  outside the known M11 process-group regression.
 
 The M16.5 closure review confirmed the exact `approval_submit_decision` command
-and dedicated ACL. An intermittent pre-existing M11 process-reaping test was
-not changed: current and pre-M16.5 MCP sources were byte-identical, isolated and
-repeated comparison runs passed on both revisions, and the final workspace run
-passed. Native host Clippy lacks the required GTK development libraries, so the
+and dedicated ACL. The pre-existing M11
+`termination_reaps_process_group_descendant` regression reproduces in the
+established container and remains outside M16.6; MCP lifecycle code was not
+changed. Native host Clippy lacks the required GTK development libraries, so the
 established Tauri build container supplied those system dependencies for strict
 Clippy, Rust tests, and the final debug build.
 
@@ -226,10 +266,9 @@ event or result authority.
 It does not provide desktop-side policy, approval authority, containment,
 settings, ACP, pane resizing, packaging/signing, generic service transport, or
 conversation payload persistence. Event subscription uses bounded cursor
-polling instead of a persistent WebView SSE connection. The service has no
-standalone session-list/read route, so current desktop conversation navigation
-is process-local. Volatile M13 results may be unavailable after service restart
-and are reported without replaying the model call.
+polling instead of a persistent WebView SSE connection. Durable history stores
+only existing service metadata; it does not make volatile M13 answers durable.
+Missing results are reported without replaying the model call.
 
 ## Forward Constraints
 
@@ -246,3 +285,5 @@ and are reported without replaying the model call.
   may submit only public CAS decision fields.
 - Never treat an approval decision as execution success; preserve explicit
   resume and service-authoritative terminal state.
+- Keep history reads owner-authorized, bounded, metadata-only, and passive.
+- Never replay external effects or infer a missing result during restoration.

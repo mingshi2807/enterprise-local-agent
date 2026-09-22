@@ -179,3 +179,7 @@
 ## [2026-09-22] update
 - **Pages:** enterprise-local-agent-milestone-index.md, m16-desktop-foundation.md, index.md
 - **Summary:** Added M16.5 durable LocalWrite approval UX, narrow Tauri decision command and ACL, restart-safe Waiting behavior, explicit resume, and closure verification
+
+## [2026-09-22] update
+- **Pages:** enterprise-local-agent-milestone-index.md, m16-desktop-foundation.md, index.md
+- **Summary:** Added M16.6 service-authoritative durable conversation history, owner-scoped pagination, restart restoration, unavailable-result semantics, and verification evidence

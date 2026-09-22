@@ -33,7 +33,7 @@ This is the durable navigation page for architectural milestones. Git and the im
 | M13 Local Enterprise Agent MVP and Real LLM Smoke Test | Implemented, real-smoke verified, and Linux containment-certified, uncommitted | Not tagged | [[m13-local-enterprise-agent-mvp]] |
 | M14 Deployment and Operations Hardening | Implemented, verified, Linux containment-certified, and committed | Not tagged | [[m14-deployment-operations-hardening]] |
 | M15 Enterprise Identity and Authorization | Completed, verified, and Linux containment-certified | `m15-enterprise-identity` | [[m15-enterprise-identity-authorization]] |
-| M16 Desktop Foundation and Governed Conversation | M16.0 approved; M16.1-M16.2 committed; M16.3-M16.5 implemented and verified | Not tagged | [[m16-desktop-foundation]] |
+| M16 Desktop Foundation and Governed Conversation | M16.0 approved; M16.1-M16.2 committed; M16.3-M16.6 implemented and verified | Not tagged | [[m16-desktop-foundation]] |
 
 ## Stable architecture
 
@@ -93,6 +93,12 @@ CAS-bound Approve or Deny, explicit Resume, and abort. JavaScript never receives
 capsules, action content, ActionDigest, ToolCallId, credentials, generic
 transport, policy, or containment authority; all M10/M15/M6/M6.1 validation and
 execution remain server-side.
+M16.6 adds owner-authorized bounded session and per-session run projections.
+The desktop restores its compact sidebar and selected-run metadata from the
+service, catches up through existing event cursors, and reconstructs durable
+Waiting without creating a duplicate run. SQLite remains adapter-side, no
+conversation payload is stored in the WebView, and a missing volatile terminal
+result is displayed as `Result unavailable` rather than regenerated.
 
 Provider and framework types remain outside agent-core, agent-harness, agent-loop,
 and agent-graph. ExecutionHarness remains the authority for lifecycle, budgets,
