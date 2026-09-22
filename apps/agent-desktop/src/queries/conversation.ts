@@ -3,15 +3,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import type { ApplicationCitation, RunView, ServiceEvent } from "@/bridge/contracts";
 import { localService } from "@/bridge/service";
+import { activityFor, mergeEventPage, type ActivityLabel } from "@/features/runActivity";
 
-export type ConversationActivity =
-  | "Starting…"
-  | "Searching knowledge…"
-  | "Thinking…"
-  | "Verifying…"
-  | "Finishing…"
-  | "Reconnecting…"
-  | "Stopping…";
+export type ConversationActivity = ActivityLabel;
 
 export type ConversationErrorKind =
   | "service_unavailable"
@@ -30,9 +24,10 @@ export interface ConversationMessage {
   errorKind?: ConversationErrorKind;
 }
 
-interface ActiveRun {
+export interface ActiveRun {
   runId: string;
   startRequestId: string;
+  startedAtMillis: number;
   cursor: number | null;
   events: ServiceEvent[];
   activity: ConversationActivity;
@@ -45,6 +40,8 @@ export interface Conversation {
   activeRun: ActiveRun | null;
   lastPrompt: string;
   lastRun: RunView | null;
+  lastRunEvents: ServiceEvent[];
+  lastRunStartedAtMillis: number | null;
 }
 
 const conversationsKey = ["conversations"] as const;
@@ -85,16 +82,6 @@ function classifyFailure(status: RunView, events: ServiceEvent[]): ConversationE
     return "malformed_model_result";
   }
   return "run_failed";
-}
-
-function activityFor(events: ServiceEvent[], fallback: ConversationActivity): ConversationActivity {
-  const latest = events.at(-1);
-  if (latest === undefined) return fallback;
-  if (latest.category === "knowledge") return "Searching knowledge…";
-  if (latest.category === "model") return "Thinking…";
-  if (latest.graph_node_id?.toLowerCase().includes("verify")) return "Verifying…";
-  if (latest.category === "graph" || latest.category === "run") return "Finishing…";
-  return fallback;
 }
 
 function replaceConversation(
@@ -154,6 +141,8 @@ export function useConversationController(
               activeRun: null,
               lastPrompt: prompt,
               lastRun: null,
+              lastRunEvents: [],
+              lastRunStartedAtMillis: null,
             },
             ...current,
           ];
@@ -174,6 +163,7 @@ export function useConversationController(
             activeRun: {
               runId: run.run_id,
               startRequestId,
+              startedAtMillis: Date.now(),
               cursor: null,
               events: [],
               activity: "Starting…",
@@ -223,11 +213,21 @@ export function useConversationController(
     setConversations((current) =>
       replaceConversation(current, selectedSessionId, (conversation) => {
         if (conversation.activeRun?.runId !== activeRunId) return conversation;
-        const freshPage = page.filter(
-          (event) => event.sequence > (conversation.activeRun?.cursor ?? 0),
+        const merged = mergeEventPage(
+          conversation.activeRun.events,
+          conversation.activeRun.cursor,
+          page,
+          activeRunId,
         );
-        const events = [...conversation.activeRun.events, ...freshPage];
-        const cursor = events.at(-1)?.sequence ?? conversation.activeRun.cursor;
+        if (!merged.valid) {
+          return {
+            ...conversation,
+            activeRun: { ...conversation.activeRun, activity: "Reconnecting…" },
+          };
+        }
+        const events = merged.events;
+        const cursor = merged.cursor;
+        const freshPage = events.slice(conversation.activeRun.events.length);
         const terminal = status.disposition === "completed" || status.disposition === "failed";
         const caughtUp = status.last_sequence === null || (cursor !== null && cursor >= status.last_sequence);
         if (!terminal || !caughtUp) {
@@ -250,6 +250,8 @@ export function useConversationController(
             ...conversation,
             activeRun: null,
             lastRun: status,
+            lastRunEvents: events,
+            lastRunStartedAtMillis: conversation.activeRun.startedAtMillis,
             messages: [
               ...conversation.messages,
               {
@@ -269,6 +271,8 @@ export function useConversationController(
           ...conversation,
           activeRun: null,
           lastRun: status,
+          lastRunEvents: events,
+          lastRunStartedAtMillis: conversation.activeRun.startedAtMillis,
           messages: [
             ...conversation.messages,
             {

@@ -1915,3 +1915,53 @@
 - The service exposes no standalone session-load/list route. Existing in-memory sessions are selectable, and known runs are reloaded through status/event commands.
 - Vite reports a non-failing 696 KiB JavaScript chunk warning.
 - No commit was created.
+
+# M16.4 implementation
+
+1. Changed tree
+      - Updated apps/agent-desktop/src/app/App.tsx, apps/agent-desktop/src/components/ConversationWorkspace.tsx, conversation state, contracts, styles, and tests.
+      - Added apps/agent-desktop/src/components/RunInspector.tsx and apps/agent-desktop/src/features/runActivity.ts.
+      - Replaced the old readiness-only inspector.
+
+2. Activity UX
+      - Live phase, elapsed time, restrained activity indicator, and Stop action.
+      - Terminal runs collapse to Completed/Failed/Cancelled · duration · sources.
+      - Reconnecting and stopping states remain explicit.
+
+3. Inspector/timeline
+      - Optional inspector remains closed by default.
+      - Shows workflow, phase, duration, model calls/budget, graph steps, backends, citations, terminal status, and copyable IDs.
+      - Lightweight Retrieve → Model → Verify → Complete timeline.
+
+4. Event handling
+      - Supports the service’s zero-based EventSequence.
+      - Ignores duplicates and rejects gaps, out-of-order pages, and wrong-run events without advancing the cursor.
+      - Terminal status cannot regress into transient activity.
+
+5. Performance/bundle
+      - Lazy-loaded inspector: 5.82 kB.
+      - Lazy-loaded Markdown/GFM: 155.13 kB.
+      - Main bundle reduced from roughly 697 kB to 543.51 kB.
+      - Vite still reports the main chunk above its 500 kB advisory threshold.
+
+6. Accessibility
+      - Semantic status announcements, native controls, copy labels, reduced-motion support, and keyboard inspector toggle.
+      - Compact and wide layouts remain supported.
+
+7. Tests
+      - TypeScript typecheck: PASS
+      - ESLint: PASS
+      - Frontend: 16 tests PASS
+      - Production frontend build: PASS
+      - Rust formatting: PASS
+      - Containerized strict Clippy: PASS
+      - Rust bridge: 6 tests PASS
+      - Tauri debug build: PASS
+      - Capability/command surface unchanged.
+
+8. Screenshots
+      - Not captured; no GUI-capable review session was available.
+
+9. Deviations
+      - Actual evidence count is not present in existing ServiceEventV2; the inspector explicitly displays Not exposed rather than inferring it from citation count.
+      - No LocalWrite/HITL functionality added. No commit created.

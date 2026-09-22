@@ -164,6 +164,47 @@
     font-size: 0.8125rem;
   }
 
+  .activity-pulse {
+    width: 0.45rem;
+    height: 0.45rem;
+    flex: none;
+    border-radius: 999px;
+    background: var(--accent);
+    animation: activity-pulse 1.4s ease-in-out infinite;
+  }
+
+  .run-summary {
+    display: flex;
+    min-height: 2.5rem;
+    align-items: center;
+    gap: 0.45rem;
+    color: var(--muted);
+    font-size: 0.75rem;
+  }
+
+  .inspector-heading {
+    color: var(--muted);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+
+  .inspector-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 5rem) minmax(0, 1fr);
+    gap: 0.5rem 0.75rem;
+    font-size: 0.75rem;
+  }
+
+  .inspector-grid dt { color: var(--muted); }
+  .inspector-grid dd {
+    overflow: hidden;
+    color: var(--secondary);
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .answer-wrap { position: relative; padding-right: 2.25rem; }
   .answer-actions { position: absolute; top: -0.4rem; right: 0; }
   .answer-wrap p { margin: 0.6rem 0; line-height: 1.65; }
@@ -213,6 +254,11 @@
   .citation-detail { max-width: 28rem; border-top: 1px solid var(--border); padding: 0.5rem; }
   .citation-detail div { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: 0.5rem; overflow-wrap: anywhere; padding: 0.15rem 0; }
   .citation-detail span { color: var(--muted); }
+}
+
+@keyframes activity-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1); }
 }
 
 @media (max-width: 1040px) {

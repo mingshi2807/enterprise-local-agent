@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Command,
@@ -16,12 +16,15 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { CommandPalette, type PaletteCommand } from "@/app/CommandPalette";
 import { useTheme, type ThemePreference } from "@/app/ThemeContext";
 import { ConversationWorkspace } from "@/components/ConversationWorkspace";
-import { ReadinessInspector } from "@/components/ReadinessInspector";
 import { SessionSidebar } from "@/components/SessionSidebar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { useConversationController } from "@/queries/conversation";
 import { serviceQueryKeys, useServiceState } from "@/queries/service";
+
+const RunInspector = lazy(() =>
+  import("@/components/RunInspector").then(({ RunInspector: component }) => ({ default: component })),
+);
 
 const nextTheme: Record<ThemePreference, ThemePreference> = {
   system: "light",
@@ -63,11 +66,19 @@ export function App() {
   const reduceMotion = useReducedMotion();
   const { health, readiness, version } = useServiceState();
   const [sidebarOpen, setSidebarOpen] = useState(() => window.matchMedia("(min-width: 821px)").matches);
-  const [inspectorOpen, setInspectorOpen] = useState(() => window.matchMedia("(min-width: 1041px)").matches);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
   const conversation = useConversationController(selectedSessionId, setSelectedSessionId);
+  const [nowMillis, setNowMillis] = useState(Date.now);
+  const selectedActiveRunId = conversation.selected?.activeRun?.runId ?? null;
+
+  useEffect(() => {
+    if (selectedActiveRunId === null) return;
+    const timer = window.setInterval(() => setNowMillis(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [selectedActiveRunId]);
 
   const connected = health.isSuccess;
   const draining = health.data?.lifecycle === "draining";
@@ -208,6 +219,7 @@ export function App() {
             sending={conversation.sending}
             cancelling={conversation.cancelling}
             focusNonce={composerFocusNonce}
+            nowMillis={nowMillis}
             onSend={conversation.send}
             onCancel={conversation.cancel}
             onNewTask={newTask}
@@ -225,12 +237,16 @@ export function App() {
               exit={reduceMotion ? { opacity: 0 } : { x: 18, opacity: 0 }}
               transition={{ duration: reduceMotion ? 0 : 0.14, ease: "easeOut" }}
             >
-              <ReadinessInspector
-                state={serviceState}
-                readiness={readiness.data}
-                version={version.data}
-                onClose={() => setInspectorOpen(false)}
-              />
+              <Suspense fallback={<div className="px-3 py-4 text-xs text-muted">Loading run details…</div>}>
+                <RunInspector
+                  state={serviceState}
+                  readiness={readiness.data}
+                  version={version.data}
+                  conversation={conversation.selected}
+                  nowMillis={nowMillis}
+                  onClose={() => setInspectorOpen(false)}
+                />
+              </Suspense>
             </motion.div>
           )}
         </AnimatePresence>

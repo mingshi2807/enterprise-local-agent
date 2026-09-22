@@ -92,7 +92,7 @@ export const runViewSchema = z
       "failed",
       "manual_reconciliation_required",
     ]),
-    last_sequence: z.number().int().positive().nullable(),
+    last_sequence: z.number().int().nonnegative().nullable(),
     outcome: z.enum(["completed", "cancelled", "budget_exceeded", "failed"]).nullable(),
     workflow_id: z.literal("enterprise-engineering-readonly-v1").nullable(),
     result: applicationResultSchema.nullable(),
@@ -103,7 +103,7 @@ export const runViewSchema = z
 export const serviceEventSchema = z
   .object({
     version: z.literal(2),
-    sequence: z.number().int().positive(),
+    sequence: z.number().int().nonnegative(),
     run_id: uuid,
     category: z.enum([
       "run",

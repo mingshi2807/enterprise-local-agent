@@ -56,8 +56,8 @@ describe("App conversation", () => {
 
   it("starts the fixed ReadOnly workflow and renders the authoritative answer and citations", async () => {
     installServiceMock((command) => {
-      if (command === "conversation_read_events") return [event(1, "knowledge", "started"), event(2, "model", "completed")];
-      if (command === "conversation_run_status") return runView({ disposition: "completed", last_sequence: 2, outcome: "completed", result: { kind: "final_answer", answer: "Use **bounded** charging control.\n\n```rust\nlet safe = true;\n```", citations: [{ evidence_id: "ev-1", backend: "standards", source_id: "iso", reference_id: "8.4", provenance: "ISO reference" }] }, duration_millis: 42 });
+      if (command === "conversation_read_events") return [event(0, "knowledge", "started"), event(1, "model", "completed")];
+      if (command === "conversation_run_status") return runView({ disposition: "completed", last_sequence: 1, outcome: "completed", result: { kind: "final_answer", answer: "Use **bounded** charging control.\n\n```rust\nlet safe = true;\n```", citations: [{ evidence_id: "ev-1", backend: "standards", source_id: "iso", reference_id: "8.4", provenance: "ISO reference" }] }, duration_millis: 42 });
       return undefined;
     });
     renderApp();
@@ -67,6 +67,7 @@ describe("App conversation", () => {
     expect(screen.getByText(/standards · 8.4/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy answer" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy code" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Run summary")).toHaveTextContent(/Completed.*42ms.*1 source/);
     const start = invoke.mock.calls.find(([command]) => command === "conversation_start_readonly_run");
     expect(start?.[1]).toMatchObject({ sessionId, input: "Explain the charging requirement" });
     expect(start?.[1]?.startRequestId).toMatch(/^[0-9a-f-]{36}$/);
@@ -83,6 +84,36 @@ describe("App conversation", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("conversation_cancel_run", { sessionId, runId }));
   });
 
+  it("shows compact activity and exposes safe metadata only on demand", async () => {
+    installServiceMock((command) => {
+      if (command === "conversation_read_events") {
+        return [
+          event(0, "knowledge", "started"),
+          event(1, "knowledge", "completed"),
+          { ...event(2, "model", "started"), budget_usage: 1, budget_limit: 3 },
+          { ...event(3, "graph", "started", "verify-answer"), correlation_id: null, budget_usage: 3, budget_limit: 8 },
+        ];
+      }
+      if (command === "conversation_run_status") return runView({ last_sequence: 3 });
+      return undefined;
+    });
+    renderApp();
+    await submit("Inspect this run");
+
+    expect((await screen.findAllByText("Verifying…")).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+    expect(screen.queryByText("KnowledgeRetrievalStarted")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show inspector" }));
+    expect(await screen.findByRole("heading", { name: "Run details" })).toBeInTheDocument();
+    expect(screen.getByText("standards")).toBeInTheDocument();
+    expect(screen.getByText("3 / 8")).toBeInTheDocument();
+    expect(screen.getByText("Not exposed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy Run" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy Retrieval 1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy Model 1" })).toBeInTheDocument();
+  });
+
   it.each([
     ["knowledge", "Enterprise knowledge retrieval is unavailable or timed out."],
     ["model", "The configured model is unavailable or timed out."],
@@ -90,8 +121,8 @@ describe("App conversation", () => {
     let starts = 0;
     installServiceMock((command) => {
       if (command === "conversation_start_readonly_run") { starts += 1; return runView(); }
-      if (command === "conversation_read_events") return [event(1, category, "failed")];
-      if (command === "conversation_run_status") return runView({ disposition: "failed", last_sequence: 1, outcome: "failed" });
+      if (command === "conversation_read_events") return [event(0, category, "failed")];
+      if (command === "conversation_run_status") return runView({ disposition: "failed", last_sequence: 0, outcome: "failed" });
       return undefined;
     });
     renderApp();
@@ -109,12 +140,12 @@ describe("App conversation", () => {
         reads += 1;
         cursors.push(args?.afterSequence);
         if (reads === 1) return Promise.reject(new Error("service_unavailable"));
-        if (reads === 2) return [event(1, "knowledge", "started")];
-        return [event(2, "graph", "completed", "verify-answer")];
+        if (reads === 2) return [event(0, "knowledge", "started")];
+        return [event(1, "graph", "completed", "verify-answer")];
       }
       if (command === "conversation_run_status") {
         if (reads < 3) return runView();
-        return runView({ disposition: "completed", last_sequence: 2, outcome: "completed", result: { kind: "final_answer", answer: "Recovered answer", citations: [] } });
+        return runView({ disposition: "completed", last_sequence: 1, outcome: "completed", result: { kind: "final_answer", answer: "Recovered answer", citations: [] } });
       }
       return undefined;
     });
@@ -122,13 +153,13 @@ describe("App conversation", () => {
     await submit("Reconnect test");
     expect(await screen.findByText("Recovered answer", {}, { timeout: 3_000 })).toBeInTheDocument();
     expect(cursors).toContain(null);
-    expect(cursors).toContain(1);
+    expect(cursors).toContain(0);
   });
 
   it("reports volatile result loss without replaying the model call", async () => {
     installServiceMock((command) => {
-      if (command === "conversation_run_status") return runView({ disposition: "completed", outcome: "completed", last_sequence: 1 });
-      if (command === "conversation_read_events") return [event(1, "graph", "completed")];
+      if (command === "conversation_run_status") return runView({ disposition: "completed", outcome: "completed", last_sequence: 0 });
+      if (command === "conversation_read_events") return [event(0, "graph", "completed")];
       return undefined;
     });
     renderApp();
@@ -139,8 +170,8 @@ describe("App conversation", () => {
 
   it("reports a malformed terminal model result without exposing raw output", async () => {
     installServiceMock((command) => {
-      if (command === "conversation_read_events") return [event(1, "model", "completed")];
-      if (command === "conversation_run_status") return runView({ disposition: "failed", outcome: "failed", last_sequence: 1 });
+      if (command === "conversation_read_events") return [event(0, "model", "completed")];
+      if (command === "conversation_run_status") return runView({ disposition: "failed", outcome: "failed", last_sequence: 0 });
       return undefined;
     });
     renderApp();
@@ -177,7 +208,10 @@ describe("App shell states", () => {
   it("shows readiness and supports shell shortcuts", async () => {
     installServiceMock();
     renderApp();
-    expect(await screen.findByText(workflow)).toBeInTheDocument();
+    await screen.findByText("Local service ready");
+    fireEvent.keyDown(window, { key: "i", ctrlKey: true, shiftKey: true });
+    expect(await screen.findByText("No run selected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Hide inspector" })).toBeInTheDocument();
     fireEvent.keyDown(window, { key: "b", ctrlKey: true });
     expect(screen.getByRole("button", { name: "Expand conversations" })).toBeInTheDocument();
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });

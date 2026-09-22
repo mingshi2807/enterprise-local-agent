@@ -1,9 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { ArrowUp, CircleAlert, LoaderCircle, RefreshCw, Square, Sparkles } from "lucide-react";
 
-import { MarkdownAnswer } from "@/components/MarkdownAnswer";
 import { Button } from "@/components/ui/button";
+import { formatDuration, runDetails } from "@/features/runActivity";
 import type { Conversation } from "@/queries/conversation";
+
+const MarkdownAnswer = lazy(() =>
+  import("@/components/MarkdownAnswer").then(({ MarkdownAnswer: component }) => ({ default: component })),
+);
 
 type ServiceState = "ready" | "degraded" | "unavailable" | "draining";
 
@@ -14,6 +18,7 @@ interface Props {
   sending: boolean;
   cancelling: boolean;
   focusNonce: number;
+  nowMillis: number;
   onSend: (prompt: string) => Promise<unknown>;
   onCancel: () => Promise<unknown>;
   onNewTask: () => void;
@@ -100,11 +105,16 @@ function Citations({ citations }: { citations: NonNullable<Conversation["message
 }
 
 export function ConversationWorkspace(props: Props) {
-  const { conversation, serviceState, readonlyReady, sending, cancelling, focusNonce, onSend, onCancel, onNewTask, onRetryRun, onRetryConnection } = props;
+  const { conversation, serviceState, readonlyReady, sending, cancelling, focusNonce, nowMillis, onSend, onCancel, onNewTask, onRetryRun, onRetryConnection } = props;
   const scrollArea = useRef<HTMLDivElement>(null);
   const followTail = useRef(true);
   const active = conversation?.activeRun ?? null;
   const unavailable = serviceState === "unavailable";
+
+  const status = conversation?.lastRun ?? null;
+  const events = active?.events ?? conversation?.lastRunEvents ?? [];
+  const startedAt = active?.startedAtMillis ?? conversation?.lastRunStartedAtMillis ?? nowMillis;
+  const details = status === null ? null : runDetails(status, events, startedAt, nowMillis, active?.activity ?? null);
 
   useEffect(() => {
     const area = scrollArea.current;
@@ -121,11 +131,6 @@ export function ConversationWorkspace(props: Props) {
       <div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-3">
         <h2 className="truncate text-xs font-medium">{conversation?.title ?? "New task"}</h2>
         <div className="flex items-center gap-2">
-          {active !== null && (
-            <Button variant="secondary" className="h-7 px-2 text-xs" disabled={cancelling} onClick={() => void onCancel()}>
-              <Square aria-hidden="true" className="size-3" /> Stop
-            </Button>
-          )}
           {serviceState !== "ready" && (
             <span className="flex items-center gap-1.5 text-[11px] capitalize text-muted">
               <span className={`status-dot status-dot-${serviceState}`} aria-hidden="true" />{serviceState}
@@ -166,7 +171,12 @@ export function ConversationWorkspace(props: Props) {
               <article key={message.id} className={`message-row message-${message.role}`}>
                 <div className="message-label">{message.role === "user" ? "You" : message.role === "assistant" ? "Agent" : "Run status"}</div>
                 {message.role === "assistant" ? (
-                  <><MarkdownAnswer answer={message.content} /><Citations citations={message.citations ?? []} /></>
+                  <>
+                    <Suspense fallback={<p className="text-sm text-muted">Rendering answer…</p>}>
+                      <MarkdownAnswer answer={message.content} />
+                    </Suspense>
+                    <Citations citations={message.citations ?? []} />
+                  </>
                 ) : (
                   <p className="whitespace-pre-wrap text-sm leading-6">{message.content}</p>
                 )}
@@ -175,7 +185,27 @@ export function ConversationWorkspace(props: Props) {
                 )}
               </article>
             ))}
-            {active !== null && <div className="activity-row" role="status" aria-live="polite"><LoaderCircle aria-hidden="true" className="size-3.5 animate-spin text-accent" />{active.activity}</div>}
+            {active !== null && details !== null && (
+              <div className="activity-row" role="status" aria-live="polite">
+                <span className="activity-pulse" aria-hidden="true" />
+                <span className="font-medium text-secondary">{active.activity}</span>
+                <span className="text-muted">{formatDuration(details.elapsedMillis)}</span>
+                <Button variant="ghost" className="ml-auto h-7 px-2 text-xs" disabled={cancelling} onClick={() => void onCancel()}>
+                  {cancelling ? <LoaderCircle aria-hidden="true" className="size-3 animate-spin" /> : <Square aria-hidden="true" className="size-3" />} Stop
+                </Button>
+              </div>
+            )}
+            {active === null && details !== null && (
+              <div className="run-summary" aria-label="Run summary">
+                <span className={details.terminalStatus === "completed" ? "text-success" : details.terminalStatus === "cancelled" ? "text-muted" : "text-danger"}>
+                  {details.terminalStatus === "completed" ? "Completed" : details.terminalStatus === "cancelled" ? "Cancelled" : "Failed"}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span>{formatDuration(details.elapsedMillis)}</span>
+                <span aria-hidden="true">·</span>
+                <span>{details.citationCount} {details.citationCount === 1 ? "source" : "sources"}</span>
+              </div>
+            )}
           </div>
         )}
       </div>
