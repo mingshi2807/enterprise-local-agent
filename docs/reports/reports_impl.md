@@ -1965,3 +1965,89 @@
 9. Deviations
       - Actual evidence count is not present in existing ServiceEventV2; the inspector explicitly displays Not exposed rather than inferring it from citation count.
       - No LocalWrite/HITL functionality added. No commit created.
+
+# M16.5 implementation reports
+
+1. Changed tree
+      - Rust bridge: named LocalWrite/HITL commands, strict DTO validation, generated Tauri ACLs.
+      - Frontend: approval contracts, controller state, inline ApprovalPanel, workflow selector, activity integration, tests.
+      - Runtime governance crates remain unchanged.
+
+2. Service commands
+      - conversation_start_localwrite_run
+      - approval_list_waiting
+      - approval_resume_run
+      - approval_abort_waiting
+      - No generic HTTP, filesystem, shell, SQL, model, MCP, persistence, or containment command.
+
+3. Approval UX
+      - Compact inline LocalWrite panel.
+      - Displays only operation, relative target, and byte count.
+      - Supports Approve, Deny, Abort, and explicit Resume.
+      - LocalWrite must be explicitly selected and ready.
+
+4. Identity/authorization
+      - Server remains authoritative.
+      - Handles unauthorized, requester/approver separation, stale versions, decided approvals, and manual reconciliation using sanitized messages.
+      - Requester identity is omitted because the existing safe preview API does not expose it.
+
+5. Restart/resume
+      - Authorized Waiting records are reconstructed from durable service state.
+      - No approval data is stored in browser storage.
+      - Initial CAS row version 0 is correctly supported.
+      - Manual-reconciliation runs are displayed as non-resumable.
+      - Fixed zero-based ServiceEventV2 cursor handling.
+
+6. Activity integration
+      - Added Approval required, Waiting for decision…, and Resuming….
+      - Stop is hidden while the run is durably Waiting.
+      - Success is shown only after authoritative terminal status.
+
+7. Tests
+      - Frontend: 23 passed.
+      - Desktop Rust: 8 passed.
+      - TypeScript, ESLint, formatting, strict workspace Clippy: passed.
+      - Tauri debug build: passed.
+      - Workspace tests excluding agent-mcp-adapters: passed.
+      - Full workspace test exposed a pre-existing M11 failure: termination_reaps_process_group_descendant reproducibly reports a surviving descendant in the Tauri container. No MCP files were changed.
+
+8. Screenshots
+      - Not produced.
+
+9. Deviations
+      - No runtime approval, policy, audit, identity, persistence, or containment semantics changed.
+      - Approval identity is not rendered because it is absent from the current safe service projection.
+      - No commit created.
+
+# M16.5 reviewing
+
+• 1. Exact Approve/Deny command path
+      - JavaScript invokes approval_submit_decision with only sessionId, runId, waitId, expectedRowVersion, and approve | deny.
+      - Tauri command: apps/agent-desktop/src-tauri/src/lib.rs:133
+      - Fixed service endpoint and strict body: apps/agent-desktop/src-tauri/src/service_client.rs:826
+      - Tests verify exact approve/deny arguments and explicit resume: apps/agent-desktop/src/app/App.test.tsx:233
+
+  1. ACL/security confirmation
+      - Dedicated allow-approval-submit-decision permission.
+      - No generic HTTP/path command.
+      - No ActionDigest, ToolCallId, capsule, action arguments, or transport credentials exposed to JavaScript.
+      - Rust request body uses deny_unknown_fields.
+      - No implementation change was required.
+
+  2. M11 baseline comparison
+      - Compared current worktree with clean baseline f5678c44a6f763cabc61eb7cf8e6133aff7837ce.
+      - MCP implementation, fixture, and test files are byte-identical.
+      - The workspace run initially reproduced the failure on current, then passed unchanged. Subsequent results:
+          - Isolated test: current 3/3, baseline 3/3.
+          - Full stdio suite: current 12/12 repeated runs, baseline 12/12.
+          - Full workspace rerun: current PASS, baseline PASS.
+
+      - Process evidence showed fixture server and /bin/sleep 30 in the same process group, with no surviving process after successful cleanup.
+      - Classification: pre-existing/environment-sensitive flaky test, not M16.5-induced. No MCP changes made.
+
+  3. Final M16.5 verdict: PASS
+      - Frontend: typecheck, ESLint, 23/23 tests, 5/5 approval tests, production build PASS.
+      - Rust: formatting, strict workspace Clippy, desktop tests 8/8 PASS.
+      - Tauri no-bundle build PASS.
+      - Final full workspace test PASS.
+      - No commit created.

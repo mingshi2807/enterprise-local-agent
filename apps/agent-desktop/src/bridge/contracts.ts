@@ -71,13 +71,23 @@ const applicationCitationSchema = z
   })
   .strict();
 
-const applicationResultSchema = z
-  .object({
+const finalAnswerResultSchema = z.object({
     kind: z.literal("final_answer"),
     answer: boundedUtf8(8 * 1024).pipe(z.string().min(1)),
     citations: z.array(applicationCitationSchema).max(8),
   })
   .strict();
+
+const applicationResultSchema = z.discriminatedUnion("kind", [
+  finalAnswerResultSchema,
+  z.object({ kind: z.literal("local_write_completed"), tool_call_id: uuid }).strict(),
+  z.object({ kind: z.literal("approval_denied") }).strict(),
+]);
+
+export const workflowIdSchema = z.enum([
+  "enterprise-engineering-readonly-v1",
+  "enterprise-engineering-localwrite-v1",
+]);
 
 export const runViewSchema = z
   .object({
@@ -94,7 +104,7 @@ export const runViewSchema = z
     ]),
     last_sequence: z.number().int().nonnegative().nullable(),
     outcome: z.enum(["completed", "cancelled", "budget_exceeded", "failed"]).nullable(),
-    workflow_id: z.literal("enterprise-engineering-readonly-v1").nullable(),
+    workflow_id: workflowIdSchema.nullable(),
     result: applicationResultSchema.nullable(),
     duration_millis: z.number().int().nonnegative().nullable(),
   })
@@ -136,7 +146,7 @@ export const serviceEventSchema = z
       "finished",
     ]),
     correlation_id: boundedMetadata.nullable(),
-    workflow_id: z.literal("enterprise-engineering-readonly-v1").nullable(),
+    workflow_id: workflowIdSchema.nullable(),
     knowledge_backends: z.array(boundedMetadata).max(8),
     graph_node_id: boundedMetadata.nullable(),
     budget_usage: z.number().int().nonnegative().nullable(),
@@ -151,6 +161,28 @@ export const serviceEventSchema = z
 
 export const serviceEventsSchema = z.array(serviceEventSchema).max(64);
 
+const waitingApprovalSchema = z.object({
+  session_id: uuid,
+  run_id: uuid,
+  wait_id: uuid,
+  row_version: z.number().int().nonnegative(),
+  state: z.enum(["waiting", "approved", "denied", "executing"]),
+}).strict();
+
+export const waitingPageSchema = z.object({
+  items: z.array(waitingApprovalSchema).max(64),
+  next_run_id: uuid.nullable(),
+  next_wait_id: uuid.nullable(),
+}).strict().refine(({ next_run_id, next_wait_id }) => (next_run_id === null) === (next_wait_id === null));
+
+export const approvalPreviewSchema = z.object({
+  wait_id: uuid,
+  row_version: z.number().int().nonnegative(),
+  operation: z.literal("Write workspace file"),
+  target: boundedUtf8(1024).pipe(z.string().min(1)),
+  content_bytes: z.number().int().nonnegative().max(4 * 1024),
+}).strict();
+
 export type Health = z.infer<typeof healthSchema>;
 export type Readiness = z.infer<typeof readinessSchema>;
 export type BuildInfo = z.infer<typeof buildInfoSchema>;
@@ -158,3 +190,8 @@ export type Session = z.infer<typeof sessionSchema>;
 export type RunView = z.infer<typeof runViewSchema>;
 export type ApplicationCitation = z.infer<typeof applicationCitationSchema>;
 export type ServiceEvent = z.infer<typeof serviceEventSchema>;
+export type WorkflowId = z.infer<typeof workflowIdSchema>;
+export type WaitingApproval = z.infer<typeof waitingApprovalSchema>;
+export type WaitingPage = z.infer<typeof waitingPageSchema>;
+export type ApprovalPreview = z.infer<typeof approvalPreviewSchema>;
+export type ApprovalDecision = "approve" | "deny";

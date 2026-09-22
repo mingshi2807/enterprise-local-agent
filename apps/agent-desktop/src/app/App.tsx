@@ -70,7 +70,8 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
-  const conversation = useConversationController(selectedSessionId, setSelectedSessionId);
+  const connected = health.isSuccess;
+  const conversation = useConversationController(selectedSessionId, setSelectedSessionId, connected);
   const [nowMillis, setNowMillis] = useState(Date.now);
   const selectedActiveRunId = conversation.selected?.activeRun?.runId ?? null;
 
@@ -80,12 +81,14 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [selectedActiveRunId]);
 
-  const connected = health.isSuccess;
   const draining = health.data?.lifecycle === "draining";
   const readinessStatus = readiness.data?.overall ?? "unavailable";
   const serviceState = !connected ? "unavailable" : draining ? "draining" : readinessStatus;
   const readonlyReady = connected && !draining && readiness.data?.workflows.some(
     (workflow) => workflow.workflow === "enterprise-engineering-readonly-v1" && workflow.enabled && workflow.status === "ready",
+  ) === true;
+  const localWriteReady = connected && !draining && readiness.data?.workflows.some(
+    (workflow) => workflow.workflow === "enterprise-engineering-localwrite-v1" && workflow.enabled && workflow.status === "ready",
   ) === true;
 
   const newTask = useCallback(() => {
@@ -216,6 +219,8 @@ export function App() {
             conversation={conversation.selected}
             serviceState={serviceState}
             readonlyReady={readonlyReady}
+            localWriteReady={localWriteReady}
+            approval={conversation.approval}
             sending={conversation.sending}
             cancelling={conversation.cancelling}
             focusNonce={composerFocusNonce}
@@ -225,6 +230,10 @@ export function App() {
             onNewTask={newTask}
             onRetryRun={conversation.retry}
             onRetryConnection={() => void refresh()}
+            onApprove={() => conversation.decideApproval("approve")}
+            onDeny={() => conversation.decideApproval("deny")}
+            onResume={conversation.resumeApproval}
+            onAbort={conversation.abortApproval}
           />
         </main>
 

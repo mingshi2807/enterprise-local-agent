@@ -2,8 +2,8 @@ mod service_client;
 
 use serde::Serialize;
 use service_client::{
-    BuildInfoV1, HealthV1, LocalServiceClient, ReadinessSnapshotV1, RunViewV1, ServiceEventV2,
-    SessionV1,
+    ApprovalDecisionV1, BuildInfoV1, DesktopApprovalPreviewV1, HealthV1, LocalServiceClient,
+    ReadinessSnapshotV1, RunViewV1, ServiceEventV2, SessionV1, WaitingPageV1,
 };
 use tauri::State;
 
@@ -60,6 +60,19 @@ async fn conversation_start_readonly_run(
 }
 
 #[tauri::command]
+async fn conversation_start_localwrite_run(
+    client: State<'_, LocalServiceClient>,
+    session_id: String,
+    start_request_id: String,
+    input: String,
+) -> Result<RunViewV1, DesktopCommandError> {
+    client
+        .start_localwrite_run(&session_id, &start_request_id, &input)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 async fn conversation_run_status(
     client: State<'_, LocalServiceClient>,
     session_id: String,
@@ -96,6 +109,74 @@ async fn conversation_read_events(
         .map_err(Into::into)
 }
 
+#[tauri::command]
+async fn approval_list_waiting(
+    client: State<'_, LocalServiceClient>,
+) -> Result<WaitingPageV1, DesktopCommandError> {
+    client.list_waiting().await.map_err(Into::into)
+}
+
+#[tauri::command]
+async fn approval_get_preview(
+    client: State<'_, LocalServiceClient>,
+    session_id: String,
+    run_id: String,
+    wait_id: String,
+) -> Result<DesktopApprovalPreviewV1, DesktopCommandError> {
+    client
+        .approval_preview(&session_id, &run_id, &wait_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn approval_submit_decision(
+    client: State<'_, LocalServiceClient>,
+    session_id: String,
+    run_id: String,
+    wait_id: String,
+    expected_row_version: u64,
+    decision: ApprovalDecisionV1,
+) -> Result<(), DesktopCommandError> {
+    client
+        .submit_decision(
+            &session_id,
+            &run_id,
+            &wait_id,
+            expected_row_version,
+            decision,
+        )
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn approval_resume_run(
+    client: State<'_, LocalServiceClient>,
+    session_id: String,
+    run_id: String,
+    wait_id: String,
+) -> Result<(), DesktopCommandError> {
+    client
+        .resume_waiting(&session_id, &run_id, &wait_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn approval_abort_waiting(
+    client: State<'_, LocalServiceClient>,
+    session_id: String,
+    run_id: String,
+    wait_id: String,
+    expected_row_version: u64,
+) -> Result<(), DesktopCommandError> {
+    client
+        .abort_waiting(&session_id, &run_id, &wait_id, expected_row_version)
+        .await
+        .map_err(Into::into)
+}
+
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let client = LocalServiceClient::from_environment()?;
     tauri::Builder::default()
@@ -106,9 +187,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             service_version,
             conversation_create_session,
             conversation_start_readonly_run,
+            conversation_start_localwrite_run,
             conversation_run_status,
             conversation_cancel_run,
-            conversation_read_events
+            conversation_read_events,
+            approval_list_waiting,
+            approval_get_preview,
+            approval_submit_decision,
+            approval_resume_run,
+            approval_abort_waiting
         ])
         .run(tauri::generate_context!())?;
     Ok(())

@@ -4,6 +4,9 @@ export type ActivityLabel =
   | "Starting…"
   | "Searching knowledge…"
   | "Thinking…"
+  | "Approval required"
+  | "Waiting for decision…"
+  | "Resuming…"
   | "Verifying…"
   | "Finishing…"
   | "Reconnecting…"
@@ -69,6 +72,11 @@ export function activityFor(events: ServiceEvent[], fallback: ActivityLabel): Ac
   if (latest === undefined) return fallback;
   if (latest.category === "knowledge") return "Searching knowledge…";
   if (latest.category === "model") return "Thinking…";
+  if (latest.category === "approval") {
+    if (latest.phase === "suspended" || latest.phase === "prepared") return "Waiting for decision…";
+    if (latest.phase === "resumed" || latest.phase === "granted") return "Resuming…";
+    return "Approval required";
+  }
   if (latest.graph_node_id?.toLowerCase().includes("verify")) return "Verifying…";
   if (latest.category === "graph" || latest.category === "run") return "Finishing…";
   return fallback;
@@ -107,7 +115,9 @@ function phaseState(
 
 function timelineFor(events: ServiceEvent[], status: RunView, active: boolean): TimelineItem[] {
   const verifyEvents = events.filter((event) => event.graph_node_id?.toLowerCase().includes("verify"));
-  const terminal = status.disposition === "completed" || status.disposition === "failed";
+  const terminal = status.disposition === "completed"
+    || status.disposition === "failed"
+    || status.disposition === "manual_reconciliation_required";
   const terminalState: TimelineItem["state"] = !terminal
     ? "pending"
     : status.outcome === "cancelled"
@@ -144,7 +154,9 @@ export function runDetails(
   const retrievalBackends = [...new Set(events.flatMap(({ knowledge_backends }) => knowledge_backends))];
   const retrievalIds = uniqueIds(events, "knowledge");
   const modelIds = uniqueIds(events, "model");
-  const terminal = status.disposition === "completed" || status.disposition === "failed";
+  const terminal = status.disposition === "completed"
+    || status.disposition === "failed"
+    || status.disposition === "manual_reconciliation_required";
   const elapsedMillis = status.duration_millis ?? Math.max(0, nowMillis - startedAtMillis);
   const currentPhase = terminal
     ? status.outcome === "cancelled" ? "Cancelled" : status.disposition === "completed" ? "Complete" : "Failed"

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-approval-get-preview"
+description = "Enables the approval_get_preview command without any pre-configured scope."
+commands.allow = ["approval_get_preview"]
+
+[[permission]]
+identifier = "deny-approval-get-preview"
+description = "Denies the approval_get_preview command without any pre-configured scope."
+commands.deny = ["approval_get_preview"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-approval-list-waiting"
+description = "Enables the approval_list_waiting command without any pre-configured scope."
+commands.allow = ["approval_list_waiting"]
+
+[[permission]]
+identifier = "deny-approval-list-waiting"
+description = "Denies the approval_list_waiting command without any pre-configured scope."
+commands.deny = ["approval_list_waiting"]

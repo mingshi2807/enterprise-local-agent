@@ -1,4 +1,9 @@
-use std::{env, fmt, net::IpAddr, path::PathBuf, time::Duration};
+use std::{
+    env, fmt,
+    net::IpAddr,
+    path::{Component, Path, PathBuf},
+    time::Duration,
+};
 
 use reqwest::{Client, Method, StatusCode, header};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -14,6 +19,7 @@ const MAX_CITATION_FIELD_BYTES: usize = 1_024;
 const MAX_RESULT_CITATIONS: usize = 8;
 const MAX_KNOWLEDGE_BACKENDS: usize = 8;
 const READONLY_WORKFLOW_ID: &str = "enterprise-engineering-readonly-v1";
+const LOCALWRITE_WORKFLOW_ID: &str = "enterprise-engineering-localwrite-v1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,14 +123,18 @@ pub struct ApplicationCitationV1 {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
-pub enum ReadonlyApplicationResultV1 {
+pub enum ApplicationResultV1 {
     FinalAnswer {
         answer: String,
         citations: Vec<ApplicationCitationV1>,
     },
+    LocalWriteCompleted {
+        tool_call_id: String,
+    },
+    ApprovalDenied,
 }
 
-impl fmt::Debug for ReadonlyApplicationResultV1 {
+impl fmt::Debug for ApplicationResultV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::FinalAnswer { answer, citations } => formatter
@@ -133,6 +143,11 @@ impl fmt::Debug for ReadonlyApplicationResultV1 {
                 .field("answer_bytes", &answer.len())
                 .field("citation_count", &citations.len())
                 .finish(),
+            Self::LocalWriteCompleted { tool_call_id } => formatter
+                .debug_struct("LocalWriteCompleted")
+                .field("tool_call_id", tool_call_id)
+                .finish(),
+            Self::ApprovalDenied => formatter.write_str("ApprovalDenied"),
         }
     }
 }
@@ -146,7 +161,7 @@ pub struct RunViewV1 {
     last_sequence: Option<u64>,
     outcome: Option<RunOutcomeV1>,
     workflow_id: Option<String>,
-    result: Option<ReadonlyApplicationResultV1>,
+    result: Option<ApplicationResultV1>,
     duration_millis: Option<u64>,
 }
 
@@ -220,10 +235,95 @@ pub struct ServiceEventV2 {
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
-struct StartReadonlyRunBody<'a> {
+struct StartRunBody<'a> {
     start_request_id: &'a str,
-    workflow_id: &'static str,
+    workflow_id: &'a str,
     input: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitingStateV1 {
+    Waiting,
+    Approved,
+    Denied,
+    Executing,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitingApprovalV1 {
+    session_id: String,
+    run_id: String,
+    wait_id: String,
+    row_version: u64,
+    state: WaitingStateV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitingPageV1 {
+    items: Vec<WaitingApprovalV1>,
+    next_run_id: Option<String>,
+    next_wait_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceApprovalPreviewV1 {
+    wait_id: String,
+    row_version: u64,
+    summary: String,
+    target: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopApprovalPreviewV1 {
+    wait_id: String,
+    row_version: u64,
+    operation: &'static str,
+    target: String,
+    content_bytes: u16,
+}
+
+impl fmt::Debug for DesktopApprovalPreviewV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DesktopApprovalPreviewV1")
+            .field("wait_id", &self.wait_id)
+            .field("row_version", &self.row_version)
+            .field("operation", &self.operation)
+            .field("target", &self.target)
+            .field("content_bytes", &self.content_bytes)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecisionV1 {
+    Approve,
+    Deny,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct DecisionBody {
+    expected_row_version: u64,
+    decision: ApprovalDecisionV1,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeBody<'a> {
+    wait_id: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct AbortBody {
+    expected_row_version: u64,
 }
 
 trait BoundedResponse {
@@ -286,10 +386,9 @@ impl BoundedResponse for RunViewV1 {
     fn validate(&self) -> Result<(), LocalServiceError> {
         if !valid_uuid(&self.session_id)
             || !valid_uuid(&self.run_id)
-            || self
-                .workflow_id
-                .as_deref()
-                .is_some_and(|workflow| workflow != READONLY_WORKFLOW_ID)
+            || self.workflow_id.as_deref().is_some_and(|workflow| {
+                workflow != READONLY_WORKFLOW_ID && workflow != LOCALWRITE_WORKFLOW_ID
+            })
             || self
                 .result
                 .as_ref()
@@ -306,7 +405,6 @@ impl BoundedResponse for Vec<ServiceEventV2> {
         if self.len() > MAX_ITEMS
             || self.iter().any(|event| {
                 event.version != 2
-                    || event.sequence == 0
                     || !valid_uuid(&event.run_id)
                     || event
                         .correlation_id
@@ -315,7 +413,9 @@ impl BoundedResponse for Vec<ServiceEventV2> {
                     || event
                         .workflow_id
                         .as_deref()
-                        .is_some_and(|value| value != READONLY_WORKFLOW_ID)
+                        .is_some_and(|value| {
+                            value != READONLY_WORKFLOW_ID && value != LOCALWRITE_WORKFLOW_ID
+                        })
                     || event.knowledge_backends.len() > MAX_KNOWLEDGE_BACKENDS
                     || event
                         .knowledge_backends
@@ -335,9 +435,45 @@ impl BoundedResponse for Vec<ServiceEventV2> {
     }
 }
 
-fn valid_application_result(result: &ReadonlyApplicationResultV1) -> bool {
+impl BoundedResponse for WaitingPageV1 {
+    fn validate(&self) -> Result<(), LocalServiceError> {
+        if self.items.len() > MAX_ITEMS
+            || self.items.iter().any(|item| {
+                !valid_uuid(&item.session_id)
+                    || !valid_uuid(&item.run_id)
+                    || !valid_uuid(&item.wait_id)
+            })
+            || self
+                .next_run_id
+                .as_deref()
+                .is_some_and(|id| !valid_uuid(id))
+            || self
+                .next_wait_id
+                .as_deref()
+                .is_some_and(|id| !valid_uuid(id))
+            || self.next_run_id.is_some() != self.next_wait_id.is_some()
+        {
+            return Err(LocalServiceError::InvalidResponse);
+        }
+        Ok(())
+    }
+}
+
+impl BoundedResponse for ServiceApprovalPreviewV1 {
+    fn validate(&self) -> Result<(), LocalServiceError> {
+        if !valid_uuid(&self.wait_id)
+            || !bounded_text(&self.summary)
+            || !safe_relative_target(&self.target)
+        {
+            return Err(LocalServiceError::InvalidResponse);
+        }
+        Ok(())
+    }
+}
+
+fn valid_application_result(result: &ApplicationResultV1) -> bool {
     match result {
-        ReadonlyApplicationResultV1::FinalAnswer { answer, citations } => {
+        ApplicationResultV1::FinalAnswer { answer, citations } => {
             !answer.is_empty()
                 && answer.len() <= MAX_FINAL_ANSWER_BYTES
                 && citations.len() <= MAX_RESULT_CITATIONS
@@ -353,6 +489,8 @@ fn valid_application_result(result: &ReadonlyApplicationResultV1) -> bool {
                     .all(bounded_citation_text)
                 })
         }
+        ApplicationResultV1::LocalWriteCompleted { tool_call_id } => valid_uuid(tool_call_id),
+        ApplicationResultV1::ApprovalDenied => true,
     }
 }
 
@@ -370,6 +508,16 @@ fn bounded_text(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_TEXT_BYTES
         && value.chars().all(|character| !character.is_control())
+}
+
+fn safe_relative_target(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 1_024
+        && !value.chars().any(char::is_control)
+        && !Path::new(value).is_absolute()
+        && Path::new(value)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 struct BearerSecret(String);
@@ -552,6 +700,27 @@ impl LocalServiceClient {
         start_request_id: &str,
         input: &str,
     ) -> Result<RunViewV1, LocalServiceError> {
+        self.start_run(session_id, start_request_id, input, READONLY_WORKFLOW_ID)
+            .await
+    }
+
+    pub async fn start_localwrite_run(
+        &self,
+        session_id: &str,
+        start_request_id: &str,
+        input: &str,
+    ) -> Result<RunViewV1, LocalServiceError> {
+        self.start_run(session_id, start_request_id, input, LOCALWRITE_WORKFLOW_ID)
+            .await
+    }
+
+    async fn start_run(
+        &self,
+        session_id: &str,
+        start_request_id: &str,
+        input: &str,
+        workflow_id: &'static str,
+    ) -> Result<RunViewV1, LocalServiceError> {
         if !valid_uuid(session_id)
             || !valid_uuid(start_request_id)
             || input.is_empty()
@@ -559,9 +728,9 @@ impl LocalServiceClient {
         {
             return Err(LocalServiceError::InvalidRequest);
         }
-        let body = StartReadonlyRunBody {
+        let body = StartRunBody {
             start_request_id,
-            workflow_id: READONLY_WORKFLOW_ID,
+            workflow_id,
             input,
         };
         let body = serde_json::to_vec(&body).map_err(|_| LocalServiceError::InvalidRequest)?;
@@ -574,8 +743,7 @@ impl LocalServiceClient {
             .await
             .map_err(|_| LocalServiceError::Unavailable)?;
         let run: RunViewV1 = self.decode_json(response, StatusCode::OK).await?;
-        if run.session_id != session_id || run.workflow_id.as_deref() != Some(READONLY_WORKFLOW_ID)
-        {
+        if run.session_id != session_id || run.workflow_id.as_deref() != Some(workflow_id) {
             return Err(LocalServiceError::InvalidResponse);
         }
         Ok(run)
@@ -620,13 +788,110 @@ impl LocalServiceClient {
         after: Option<u64>,
     ) -> Result<Vec<ServiceEventV2>, LocalServiceError> {
         validate_run_key(session_id, run_id)?;
-        let cursor = after.unwrap_or(0);
-        let path = format!(
-            "v1/sessions/{session_id}/runs/{run_id}/events?after={cursor}&limit={MAX_ITEMS}"
+        let path = after.map_or_else(
+            || format!("v1/sessions/{session_id}/runs/{run_id}/events?limit={MAX_ITEMS}"),
+            |cursor| {
+                format!(
+                    "v1/sessions/{session_id}/runs/{run_id}/events?after={cursor}&limit={MAX_ITEMS}"
+                )
+            },
         );
         let events: Vec<ServiceEventV2> = self.get(&path).await?;
-        validate_event_page(&events, run_id, cursor)?;
+        validate_event_page(&events, run_id, after)?;
         Ok(events)
+    }
+
+    pub async fn list_waiting(&self) -> Result<WaitingPageV1, LocalServiceError> {
+        self.get(&format!("v1/approvals?limit={MAX_ITEMS}")).await
+    }
+
+    pub async fn approval_preview(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        wait_id: &str,
+    ) -> Result<DesktopApprovalPreviewV1, LocalServiceError> {
+        validate_wait_key(session_id, run_id, wait_id)?;
+        let preview: ServiceApprovalPreviewV1 = self
+            .get(&format!(
+                "v1/sessions/{session_id}/runs/{run_id}/approvals/{wait_id}/preview"
+            ))
+            .await?;
+        if preview.wait_id != wait_id {
+            return Err(LocalServiceError::InvalidResponse);
+        }
+        normalize_preview(preview)
+    }
+
+    pub async fn submit_decision(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        wait_id: &str,
+        expected_row_version: u64,
+        decision: ApprovalDecisionV1,
+    ) -> Result<(), LocalServiceError> {
+        validate_wait_key(session_id, run_id, wait_id)?;
+        self.post_json_status(
+            &format!("v1/sessions/{session_id}/runs/{run_id}/approvals/{wait_id}/decision"),
+            &DecisionBody {
+                expected_row_version,
+                decision,
+            },
+            StatusCode::NO_CONTENT,
+        )
+        .await
+    }
+
+    pub async fn resume_waiting(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        wait_id: &str,
+    ) -> Result<(), LocalServiceError> {
+        validate_wait_key(session_id, run_id, wait_id)?;
+        self.post_json_status(
+            &format!("v1/sessions/{session_id}/runs/{run_id}/resume"),
+            &ResumeBody { wait_id },
+            StatusCode::ACCEPTED,
+        )
+        .await
+    }
+
+    pub async fn abort_waiting(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        wait_id: &str,
+        expected_row_version: u64,
+    ) -> Result<(), LocalServiceError> {
+        validate_wait_key(session_id, run_id, wait_id)?;
+        self.post_json_status(
+            &format!("v1/sessions/{session_id}/runs/{run_id}/approvals/{wait_id}/abort"),
+            &AbortBody {
+                expected_row_version,
+            },
+            StatusCode::NO_CONTENT,
+        )
+        .await
+    }
+
+    async fn post_json_status<T: Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+        expected: StatusCode,
+    ) -> Result<(), LocalServiceError> {
+        let body = serde_json::to_vec(body).map_err(|_| LocalServiceError::InvalidRequest)?;
+        let response = self
+            .request(Method::POST, path)?
+            .header(header::ACCEPT, "application/json")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| LocalServiceError::Unavailable)?;
+        self.require_status(response.status(), expected)
     }
 
     async fn get<T>(&self, path: &str) -> Result<T, LocalServiceError>
@@ -722,12 +987,43 @@ fn validate_run_key(session_id: &str, run_id: &str) -> Result<(), LocalServiceEr
     Ok(())
 }
 
+fn validate_wait_key(
+    session_id: &str,
+    run_id: &str,
+    wait_id: &str,
+) -> Result<(), LocalServiceError> {
+    validate_run_key(session_id, run_id)?;
+    if !valid_uuid(wait_id) {
+        return Err(LocalServiceError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn normalize_preview(
+    preview: ServiceApprovalPreviewV1,
+) -> Result<DesktopApprovalPreviewV1, LocalServiceError> {
+    let bytes = preview
+        .summary
+        .strip_prefix("workspace_write_file (")
+        .and_then(|value| value.strip_suffix(" bytes)"))
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|value| *value <= 4 * 1024)
+        .ok_or(LocalServiceError::InvalidResponse)?;
+    Ok(DesktopApprovalPreviewV1 {
+        wait_id: preview.wait_id,
+        row_version: preview.row_version,
+        operation: "Write workspace file",
+        target: preview.target,
+        content_bytes: bytes,
+    })
+}
+
 fn validate_event_page(
     events: &[ServiceEventV2],
     run_id: &str,
-    cursor: u64,
+    cursor: Option<u64>,
 ) -> Result<(), LocalServiceError> {
-    let mut expected = cursor.saturating_add(1);
+    let mut expected = cursor.map_or(0, |value| value.saturating_add(1));
     for event in events {
         if event.run_id != run_id || event.sequence != expected {
             return Err(LocalServiceError::InvalidResponse);
@@ -937,7 +1233,7 @@ mod tests {
 
     #[test]
     fn conversation_contract_is_bounded_strict_and_redacted() {
-        let result = ReadonlyApplicationResultV1::FinalAnswer {
+        let result = ApplicationResultV1::FinalAnswer {
             answer: "sensitive answer".to_owned(),
             citations: vec![ApplicationCitationV1 {
                 evidence_id: "evidence-1".to_owned(),
@@ -974,7 +1270,7 @@ mod tests {
     fn service_events_require_metadata_only_v2_contract() {
         let event = ServiceEventV2 {
             version: 2,
-            sequence: 1,
+            sequence: 0,
             run_id: "22222222-2222-4222-8222-222222222222".to_owned(),
             category: ServiceEventCategoryV2::Knowledge,
             phase: ServiceEventPhaseV2::Started,
@@ -986,13 +1282,61 @@ mod tests {
             budget_limit: Some(8),
         };
         assert!(vec![event.clone()].validate().is_ok());
-        assert!(validate_event_page(std::slice::from_ref(&event), &event.run_id, 0).is_ok());
+        assert!(validate_event_page(std::slice::from_ref(&event), &event.run_id, None).is_ok());
         let mut gap = event;
-        gap.sequence = 2;
-        assert!(validate_event_page(&[gap], "22222222-2222-4222-8222-222222222222", 0).is_err());
+        gap.sequence = 1;
+        assert!(validate_event_page(&[gap], "22222222-2222-4222-8222-222222222222", None).is_err());
         assert!(
             serde_json::from_str::<ServiceEventV2>(
                 r#"{"version":2,"sequence":1,"run_id":"22222222-2222-4222-8222-222222222222","category":"model","phase":"started","correlation_id":null,"workflow_id":"enterprise-engineering-readonly-v1","knowledge_backends":[],"graph_node_id":null,"budget_usage":null,"budget_limit":null,"raw_model_output":"secret"}"#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn approval_preview_is_narrow_bounded_and_redacted() {
+        let preview = normalize_preview(ServiceApprovalPreviewV1 {
+            wait_id: "33333333-3333-4333-8333-333333333333".to_owned(),
+            row_version: 2,
+            summary: "workspace_write_file (42 bytes)".to_owned(),
+            target: "reports/result.txt".to_owned(),
+        })
+        .unwrap_or_else(|error| panic!("normalize trusted preview: {error}"));
+
+        assert_eq!(preview.operation, "Write workspace file");
+        assert_eq!(preview.target, "reports/result.txt");
+        assert_eq!(preview.content_bytes, 42);
+        assert!(!format!("{preview:?}").contains("file contents"));
+        assert!(
+            normalize_preview(ServiceApprovalPreviewV1 {
+                wait_id: "33333333-3333-4333-8333-333333333333".to_owned(),
+                row_version: 2,
+                summary: "workspace_write_file (4097 bytes)".to_owned(),
+                target: "reports/result.txt".to_owned(),
+            })
+            .is_err()
+        );
+        let unsafe_target = ServiceApprovalPreviewV1 {
+            wait_id: "33333333-3333-4333-8333-333333333333".to_owned(),
+            row_version: 0,
+            summary: "workspace_write_file (4 bytes)".to_owned(),
+            target: "../outside.txt".to_owned(),
+        };
+        assert!(unsafe_target.validate().is_err());
+    }
+
+    #[test]
+    fn approval_contract_rejects_payload_fields() {
+        assert!(
+            serde_json::from_str::<ServiceApprovalPreviewV1>(
+                r#"{"wait_id":"33333333-3333-4333-8333-333333333333","row_version":1,"summary":"workspace_write_file (4 bytes)","target":"safe.txt","content":"secret"}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<WaitingPageV1>(
+                r#"{"items":[],"next_run_id":null,"next_wait_id":null,"capsule":"secret"}"#,
             )
             .is_err()
         );

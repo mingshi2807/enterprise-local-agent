@@ -155,7 +155,7 @@
 
   .message-user .message-label { text-align: right; }
 
-  .activity-row {
+.activity-row {
     display: flex;
     align-items: center;
     gap: 0.5rem;
@@ -254,6 +254,15 @@
   .citation-detail { max-width: 28rem; border-top: 1px solid var(--border); padding: 0.5rem; }
   .citation-detail div { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: 0.5rem; overflow-wrap: anywhere; padding: 0.15rem 0; }
   .citation-detail span { color: var(--muted); }
+}
+
+.approval-panel {
+  margin-top: 1rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--border));
+  border-left-width: 3px;
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--warning) 5%, var(--panel));
+  padding: 0.75rem;
 }
 
 @keyframes activity-pulse {

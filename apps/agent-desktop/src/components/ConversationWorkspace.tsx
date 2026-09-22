@@ -3,10 +3,13 @@ import { ArrowUp, CircleAlert, LoaderCircle, RefreshCw, Square, Sparkles } from 
 
 import { Button } from "@/components/ui/button";
 import { formatDuration, runDetails } from "@/features/runActivity";
-import type { Conversation } from "@/queries/conversation";
+import type { ApprovalUiState, Conversation, WorkflowMode } from "@/queries/conversation";
 
 const MarkdownAnswer = lazy(() =>
   import("@/components/MarkdownAnswer").then(({ MarkdownAnswer: component }) => ({ default: component })),
+);
+const ApprovalPanel = lazy(() =>
+  import("@/components/ApprovalPanel").then(({ ApprovalPanel: component }) => ({ default: component })),
 );
 
 type ServiceState = "ready" | "degraded" | "unavailable" | "draining";
@@ -15,19 +18,26 @@ interface Props {
   conversation: Conversation | null;
   serviceState: ServiceState;
   readonlyReady: boolean;
+  localWriteReady: boolean;
   sending: boolean;
   cancelling: boolean;
   focusNonce: number;
   nowMillis: number;
-  onSend: (prompt: string) => Promise<unknown>;
+  approval: ApprovalUiState | null;
+  onSend: (prompt: string, mode: WorkflowMode) => Promise<unknown>;
   onCancel: () => Promise<unknown>;
   onNewTask: () => void;
   onRetryRun: (() => Promise<unknown>) | null;
   onRetryConnection: () => void;
+  onApprove: () => Promise<unknown>;
+  onDeny: () => Promise<unknown>;
+  onResume: () => Promise<unknown>;
+  onAbort: () => Promise<unknown>;
 }
 
-function Composer({ disabled, busy, focusNonce, onSend }: Pick<Props, "focusNonce" | "onSend"> & { disabled: boolean; busy: boolean }) {
+function Composer({ disabled, busy, focusNonce, onSend, localWriteReady }: Pick<Props, "focusNonce" | "onSend" | "localWriteReady"> & { disabled: boolean; busy: boolean }) {
   const [text, setText] = useState("");
+  const [mode, setMode] = useState<WorkflowMode>("readonly");
   const [submissionError, setSubmissionError] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const bytes = new TextEncoder().encode(text).byteLength;
@@ -41,7 +51,7 @@ function Composer({ disabled, busy, focusNonce, onSend }: Pick<Props, "focusNonc
     setText("");
     setSubmissionError(false);
     try {
-      await onSend(prompt);
+      await onSend(prompt, mode);
     } catch {
       setText(prompt);
       setSubmissionError(true);
@@ -70,7 +80,11 @@ function Composer({ disabled, busy, focusNonce, onSend }: Pick<Props, "focusNonc
             }
           }}
         />
-        <div className="flex min-h-10 items-center justify-end gap-2 px-2">
+        <div className="flex min-h-10 items-center gap-2 px-2">
+          <div className="flex items-center rounded-control border border-border p-0.5" aria-label="Workflow" role="group">
+            <button type="button" className={`h-6 rounded-control px-2 text-[11px] ${mode === "readonly" ? "bg-selection text-foreground" : "text-muted"}`} aria-pressed={mode === "readonly"} onClick={() => setMode("readonly")}>Read only</button>
+            <button type="button" disabled={!localWriteReady} className={`h-6 rounded-control px-2 text-[11px] disabled:opacity-40 ${mode === "localwrite" ? "bg-selection text-foreground" : "text-muted"}`} aria-pressed={mode === "localwrite"} title={localWriteReady ? "Allow a governed LocalWrite proposal" : "LocalWrite workflow unavailable"} onClick={() => setMode("localwrite")}>Local write</button>
+          </div>
           <span id="composer-status" className={bytes > 8 * 1024 ? "text-[11px] text-danger" : "text-[11px] text-muted"}>
             {bytes > 7 * 1024 ? `${bytes.toLocaleString()} / 8,192 bytes` : "Ctrl Enter to send"}
           </span>
@@ -105,7 +119,7 @@ function Citations({ citations }: { citations: NonNullable<Conversation["message
 }
 
 export function ConversationWorkspace(props: Props) {
-  const { conversation, serviceState, readonlyReady, sending, cancelling, focusNonce, nowMillis, onSend, onCancel, onNewTask, onRetryRun, onRetryConnection } = props;
+  const { conversation, serviceState, readonlyReady, localWriteReady, approval, sending, cancelling, focusNonce, nowMillis, onSend, onCancel, onNewTask, onRetryRun, onRetryConnection, onApprove, onDeny, onResume, onAbort } = props;
   const scrollArea = useRef<HTMLDivElement>(null);
   const followTail = useRef(true);
   const active = conversation?.activeRun ?? null;
@@ -185,14 +199,21 @@ export function ConversationWorkspace(props: Props) {
                 )}
               </article>
             ))}
+            {approval !== null && (
+              <Suspense fallback={<p className="mt-4 text-xs text-muted">Loading approval…</p>}>
+                <ApprovalPanel approval={approval} onApprove={onApprove} onDeny={onDeny} onResume={onResume} onAbort={onAbort} />
+              </Suspense>
+            )}
             {active !== null && details !== null && (
               <div className="activity-row" role="status" aria-live="polite">
                 <span className="activity-pulse" aria-hidden="true" />
                 <span className="font-medium text-secondary">{active.activity}</span>
                 <span className="text-muted">{formatDuration(details.elapsedMillis)}</span>
-                <Button variant="ghost" className="ml-auto h-7 px-2 text-xs" disabled={cancelling} onClick={() => void onCancel()}>
-                  {cancelling ? <LoaderCircle aria-hidden="true" className="size-3 animate-spin" /> : <Square aria-hidden="true" className="size-3" />} Stop
-                </Button>
+                {approval === null && (
+                  <Button variant="ghost" className="ml-auto h-7 px-2 text-xs" disabled={cancelling} onClick={() => void onCancel()}>
+                    {cancelling ? <LoaderCircle aria-hidden="true" className="size-3 animate-spin" /> : <Square aria-hidden="true" className="size-3" />} Stop
+                  </Button>
+                )}
               </div>
             )}
             {active === null && details !== null && (
@@ -210,7 +231,7 @@ export function ConversationWorkspace(props: Props) {
         )}
       </div>
 
-      <Composer disabled={!readonlyReady || active !== null} busy={sending} focusNonce={focusNonce} onSend={onSend} />
+      <Composer disabled={!readonlyReady || active !== null} busy={sending} focusNonce={focusNonce} onSend={onSend} localWriteReady={localWriteReady} />
     </section>
   );
 }

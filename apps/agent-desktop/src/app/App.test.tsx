@@ -12,6 +12,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 const sessionId = "11111111-1111-4111-8111-111111111111";
 const runId = "22222222-2222-4222-8222-222222222222";
 const workflow = "enterprise-engineering-readonly-v1";
+const localWriteWorkflow = "enterprise-engineering-localwrite-v1";
+const waitId = "33333333-3333-4333-8333-333333333333";
 
 function renderApp() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
@@ -31,13 +33,14 @@ function installServiceMock(handler?: (command: string, args?: Record<string, un
     const custom = handler?.(command, args);
     if (custom !== undefined) return Promise.resolve(custom);
     if (command === "service_health") return Promise.resolve({ version: 1, lifecycle: "serving" });
-    if (command === "service_readiness") return Promise.resolve({ version: 1, overall: "ready", dependencies: [{ dependency: "knowledge", status: "ready", code: "ready", checked_unix_seconds: 1 }], workflows: [{ workflow, enabled: true, required: true, status: "ready" }] });
+    if (command === "service_readiness") return Promise.resolve({ version: 1, overall: "ready", dependencies: [{ dependency: "knowledge", status: "ready", code: "ready", checked_unix_seconds: 1 }], workflows: [{ workflow, enabled: true, required: true, status: "ready" }, { workflow: localWriteWorkflow, enabled: true, required: false, status: "ready" }] });
     if (command === "service_version") return Promise.resolve({ application: "enterprise-local-agent", version: "0.1.0", git_identity: null, deployment_fingerprint: "test", config_schema_version: 2, store_schema_version: 2, event_schema_version: 9, checkpoint_schema_version: 4 });
     if (command === "conversation_create_session") return Promise.resolve({ session_id: sessionId });
     if (command === "conversation_start_readonly_run") return Promise.resolve(runView());
     if (command === "conversation_read_events") return Promise.resolve([]);
     if (command === "conversation_run_status") return Promise.resolve(runView());
     if (command === "conversation_cancel_run") return Promise.resolve(null);
+    if (command === "approval_list_waiting") return Promise.resolve({ items: [], next_run_id: null, next_wait_id: null });
     return Promise.reject(new Error("unexpected_command"));
   });
 }
@@ -82,6 +85,20 @@ describe("App conversation", () => {
     expect(invoke.mock.calls.filter(([command]) => command === "conversation_start_readonly_run")).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("conversation_cancel_run", { sessionId, runId }));
+  });
+
+  it("starts only the fixed LocalWrite workflow when explicitly selected", async () => {
+    installServiceMock((command) => {
+      if (command === "conversation_start_localwrite_run") return runView({ workflow_id: localWriteWorkflow });
+      return undefined;
+    });
+    renderApp();
+    const localWrite = await screen.findByRole("button", { name: "Local write" });
+    await waitFor(() => expect(localWrite).toBeEnabled());
+    fireEvent.click(localWrite);
+    await submit("Create the reviewed report");
+    expect(invoke.mock.calls.filter(([command]) => command === "conversation_start_localwrite_run")).toHaveLength(1);
+    expect(invoke.mock.calls.filter(([command]) => command === "conversation_start_readonly_run")).toHaveLength(0);
   });
 
   it("shows compact activity and exposes safe metadata only on demand", async () => {
@@ -180,6 +197,19 @@ describe("App conversation", () => {
     expect(document.body.textContent).not.toContain("raw_model_output");
   });
 
+  it("shows manual reconciliation as non-resumable without approval controls", async () => {
+    installServiceMock((command) => {
+      if (command === "conversation_read_events") return [event(0, "graph", "failed")];
+      if (command === "conversation_run_status") return runView({ disposition: "manual_reconciliation_required", last_sequence: 0, outcome: "failed" });
+      return undefined;
+    });
+    renderApp();
+    await submit("Legacy waiting state");
+    expect(await screen.findByText("This run requires operator reconciliation and cannot be resumed from the desktop.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Resume/ })).not.toBeInTheDocument();
+  });
+
   it("shows a sanitized start failure and keeps the prompt editable", async () => {
     installServiceMock((command) => {
       if (command === "conversation_create_session") return Promise.reject(new Error("credential=secret"));
@@ -198,6 +228,90 @@ describe("App conversation", () => {
   it("keeps internal payload fields outside ServiceEventV2", () => {
     expect(serviceEventSchema.safeParse({ ...event(1, "model", "started"), prompt: "secret" }).success).toBe(false);
     expect(serviceEventSchema.safeParse({ ...event(1, "model", "started"), raw_model_output: "secret" }).success).toBe(false);
+  });
+
+  it("restores durable Waiting, renders the trusted preview, and approves before explicit resume", async () => {
+    let state: "waiting" | "approved" = "waiting";
+    installServiceMock((command) => {
+      if (command === "approval_list_waiting") return { items: [{ session_id: sessionId, run_id: runId, wait_id: waitId, row_version: state === "waiting" ? 0 : 1, state }], next_run_id: null, next_wait_id: null };
+      if (command === "approval_get_preview") return { wait_id: waitId, row_version: state === "waiting" ? 0 : 1, operation: "Write workspace file", target: "reports/result.txt", content_bytes: 28 };
+      if (command === "approval_submit_decision") { state = "approved"; return null; }
+      if (command === "approval_resume_run") return null;
+      if (command === "conversation_run_status") return runView({ workflow_id: localWriteWorkflow, disposition: "waiting" });
+      return undefined;
+    });
+    renderApp();
+
+    expect(await screen.findByRole("heading", { name: "LocalWrite approval required" })).toBeInTheDocument();
+    expect(screen.getByText("reports/result.txt")).toBeInTheDocument();
+    expect(screen.getByText("28 bytes")).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "conversation_start_localwrite_run")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(await screen.findByRole("button", { name: "Resume approved run" })).toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith("approval_submit_decision", {
+      sessionId,
+      runId,
+      waitId,
+      expectedRowVersion: 0,
+      decision: "approve",
+    });
+    expect(invoke.mock.calls.some(([command]) => command === "approval_resume_run")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Resume approved run" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("approval_resume_run", { sessionId, runId, waitId }));
+  });
+
+  it("records denial without execution and requires an explicit denied-run continuation", async () => {
+    let state: "waiting" | "denied" = "waiting";
+    installServiceMock((command) => {
+      if (command === "approval_list_waiting") return { items: [{ session_id: sessionId, run_id: runId, wait_id: waitId, row_version: state === "waiting" ? 1 : 2, state }], next_run_id: null, next_wait_id: null };
+      if (command === "approval_get_preview") return { wait_id: waitId, row_version: 1, operation: "Write workspace file", target: "denied.txt", content_bytes: 6 };
+      if (command === "approval_submit_decision") { state = "denied"; return null; }
+      if (command === "conversation_run_status") return runView({ workflow_id: localWriteWorkflow, disposition: "waiting" });
+      return undefined;
+    });
+    renderApp();
+    const deny = await screen.findByRole("button", { name: "Deny" });
+    await waitFor(() => expect(deny).toBeEnabled());
+    fireEvent.click(deny);
+    expect(await screen.findByRole("button", { name: "Finish denied run" })).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "approval_resume_run")).toBe(false);
+    expect(invoke.mock.calls.some(([command]) => command.includes("tool"))).toBe(false);
+  });
+
+  it("aborts Waiting through the named command and removes the approval surface", async () => {
+    let aborted = false;
+    installServiceMock((command) => {
+      if (command === "approval_list_waiting") return { items: aborted ? [] : [{ session_id: sessionId, run_id: runId, wait_id: waitId, row_version: 1, state: "waiting" }], next_run_id: null, next_wait_id: null };
+      if (command === "approval_get_preview") return { wait_id: waitId, row_version: 1, operation: "Write workspace file", target: "abort.txt", content_bytes: 4 };
+      if (command === "approval_abort_waiting") { aborted = true; return null; }
+      if (command === "conversation_run_status") return runView({ workflow_id: localWriteWorkflow, disposition: "waiting" });
+      return undefined;
+    });
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "Abort run" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("approval_abort_waiting", { sessionId, runId, waitId, expectedRowVersion: 1 }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "LocalWrite approval required" })).not.toBeInTheDocument());
+  });
+
+  it.each([
+    ["unauthorized", "separate authorized approver"],
+    ["state_conflict", "changed on the service"],
+  ])("sanitizes approval %s failures without exposing action data", async (code, message) => {
+    installServiceMock((command) => {
+      if (command === "approval_list_waiting") return { items: [{ session_id: sessionId, run_id: runId, wait_id: waitId, row_version: 1, state: "waiting" }], next_run_id: null, next_wait_id: null };
+      if (command === "approval_get_preview") return { wait_id: waitId, row_version: 1, operation: "Write workspace file", target: "safe.txt", content_bytes: 2 };
+      if (command === "approval_submit_decision") return Promise.reject({ code, capsule: "secret", action: "payload" });
+      if (command === "conversation_run_status") return runView({ workflow_id: localWriteWorkflow, disposition: "waiting" });
+      return undefined;
+    });
+    renderApp();
+    const approve = await screen.findByRole("button", { name: "Approve" });
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.click(approve);
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(document.body.textContent).not.toContain("capsule");
+    expect(document.body.textContent).not.toContain("payload");
   });
 });
 
