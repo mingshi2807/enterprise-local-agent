@@ -1,22 +1,22 @@
 ---
-title: "M16 Desktop Foundation, ReadOnly Conversation, and Run Inspector"
-tags: ["m16", "desktop", "tauri", "react", "design-system", "app-shell", "conversation", "readonly", "activity", "inspector"]
+title: "M16 Desktop Foundation, Conversation, Run Inspector, and HITL"
+tags: ["m16", "desktop", "tauri", "react", "design-system", "app-shell", "conversation", "readonly", "activity", "inspector", "hitl", "localwrite", "approval"]
 created: 2026-09-21
 updated: 2026-09-22
-sources: ["apps/agent-desktop/src-tauri/src/service_client.rs", "apps/agent-desktop/src-tauri/src/lib.rs", "apps/agent-desktop/src-tauri/capabilities/main.json", "apps/agent-desktop/src/app/App.tsx", "apps/agent-desktop/src/app/CommandPalette.tsx", "apps/agent-desktop/src/bridge/contracts.ts", "apps/agent-desktop/src/bridge/service.ts", "apps/agent-desktop/src/queries/conversation.ts", "apps/agent-desktop/src/features/runActivity.ts", "apps/agent-desktop/src/components/ConversationWorkspace.tsx", "apps/agent-desktop/src/components/MarkdownAnswer.tsx", "apps/agent-desktop/src/components/RunInspector.tsx", "apps/agent-desktop/src/components/SessionSidebar.tsx", "apps/agent-desktop/src/styles/tokens.css"]
+sources: ["apps/agent-desktop/src-tauri/src/service_client.rs", "apps/agent-desktop/src-tauri/src/lib.rs", "apps/agent-desktop/src-tauri/capabilities/main.json", "apps/agent-desktop/src/app/App.tsx", "apps/agent-desktop/src/app/CommandPalette.tsx", "apps/agent-desktop/src/bridge/contracts.ts", "apps/agent-desktop/src/bridge/service.ts", "apps/agent-desktop/src/queries/conversation.ts", "apps/agent-desktop/src/features/runActivity.ts", "apps/agent-desktop/src/components/ApprovalPanel.tsx", "apps/agent-desktop/src/components/ConversationWorkspace.tsx", "apps/agent-desktop/src/components/MarkdownAnswer.tsx", "apps/agent-desktop/src/components/RunInspector.tsx", "apps/agent-desktop/src/components/SessionSidebar.tsx", "apps/agent-desktop/src/styles/tokens.css"]
 links: ["enterprise-local-agent-milestone-index.md", "m15-enterprise-identity-authorization.md", "m12-agent-service-api.md", "m14-deployment-operations-hardening.md"]
 category: architecture
 confidence: high
 schemaVersion: 1
 ---
 
-# M16 Desktop Foundation, ReadOnly Conversation, and Run Inspector
+# M16 Desktop Foundation, Conversation, Run Inspector, and HITL
 
 ## Status
 
 M16.0 architecture was approved. M16.1 and M16.2 are implemented and committed
-as `29942c3` and `0672edf`. M16.3 and M16.4 are implemented and verified in the
-current worktree. No M16 milestone tag has been created.
+as `29942c3` and `0672edf`. M16.3 through M16.5 are implemented and verified in
+the current worktree. No M16 milestone tag has been created.
 
 ## Boundary
 
@@ -50,10 +50,11 @@ responses, and unknown response fields. Bearer material remains Rust-side and
 is redacted from debug output.
 
 The initial WebView capability contained only named `health`, `readiness`, and
-`version` commands. M16.3 adds five reviewed conversation commands without
-adding generic transport. There are no filesystem, shell, generic HTTP, SQL,
-model, MCP, persistence, or containment plugins. CSP disables WebView network
-connections.
+`version` commands. M16.3 adds five reviewed conversation commands and M16.5
+adds only the reviewed LocalWrite workflow and durable-approval commands,
+without adding generic transport. There are no filesystem, shell, generic
+HTTP, SQL, model, MCP, persistence, or containment plugins. CSP disables
+WebView network connections.
 
 ## M16.2 Conversation-First Shell
 
@@ -146,6 +147,44 @@ The final build emits an approximately 155 KiB Markdown chunk and 5.8 KiB
 inspector chunk. The initial minified JavaScript chunk falls from approximately
 697 KiB to 543.5 KiB; Vite's advisory remains because it is still above 500 KiB.
 
+## M16.5 Durable LocalWrite Approval
+
+M16.5 renders the existing M10/M15 durable approval lifecycle inside the
+conversation without changing policy, approval, persistence, or containment:
+
+```text
+fixed LocalWrite workflow -> durable Waiting -> trusted preview
+  -> Approve or Deny -> explicit Resume -> existing governed execution
+```
+
+The bridge adds named commands only for starting
+`enterprise-engineering-localwrite-v1`, listing Waiting records, loading a
+trusted preview, submitting a decision, explicitly resuming, and aborting a
+Waiting run. Approve and Deny use `approval_submit_decision`; JavaScript passes
+only SessionId, RunId, WaitId, expected row version, and `approve | deny`.
+`LocalServiceClient` maps this to the fixed M15 approval-decision endpoint with
+a strict body containing only expected row version and decision. The Tauri ACL
+allows this command explicitly and exposes no generic URL or method facility.
+
+The inline approval panel displays only the trusted operation label,
+workspace-relative target, and content byte count. It never receives or renders
+file content, action arguments, raw model output, capsule data, ActionDigest,
+ToolCallId, or other exact-action bindings. Identity and authorization failures,
+RequesterMustDiffer, stale decisions, already-decided waits, and legacy/manual
+reconciliation states are rendered from sanitized service errors; the client
+does not reconcile them itself.
+
+Approval records the decision but never implies successful execution. Approved
+runs require explicit Resume, retain the same durable run/wait correlation, and
+continue through the existing M10 restore validation, M6 policy/audit, and M6.1
+containment path. Deny and abort dispatch zero tools. Durable Waiting is rebuilt
+from service state after desktop or service restart, and approval payloads are
+never stored in browser storage.
+
+Activity integrates Waiting, decision-ready, resuming, verifying, completed,
+failed, and aborted states using safe service metadata. Server state remains
+authoritative and the UI never optimistically reports execution success.
+
 ## Service States
 
 The shell presents ready, degraded, unavailable, and draining states from the
@@ -155,34 +194,36 @@ a status refresh; it does not add retries or execution behavior to the UI.
 
 ## Verification
 
-The current M16.4 implementation passed:
+The current M16.5 implementation passed:
 
 - TypeScript typecheck and ESLint with zero warnings;
-- sixteen frontend tests covering the M16.3 conversation path, activity
-  transitions, terminal collapse, cancellation, zero-based sequences,
-  duplicate suppression, gap/out-of-order/wrong-run rejection, reconnect
-  cursor behavior, safe inspector metadata, keyboard access, payload rejection,
-  shell states, and compact layout;
+- twenty-three frontend tests, including five focused approval tests covering
+  durable Waiting discovery, trusted preview, Approve, Deny, explicit Resume,
+  abort, stale and unauthorized failures, and payload rejection;
 - Vite production builds and Tauri debug build with `--no-bundle`;
-- strict Rust Clippy and six Rust service-bridge tests;
+- strict workspace Rust Clippy and eight Rust service-bridge tests;
 - capability, dependency-direction, and forbidden-surface scans;
-- `cargo fmt --all -- --check` and clean diff validation.
+- `cargo fmt --all -- --check` and a full workspace test pass.
 
-M16.4 changes no Tauri command, ACL, service, persistence, model, or execution
-authority. Native host Clippy lacks the required GTK development libraries, so
-the established Tauri build container supplied those system dependencies for
-strict Clippy, Rust tests, and the final debug build.
+The M16.5 closure review confirmed the exact `approval_submit_decision` command
+and dedicated ACL. An intermittent pre-existing M11 process-reaping test was
+not changed: current and pre-M16.5 MCP sources were byte-identical, isolated and
+repeated comparison runs passed on both revisions, and the final workspace run
+passed. Native host Clippy lacks the required GTK development libraries, so the
+established Tauri build container supplied those system dependencies for strict
+Clippy, Rust tests, and the final debug build.
 
 ## Guarantees and Limits
 
 M16 provides a bounded local-service bridge, minimal WebView capability set,
-responsive accessible design foundation, and real ReadOnly conversation path.
+responsive accessible design foundation, real ReadOnly conversation path, and
+a durable LocalWrite approval client over existing server authority.
 Transport credentials are not exposed to JavaScript, clients cannot select the
 workflow or infrastructure, and terminal results remain service-authoritative.
 Activity and inspection are metadata projections only and do not create a new
 event or result authority.
 
-It does not provide LocalWrite, approval, durable Waiting interaction,
+It does not provide desktop-side policy, approval authority, containment,
 settings, ACP, pane resizing, packaging/signing, generic service transport, or
 conversation payload persistence. Event subscription uses bounded cursor
 polling instead of a persistent WebView SSE connection. The service has no
@@ -201,3 +242,7 @@ and are reported without replaying the model call.
 - Preserve keyboard accessibility, reduced motion, and compact-window support.
 - Keep terminal results authoritative over transient activity projections.
 - Never infer unavailable evidence or usage metadata from citation content.
+- Keep exact action bindings and approval authorization server-side; JavaScript
+  may submit only public CAS decision fields.
+- Never treat an approval decision as execution success; preserve explicit
+  resume and service-authoritative terminal state.

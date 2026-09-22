@@ -175,3 +175,7 @@
 ## [2026-09-22T06:58:41.957Z] lint
 - **Pages:** m0-foundation.md, m1-enterprise-harness.md, m2-deterministic-loop.md, m3-rig-model-adapter.md, m4-openai-compatible-gateway.md, m5-typed-action-planning.md, m6-approval-and-containment-boundary.md
 - **Summary:** Lint: 7 issues (0 orphan, 7 stale, 0 broken, 0 contradictions)
+
+## [2026-09-22] update
+- **Pages:** enterprise-local-agent-milestone-index.md, m16-desktop-foundation.md, index.md
+- **Summary:** Added M16.5 durable LocalWrite approval UX, narrow Tauri decision command and ACL, restart-safe Waiting behavior, explicit resume, and closure verification

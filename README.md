@@ -406,7 +406,8 @@ The Tauri Rust layer owns `LocalServiceClient`. It connects through the local
 Unix socket where supported or an explicitly configured authenticated numeric-
 loopback fallback. Transport credentials never enter JavaScript. The WebView
 can invoke only named typed commands for service health, cached readiness,
-build/version information, and the reviewed ReadOnly conversation lifecycle.
+build/version information, and the reviewed ReadOnly and LocalWrite approval
+lifecycles.
 It has no filesystem, shell, generic HTTP, SQL, model, MCP, persistence, or
 containment capability, and native window decorations remain enabled.
 
@@ -455,6 +456,25 @@ emits separate approximately 155 KiB and 6 KiB chunks and reduces the initial
 JavaScript chunk to approximately 544 KiB. Evidence count is shown as
 `Not exposed` because the current `ServiceEventV2` does not carry it; the UI
 does not substitute citation count or infer unavailable metadata.
+
+M16.5 exposes the existing M10/M15 durable LocalWrite flow without changing
+its authority. The desktop may start only the fixed
+`enterprise-engineering-localwrite-v1` workflow, discover durable Waiting
+records, request the trusted bounded approval preview, submit Approve or Deny,
+explicitly resume a decided run, or abort a Waiting run. The inline approval
+surface displays only operation, workspace-relative target, and content byte
+count. It never displays file content, raw model output, action arguments,
+capsules, `ActionDigest`, or internal tool bindings.
+
+Approve and Deny use the explicit `approval_submit_decision` Tauri command.
+JavaScript supplies only session/run/wait addressing, expected row version,
+and the public decision; the Rust bridge maps that to the fixed M15 service
+approval endpoint. All exact M10 action bindings, identity authorization, CAS
+validation, policy, required audit, and M6.1 containment remain server-side.
+Approval does not execute automatically: the user must explicitly resume the
+same durable run. Deny and abort execute no tool, stale or unauthorized
+decisions fail closed, and restart reconstruction comes from service state
+rather than browser storage.
 
 ## Deterministic demonstration
 
