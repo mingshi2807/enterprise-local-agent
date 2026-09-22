@@ -4,6 +4,8 @@ fn main() {
         "service_readiness",
         "service_version",
         "conversation_create_session",
+        "conversation_list_sessions",
+        "conversation_list_runs",
         "conversation_start_readonly_run",
         "conversation_start_localwrite_run",
         "conversation_run_status",

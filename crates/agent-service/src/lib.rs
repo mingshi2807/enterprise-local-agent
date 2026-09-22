@@ -13,16 +13,16 @@ use std::{
 use agent_core::{AgentEvent, AgentEventKind, DurableApprovalOutcome, RunOutcome};
 pub use agent_core::{DurableApprovalWaitId, EventSequence, RunId, SessionId};
 use agent_harness::{
-    DurableApprovalStatus, DurableApprovalView, DurableRunPage, DurableWaitingPage,
-    ExecutionHarness, MAX_READ_PAGE_ITEMS, PersistencePortError, RecoveredRun, RecoveredWaitingRun,
-    RecoveryContract, RecoveryDisposition, RunCancellationHandle, RunContext, RunPageCursor,
-    RunReadPort,
+    DurableApprovalStatus, DurableApprovalView, DurableRunPage, DurableRunSummary,
+    DurableWaitingPage, ExecutionHarness, MAX_READ_PAGE_ITEMS, PersistencePortError, RecoveredRun,
+    RecoveredWaitingRun, RecoveryContract, RecoveryDisposition, RunCancellationHandle, RunContext,
+    RunPageCursor, RunReadPort,
 };
 pub use agent_harness::{RunKey, WaitingPageCursor};
 use agent_identity::{
     AuthorizationAction, AuthorizationDecision, AuthorizationResource, DurableRunAuthorization,
     SecurityAuditEvent, SecurityAuditPhase, SecurityAuditPort, ServiceAuthorizationPolicy,
-    SessionOwnershipPort, SessionOwnershipRecord, VerifiedPrincipal,
+    SessionOwnershipPort, SessionOwnershipRecord, SessionPageCursor, VerifiedPrincipal,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -129,6 +129,41 @@ pub struct RunView {
     pub workflow_id: Option<WorkflowId>,
     pub result: Option<ApplicationResultV1>,
     pub duration_millis: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunHistoryItemV1 {
+    pub run_id: RunId,
+    pub disposition: RunDispositionV1,
+    pub last_sequence: Option<u64>,
+    pub outcome: Option<RunOutcomeV1>,
+    pub workflow_id: Option<WorkflowId>,
+    pub started_at_unix_millis: Option<u64>,
+    pub result_available: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunHistoryPageV1 {
+    pub items: Vec<RunHistoryItemV1>,
+    pub next_run_id: Option<RunId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationSummaryV1 {
+    pub session_id: SessionId,
+    pub title: String,
+    pub last_activity_unix_millis: Option<u64>,
+    pub latest_run: Option<RunHistoryItemV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationPageV1 {
+    pub items: Vec<ConversationSummaryV1>,
+    pub next_session_id: Option<SessionId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -776,6 +811,88 @@ impl AgentService {
             .await
     }
 
+    pub async fn conversation_page(
+        &self,
+        principal: &VerifiedPrincipal,
+        after: Option<SessionPageCursor>,
+        limit: u16,
+    ) -> Result<ConversationPageV1, ServiceError> {
+        validate_read_limit(limit)?;
+        self.authorize(
+            principal,
+            AuthorizationAction::ListSessions,
+            AuthorizationResource::Global,
+        )?;
+        let page = self
+            .ownership
+            .list_sessions(principal.id(), after, limit)
+            .await?;
+        let mut items = Vec::with_capacity(page.items().len());
+        for session in page.items() {
+            if session.owner() != principal.id() {
+                return Err(ServiceError::Unauthorized);
+            }
+            let latest = self
+                .read
+                .list_session_runs(session.session_id(), None, 1)
+                .await?;
+            let latest_run = match latest.items().first() {
+                Some(summary) => Some(self.history_item(summary).await?),
+                None => None,
+            };
+            items.push(ConversationSummaryV1 {
+                session_id: session.session_id(),
+                title: conversation_title(session.session_id()),
+                last_activity_unix_millis: latest_run
+                    .as_ref()
+                    .and_then(|run| run.started_at_unix_millis),
+                latest_run,
+            });
+        }
+        Ok(ConversationPageV1 {
+            items,
+            next_session_id: page.next().map(SessionPageCursor::session_id),
+        })
+    }
+
+    pub async fn session_run_page(
+        &self,
+        principal: &VerifiedPrincipal,
+        session_id: SessionId,
+        after: Option<RunPageCursor>,
+        limit: u16,
+    ) -> Result<RunHistoryPageV1, ServiceError> {
+        validate_read_limit(limit)?;
+        let session = self
+            .ownership
+            .load_session(session_id)
+            .await?
+            .ok_or(ServiceError::NotFound)?;
+        self.authorize(
+            principal,
+            AuthorizationAction::ReadSessionHistory,
+            AuthorizationResource::OwnedSession {
+                owner: session.owner(),
+            },
+        )?;
+        let page = self
+            .read
+            .list_session_runs(session_id, after, limit)
+            .await?;
+        let mut items = Vec::with_capacity(page.items().len());
+        for summary in page.items() {
+            let authorization = summary.authorization().ok_or(ServiceError::LegacyUnowned)?;
+            if authorization.owner() != session.owner() {
+                return Err(ServiceError::Unauthorized);
+            }
+            items.push(self.history_item(summary).await?);
+        }
+        Ok(RunHistoryPageV1 {
+            items,
+            next_run_id: page.next().map(RunPageCursor::run_id),
+        })
+    }
+
     pub async fn cancel_active_run(
         &self,
         principal: &VerifiedPrincipal,
@@ -1237,6 +1354,40 @@ impl AgentService {
         }
         Ok(view)
     }
+
+    async fn history_item(
+        &self,
+        summary: &DurableRunSummary,
+    ) -> Result<RunHistoryItemV1, ServiceError> {
+        let key = summary.key();
+        let active = {
+            let runs = self.active.lock().await;
+            runs.get(&key.session_id())
+                .filter(|active| active.key == key)
+                .map(active_view)
+        };
+        let view = match active {
+            Some(view) => view,
+            None => {
+                self.view_for_disposition(self.harness.recover_run(key).await?)
+                    .await?
+            }
+        };
+        Ok(RunHistoryItemV1 {
+            run_id: view.run_id,
+            disposition: view.disposition,
+            last_sequence: view.last_sequence,
+            outcome: view.outcome,
+            workflow_id: view.workflow_id,
+            started_at_unix_millis: summary.started_at_unix_millis(),
+            result_available: view.result.is_some(),
+        })
+    }
+}
+
+fn conversation_title(session_id: SessionId) -> String {
+    let value = session_id.to_string();
+    format!("Conversation {}", &value[..8])
 }
 
 fn recovery_contract(disposition: &RecoveryDisposition) -> Option<RecoveryContract> {
@@ -1986,6 +2137,84 @@ mod tests {
             service.read_events(&stranger, key, None, 16).await,
             Err(ServiceError::Unauthorized)
         ));
+        assert!(matches!(
+            service.session_run_page(&stranger, session, None, 16).await,
+            Err(ServiceError::Unauthorized)
+        ));
+    }
+
+    #[tokio::test]
+    async fn conversation_history_is_owner_scoped_paginated_and_restart_safe() {
+        let (directory, service, _) = fixture(Duration::from_millis(20)).await;
+        let owner = test_principal();
+        let stranger = principal("other-user", &[PrincipalRole::User]);
+        let first = service.create_session(&owner).await.expect("first session");
+        let second = service
+            .create_session(&owner)
+            .await
+            .expect("second session");
+        let hidden = service
+            .create_session(&stranger)
+            .await
+            .expect("other session");
+        let run = service
+            .start_run(
+                &owner,
+                first,
+                Uuid::new_v4(),
+                &WorkflowId::new("test").expect("workflow"),
+                RunInput::new(b"history".to_vec()).expect("input"),
+            )
+            .await
+            .expect("start");
+
+        let page = service
+            .conversation_page(&owner, None, 1)
+            .await
+            .expect("first page");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].session_id, second);
+        let cursor = page.next_session_id.expect("second owner session");
+        let tail = service
+            .conversation_page(&owner, Some(SessionPageCursor::new(cursor)), 1)
+            .await
+            .expect("second page");
+        assert_eq!(tail.items.len(), 1);
+        assert_eq!(tail.items[0].session_id, first);
+        assert_eq!(tail.next_session_id, None);
+        assert!(
+            service
+                .conversation_page(&owner, None, 8)
+                .await
+                .expect("owner page")
+                .items
+                .iter()
+                .all(|item| item.session_id != hidden)
+        );
+
+        let runs = service
+            .session_run_page(&owner, first, None, 8)
+            .await
+            .expect("run history");
+        assert_eq!(runs.items.len(), 1);
+        assert_eq!(runs.items[0].run_id, run.run_id);
+        assert_eq!(runs.next_run_id, None);
+
+        drop(service);
+        let reopened_store = Arc::new(
+            SqliteRunPersistence::open(directory.path().join("runs.sqlite3"))
+                .await
+                .expect("reopen store"),
+        );
+        assert_eq!(
+            reopened_store
+                .list_sessions(owner.id(), None, 8)
+                .await
+                .expect("durable sessions")
+                .items()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]

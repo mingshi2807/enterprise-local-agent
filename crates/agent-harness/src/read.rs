@@ -1,6 +1,6 @@
 use std::{future::Future, pin::Pin};
 
-use agent_core::{AgentEvent, DurableApprovalWaitId, EventSequence, RunId};
+use agent_core::{AgentEvent, DurableApprovalWaitId, EventSequence, RunId, SessionId};
 use agent_identity::DurableRunAuthorization;
 
 use crate::{DurableApprovalStatus, PersistencePortError, RecoveryContract, RunKey};
@@ -54,6 +54,7 @@ pub struct DurableRunSummary {
     key: RunKey,
     recovery_contract: RecoveryContract,
     last_sequence: Option<EventSequence>,
+    started_at_unix_millis: Option<u64>,
     terminal: bool,
     authorization: Option<DurableRunAuthorization>,
 }
@@ -64,6 +65,7 @@ impl DurableRunSummary {
         key: RunKey,
         recovery_contract: RecoveryContract,
         last_sequence: Option<EventSequence>,
+        started_at_unix_millis: Option<u64>,
         terminal: bool,
         authorization: Option<DurableRunAuthorization>,
     ) -> Self {
@@ -71,6 +73,7 @@ impl DurableRunSummary {
             key,
             recovery_contract,
             last_sequence,
+            started_at_unix_millis,
             terminal,
             authorization,
         }
@@ -87,6 +90,10 @@ impl DurableRunSummary {
     #[must_use]
     pub const fn last_sequence(&self) -> Option<EventSequence> {
         self.last_sequence
+    }
+    #[must_use]
+    pub const fn started_at_unix_millis(&self) -> Option<u64> {
+        self.started_at_unix_millis
     }
     #[must_use]
     pub const fn terminal(&self) -> bool {
@@ -209,6 +216,12 @@ pub trait RunReadPort: Send + Sync {
     ) -> ReadFuture<'a, Result<Option<DurableRunSummary>, PersistencePortError>>;
     fn list_runs<'a>(
         &'a self,
+        after: Option<RunPageCursor>,
+        limit: u16,
+    ) -> ReadFuture<'a, Result<DurableRunPage, PersistencePortError>>;
+    fn list_session_runs<'a>(
+        &'a self,
+        session_id: SessionId,
         after: Option<RunPageCursor>,
         limit: u16,
     ) -> ReadFuture<'a, Result<DurableRunPage, PersistencePortError>>;

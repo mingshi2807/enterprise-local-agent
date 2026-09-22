@@ -107,6 +107,20 @@ export function RunInspector({ state, readiness, version, conversation, nowMilli
                 {details.modelIds.map((id, index) => <CopyableId key={id} label={`Model ${index + 1}`} value={id} />)}
               </div>
             </section>
+
+            {conversation !== null && conversation.runHistory.length > 1 ? (
+              <section className="border-b border-border px-3 py-3" aria-labelledby="history-title">
+                <h3 id="history-title" className="inspector-heading">Previous runs</h3>
+                <ol className="mt-2 space-y-1">
+                  {conversation.runHistory.slice(1).map((run) => (
+                    <li key={run.run_id} className="flex items-center justify-between gap-3 py-1 text-[11px]">
+                      <code className="truncate text-muted" title={run.run_id}>{run.run_id.slice(0, 8)}</code>
+                      <span className="shrink-0 capitalize text-secondary">{run.disposition.replaceAll("_", " ")}</span>
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            ) : null}
           </>
         )}
 

@@ -8,6 +8,7 @@ use thiserror::Error;
 
 pub const MAX_PRINCIPAL_ROLES: usize = 3;
 pub const MAX_WORKFLOW_ID_BYTES: usize = 96;
+pub const MAX_SESSION_PAGE_ITEMS: u16 = 256;
 pub const AUTHORIZATION_POLICY_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -104,6 +105,8 @@ pub enum ApprovalSeparation {
 #[serde(rename_all = "snake_case")]
 pub enum AuthorizationAction {
     CreateSession,
+    ListSessions,
+    ReadSessionHistory,
     StartWorkflow,
     ReadRun,
     ReadEvents,
@@ -120,6 +123,9 @@ pub enum AuthorizationAction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthorizationResource<'a> {
     Global,
+    OwnedSession {
+        owner: &'a PrincipalId,
+    },
     Workflow {
         workflow_id: &'a str,
     },
@@ -206,6 +212,10 @@ impl ServiceAuthorizationPolicy for DefaultDenyServiceAuthorizationPolicy {
 
         let granted = match (action, resource) {
             (A::CreateSession, R::Global) => principal.has_role(Role::User),
+            (A::ListSessions, R::Global) => principal.has_role(Role::User),
+            (A::ReadSessionHistory, R::OwnedSession { owner }) => {
+                principal.has_role(Role::User) && principal.id() == owner
+            }
             (A::StartWorkflow, R::Workflow { workflow_id }) => {
                 principal.has_role(Role::User) && self.workflow_allowed(workflow_id)
             }
@@ -333,6 +343,46 @@ pub struct SessionOwnershipRecord {
     owner: PrincipalId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionPageCursor {
+    session_id: SessionId,
+}
+
+impl SessionPageCursor {
+    #[must_use]
+    pub const fn new(session_id: SessionId) -> Self {
+        Self { session_id }
+    }
+
+    #[must_use]
+    pub const fn session_id(self) -> SessionId {
+        self.session_id
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionOwnershipPage {
+    items: Vec<SessionOwnershipRecord>,
+    next: Option<SessionPageCursor>,
+}
+
+impl SessionOwnershipPage {
+    #[must_use]
+    pub const fn new(items: Vec<SessionOwnershipRecord>, next: Option<SessionPageCursor>) -> Self {
+        Self { items, next }
+    }
+
+    #[must_use]
+    pub fn items(&self) -> &[SessionOwnershipRecord] {
+        &self.items
+    }
+
+    #[must_use]
+    pub const fn next(&self) -> Option<SessionPageCursor> {
+        self.next
+    }
+}
+
 impl SessionOwnershipRecord {
     #[must_use]
     pub const fn new(session_id: SessionId, owner: PrincipalId) -> Self {
@@ -359,6 +409,12 @@ pub trait SessionOwnershipPort: Send + Sync {
         &'a self,
         session_id: SessionId,
     ) -> IdentityFuture<'a, Result<Option<SessionOwnershipRecord>, IdentityStoreError>>;
+    fn list_sessions<'a>(
+        &'a self,
+        owner: &'a PrincipalId,
+        after: Option<SessionPageCursor>,
+        limit: u16,
+    ) -> IdentityFuture<'a, Result<SessionOwnershipPage, IdentityStoreError>>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

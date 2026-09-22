@@ -2051,3 +2051,57 @@
       - Tauri no-bundle build PASS.
       - Final full workspace test PASS.
       - No commit created.
+
+# M16.6 Implementation reporting
+
+• 1. Changed tree
+      - Service/read boundaries: agent-identity, agent-harness, agent-persistence-sqlite, agent-service, agent-service-http
+      - Desktop bridge and ACL: apps/agent-desktop/src-tauri
+      - Desktop history UX: React contracts, controller, sidebar, inspector, and tests
+
+  1. Service/history APIs
+      - Added owner-filtered, bounded session pagination.
+      - Added bounded run-history pagination per session.
+      - Added metadata-only conversation and run projections.
+      - SQLite remains hidden behind provider-neutral read ports.
+
+  2. Sidebar/history UX
+      - Replaced mock sidebar entries with durable service data.
+      - Shows latest status, activity time, Waiting, failure, and reconciliation indicators.
+      - Prior runs appear on demand in the inspector.
+      - Titles are deterministic; rename/archive were not added.
+
+  3. Restoration/reconnect flow
+      - Reconnect loads summaries first, then selected-session run metadata.
+      - Existing runs are polled from their durable cursor without creating another run.
+      - Available volatile results are displayed.
+      - Missing terminal results show Result unavailable; no regeneration occurs.
+
+  4. Waiting integration
+      - Durable Waiting sessions reappear through the existing M16.5 approval flow.
+      - Approval state remains server-authoritative.
+      - No approval or conversation payload is stored in browser storage.
+
+  5. Performance strategy
+      - Session history is bounded to four 64-item pages.
+      - Run details and events load only for the selected conversation.
+      - Inspector and Markdown rendering remain lazy-loaded.
+
+  6. Tests
+      - Frontend: typecheck, ESLint, production build, 26 tests passed.
+      - Desktop Rust: 8 tests passed.
+      - Targeted identity/persistence/service/HTTP tests passed.
+      - Strict workspace Clippy and formatting passed.
+      - Tauri no-bundle application build passed.
+      - Workspace regression suite passes when excluding agent-mcp-adapters.
+
+  7. Screenshots
+      - Not captured.
+
+  8. Deviations
+      - Full workspace testing remains blocked by the pre-existing M11 termination_reaps_process_group_descendant failure. It reproduces in isolation in the established container; M16.6 does not modify MCP
+        lifecycle code.
+
+      - Terminal application results remain volatile across service restart by design.
+      - No rename or archive operation was added.
+      - No commit was created.

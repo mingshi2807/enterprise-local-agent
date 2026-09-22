@@ -2,8 +2,9 @@ mod service_client;
 
 use serde::Serialize;
 use service_client::{
-    ApprovalDecisionV1, BuildInfoV1, DesktopApprovalPreviewV1, HealthV1, LocalServiceClient,
-    ReadinessSnapshotV1, RunViewV1, ServiceEventV2, SessionV1, WaitingPageV1,
+    ApprovalDecisionV1, BuildInfoV1, ConversationPageV1, DesktopApprovalPreviewV1, HealthV1,
+    LocalServiceClient, ReadinessSnapshotV1, RunHistoryPageV1, RunViewV1, ServiceEventV2,
+    SessionV1, WaitingPageV1,
 };
 use tauri::State;
 
@@ -44,6 +45,29 @@ async fn conversation_create_session(
     client: State<'_, LocalServiceClient>,
 ) -> Result<SessionV1, DesktopCommandError> {
     client.create_session().await.map_err(Into::into)
+}
+
+#[tauri::command]
+async fn conversation_list_sessions(
+    client: State<'_, LocalServiceClient>,
+    after_session_id: Option<String>,
+) -> Result<ConversationPageV1, DesktopCommandError> {
+    client
+        .list_sessions(after_session_id.as_deref())
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn conversation_list_runs(
+    client: State<'_, LocalServiceClient>,
+    session_id: String,
+    after_run_id: Option<String>,
+) -> Result<RunHistoryPageV1, DesktopCommandError> {
+    client
+        .list_session_runs(&session_id, after_run_id.as_deref())
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -186,6 +210,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             service_readiness,
             service_version,
             conversation_create_session,
+            conversation_list_sessions,
+            conversation_list_runs,
             conversation_start_readonly_run,
             conversation_start_localwrite_run,
             conversation_run_status,

@@ -9,6 +9,8 @@
     "allow-service-readiness",
     "allow-service-version",
     "allow-conversation-create-session",
+    "allow-conversation-list-sessions",
+    "allow-conversation-list-runs",
     "allow-conversation-start-readonly-run",
     "allow-conversation-start-localwrite-run",
     "allow-conversation-run-status",

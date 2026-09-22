@@ -11,6 +11,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 const sessionId = "11111111-1111-4111-8111-111111111111";
 const runId = "22222222-2222-4222-8222-222222222222";
+const previousRunId = "55555555-5555-4555-8555-555555555555";
 const workflow = "enterprise-engineering-readonly-v1";
 const localWriteWorkflow = "enterprise-engineering-localwrite-v1";
 const waitId = "33333333-3333-4333-8333-333333333333";
@@ -36,6 +37,8 @@ function installServiceMock(handler?: (command: string, args?: Record<string, un
     if (command === "service_readiness") return Promise.resolve({ version: 1, overall: "ready", dependencies: [{ dependency: "knowledge", status: "ready", code: "ready", checked_unix_seconds: 1 }], workflows: [{ workflow, enabled: true, required: true, status: "ready" }, { workflow: localWriteWorkflow, enabled: true, required: false, status: "ready" }] });
     if (command === "service_version") return Promise.resolve({ application: "enterprise-local-agent", version: "0.1.0", git_identity: null, deployment_fingerprint: "test", config_schema_version: 2, store_schema_version: 2, event_schema_version: 9, checkpoint_schema_version: 4 });
     if (command === "conversation_create_session") return Promise.resolve({ session_id: sessionId });
+    if (command === "conversation_list_sessions") return Promise.resolve({ items: [], next_session_id: null });
+    if (command === "conversation_list_runs") return Promise.resolve({ items: [], next_run_id: null });
     if (command === "conversation_start_readonly_run") return Promise.resolve(runView());
     if (command === "conversation_read_events") return Promise.resolve([]);
     if (command === "conversation_run_status") return Promise.resolve(runView());
@@ -181,8 +184,85 @@ describe("App conversation", () => {
     });
     renderApp();
     await submit("Restarted run");
-    expect(await screen.findByText("This run completed, but its answer is no longer available after restart.")).toBeInTheDocument();
+    expect(await screen.findByText("Result unavailable")).toBeInTheDocument();
     expect(invoke.mock.calls.filter(([command]) => command === "conversation_start_readonly_run")).toHaveLength(1);
+  });
+
+  it("restores durable conversation history without starting a duplicate run", async () => {
+    installServiceMock((command) => {
+      if (command === "conversation_list_sessions") return {
+        items: [{
+          session_id: sessionId,
+          title: "Conversation 11111111",
+          last_activity_unix_millis: 1_000,
+          latest_run: { run_id: runId, disposition: "completed", last_sequence: 0, outcome: "completed", workflow_id: workflow, started_at_unix_millis: 1_000, result_available: true },
+        }],
+        next_session_id: null,
+      };
+      if (command === "conversation_list_runs") return {
+        items: [
+          { run_id: runId, disposition: "completed", last_sequence: 0, outcome: "completed", workflow_id: workflow, started_at_unix_millis: 1_000, result_available: true },
+          { run_id: previousRunId, disposition: "failed", last_sequence: 0, outcome: "failed", workflow_id: workflow, started_at_unix_millis: 900, result_available: false },
+        ],
+        next_run_id: null,
+      };
+      if (command === "conversation_read_events") return [event(0, "graph", "completed")];
+      if (command === "conversation_run_status") return runView({ disposition: "completed", last_sequence: 0, outcome: "completed", result: { kind: "final_answer", answer: "Restored durable answer", citations: [] } });
+      return undefined;
+    });
+    renderApp();
+    expect((await screen.findAllByText("Conversation 11111111")).length).toBeGreaterThanOrEqual(1);
+    expect(await screen.findByText("Restored durable answer")).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command.startsWith("conversation_start_"))).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Show inspector" }));
+    expect(await screen.findByRole("heading", { name: "Previous runs" })).toBeInTheDocument();
+    expect(screen.getByText(previousRunId.slice(0, 8))).toBeInTheDocument();
+  });
+
+  it("paginates session summaries and switches conversations lazily", async () => {
+    const secondSessionId = "44444444-4444-4444-8444-444444444444";
+    installServiceMock((command, args) => {
+      if (command === "conversation_list_sessions") {
+        return args?.afterSessionId === null
+          ? { items: [{ session_id: sessionId, title: "First conversation", last_activity_unix_millis: null, latest_run: null }], next_session_id: secondSessionId }
+          : { items: [{ session_id: secondSessionId, title: "Second conversation", last_activity_unix_millis: null, latest_run: null }], next_session_id: null };
+      }
+      if (command === "conversation_list_runs") return { items: [], next_run_id: null };
+      return undefined;
+    });
+    renderApp();
+    expect((await screen.findAllByText("First conversation")).length).toBeGreaterThanOrEqual(1);
+    expect((await screen.findAllByText("Second conversation")).length).toBeGreaterThanOrEqual(1);
+    fireEvent.click(screen.getByRole("button", { name: /Second conversation/ }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("conversation_list_runs", {
+      sessionId: secondSessionId,
+      afterRunId: null,
+    }));
+  });
+
+  it("restores a completed run without a volatile answer as Result unavailable", async () => {
+    installServiceMock((command) => {
+      if (command === "conversation_list_sessions") return {
+        items: [{
+          session_id: sessionId,
+          title: "Restarted conversation",
+          last_activity_unix_millis: 1_000,
+          latest_run: { run_id: runId, disposition: "completed", last_sequence: 0, outcome: "completed", workflow_id: workflow, started_at_unix_millis: 1_000, result_available: false },
+        }],
+        next_session_id: null,
+      };
+      if (command === "conversation_list_runs") return {
+        items: [{ run_id: runId, disposition: "completed", last_sequence: 0, outcome: "completed", workflow_id: workflow, started_at_unix_millis: 1_000, result_available: false }],
+        next_run_id: null,
+      };
+      if (command === "conversation_read_events") return [event(0, "graph", "completed")];
+      if (command === "conversation_run_status") return runView({ disposition: "completed", last_sequence: 0, outcome: "completed", result: null });
+      return undefined;
+    });
+    renderApp();
+    expect(await screen.findByText("Result unavailable")).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command.startsWith("conversation_start_"))).toBe(false);
+    expect(window.localStorage.length).toBe(0);
   });
 
   it("reports a malformed terminal model result without exposing raw output", async () => {

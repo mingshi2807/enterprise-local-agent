@@ -165,6 +165,41 @@ pub struct RunViewV1 {
     duration_millis: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunHistoryItemV1 {
+    run_id: String,
+    disposition: RunDispositionV1,
+    last_sequence: Option<u64>,
+    outcome: Option<RunOutcomeV1>,
+    workflow_id: Option<String>,
+    started_at_unix_millis: Option<u64>,
+    result_available: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunHistoryPageV1 {
+    items: Vec<RunHistoryItemV1>,
+    next_run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationSummaryV1 {
+    session_id: String,
+    title: String,
+    last_activity_unix_millis: Option<u64>,
+    latest_run: Option<RunHistoryItemV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationPageV1 {
+    items: Vec<ConversationSummaryV1>,
+    next_session_id: Option<String>,
+}
+
 impl fmt::Debug for RunViewV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -400,6 +435,43 @@ impl BoundedResponse for RunViewV1 {
     }
 }
 
+impl BoundedResponse for RunHistoryPageV1 {
+    fn validate(&self) -> Result<(), LocalServiceError> {
+        if self.items.len() > MAX_ITEMS
+            || self.items.iter().any(|item| !valid_history_item(item))
+            || self
+                .next_run_id
+                .as_deref()
+                .is_some_and(|id| !valid_uuid(id))
+        {
+            return Err(LocalServiceError::InvalidResponse);
+        }
+        Ok(())
+    }
+}
+
+impl BoundedResponse for ConversationPageV1 {
+    fn validate(&self) -> Result<(), LocalServiceError> {
+        if self.items.len() > MAX_ITEMS
+            || self.items.iter().any(|item| {
+                !valid_uuid(&item.session_id)
+                    || !bounded_text(&item.title)
+                    || item
+                        .latest_run
+                        .as_ref()
+                        .is_some_and(|run| !valid_history_item(run))
+            })
+            || self
+                .next_session_id
+                .as_deref()
+                .is_some_and(|id| !valid_uuid(id))
+        {
+            return Err(LocalServiceError::InvalidResponse);
+        }
+        Ok(())
+    }
+}
+
 impl BoundedResponse for Vec<ServiceEventV2> {
     fn validate(&self) -> Result<(), LocalServiceError> {
         if self.len() > MAX_ITEMS
@@ -492,6 +564,13 @@ fn valid_application_result(result: &ApplicationResultV1) -> bool {
         ApplicationResultV1::LocalWriteCompleted { tool_call_id } => valid_uuid(tool_call_id),
         ApplicationResultV1::ApprovalDenied => true,
     }
+}
+
+fn valid_history_item(item: &RunHistoryItemV1) -> bool {
+    valid_uuid(&item.run_id)
+        && item.workflow_id.as_deref().is_none_or(|workflow| {
+            workflow == READONLY_WORKFLOW_ID || workflow == LOCALWRITE_WORKFLOW_ID
+        })
 }
 
 fn bounded_citation_text(value: &str) -> bool {
@@ -692,6 +771,37 @@ impl LocalServiceClient {
             .await
             .map_err(|_| LocalServiceError::Unavailable)?;
         self.decode_json(response, StatusCode::OK).await
+    }
+
+    pub async fn list_sessions(
+        &self,
+        after_session_id: Option<&str>,
+    ) -> Result<ConversationPageV1, LocalServiceError> {
+        if after_session_id.is_some_and(|id| !valid_uuid(id)) {
+            return Err(LocalServiceError::InvalidRequest);
+        }
+        let path = after_session_id.map_or_else(
+            || format!("v1/sessions?limit={MAX_ITEMS}"),
+            |cursor| format!("v1/sessions?limit={MAX_ITEMS}&after_session_id={cursor}"),
+        );
+        self.get(&path).await
+    }
+
+    pub async fn list_session_runs(
+        &self,
+        session_id: &str,
+        after_run_id: Option<&str>,
+    ) -> Result<RunHistoryPageV1, LocalServiceError> {
+        if !valid_uuid(session_id) || after_run_id.is_some_and(|id| !valid_uuid(id)) {
+            return Err(LocalServiceError::InvalidRequest);
+        }
+        let path = after_run_id.map_or_else(
+            || format!("v1/sessions/{session_id}/runs?limit={MAX_ITEMS}"),
+            |cursor| {
+                format!("v1/sessions/{session_id}/runs?limit={MAX_ITEMS}&after_run_id={cursor}")
+            },
+        );
+        self.get(&path).await
     }
 
     pub async fn start_readonly_run(
@@ -1261,6 +1371,18 @@ mod tests {
         assert!(
             serde_json::from_str::<RunViewV1>(
                 r#"{"session_id":"11111111-1111-4111-8111-111111111111","run_id":"22222222-2222-4222-8222-222222222222","disposition":"running","last_sequence":null,"outcome":null,"workflow_id":"enterprise-engineering-readonly-v1","result":null,"duration_millis":null,"prompt":"secret"}"#,
+            )
+            .is_err()
+        );
+
+        let page = serde_json::from_str::<ConversationPageV1>(
+            r#"{"items":[{"session_id":"11111111-1111-4111-8111-111111111111","title":"Conversation 11111111","last_activity_unix_millis":42,"latest_run":{"run_id":"22222222-2222-4222-8222-222222222222","disposition":"completed","last_sequence":2,"outcome":"completed","workflow_id":"enterprise-engineering-readonly-v1","started_at_unix_millis":42,"result_available":false}}],"next_session_id":null}"#,
+        )
+        .unwrap_or_else(|error| panic!("decode conversation page: {error}"));
+        assert!(page.validate().is_ok());
+        assert!(
+            serde_json::from_str::<ConversationPageV1>(
+                r#"{"items":[],"next_session_id":null,"prompt":"secret"}"#,
             )
             .is_err()
         );

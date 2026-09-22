@@ -4,9 +4,11 @@ import type { z } from "zod";
 import {
   approvalPreviewSchema,
   buildInfoSchema,
+  conversationPageSchema,
   healthSchema,
   readinessSchema,
   runViewSchema,
+  runHistoryPageSchema,
   serviceEventsSchema,
   sessionSchema,
   waitingPageSchema,
@@ -22,6 +24,10 @@ export const localService = {
   readiness: () => invokeAndValidate("service_readiness", readinessSchema),
   version: () => invokeAndValidate("service_version", buildInfoSchema),
   createSession: () => invokeAndValidate("conversation_create_session", sessionSchema),
+  listSessions: (afterSessionId: string | null) =>
+    invokeAndValidate("conversation_list_sessions", conversationPageSchema, { afterSessionId }),
+  listRuns: (sessionId: string, afterRunId: string | null) =>
+    invokeAndValidate("conversation_list_runs", runHistoryPageSchema, { sessionId, afterRunId }),
   startReadonlyRun: (sessionId: string, startRequestId: string, input: string) =>
     invokeAndValidate("conversation_start_readonly_run", runViewSchema, {
       sessionId,

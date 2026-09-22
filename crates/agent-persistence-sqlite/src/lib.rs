@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use agent_core::{
     AgentEvent, AgentEventKind, CURRENT_EVENT_SCHEMA_VERSION, DurableApprovalOutcome,
-    DurableApprovalWaitId, EventSequence, RunId, RunStatus, SessionId,
+    DurableApprovalWaitId, EventSequence, PrincipalId, RunId, RunStatus, SessionId,
 };
 use agent_harness::{
     AppendTransition, CURRENT_CHECKPOINT_SCHEMA_VERSION, CURRENT_STORE_SCHEMA_VERSION,
@@ -17,7 +17,8 @@ use agent_harness::{
     RunPageCursor, RunPersistencePort, RunReadPort, RunRecord, WaitingPageCursor,
 };
 use agent_identity::{
-    IdentityFuture, IdentityStoreError, SessionOwnershipPort, SessionOwnershipRecord,
+    IdentityFuture, IdentityStoreError, MAX_SESSION_PAGE_ITEMS, SessionOwnershipPage,
+    SessionOwnershipPort, SessionOwnershipRecord, SessionPageCursor,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, backup::Backup, params};
 use sha2::{Digest, Sha256};
@@ -26,6 +27,7 @@ use tokio::sync::Semaphore;
 const APPLICATION_ID: i32 = 0x454c_4137;
 type StoredRunRow = (String, Vec<u8>, Vec<u8>, Option<Vec<u8>>, i64);
 type ReadRunRow = (String, String, Vec<u8>, Vec<u8>, Option<Vec<u8>>, i64);
+type StoredEventRow = (Vec<u8>, u16, Vec<u8>, Vec<u8>);
 type StoredApprovalRow = (String, Vec<u8>, Vec<u8>, String, Vec<u8>, i64, i64);
 
 #[derive(Clone, Debug)]
@@ -512,6 +514,29 @@ impl SessionOwnershipPort for SqliteRunPersistence {
                 .map_err(|_| IdentityStoreError::Unavailable)?
         })
     }
+
+    fn list_sessions<'a>(
+        &'a self,
+        owner: &'a PrincipalId,
+        after: Option<SessionPageCursor>,
+        limit: u16,
+    ) -> IdentityFuture<'a, Result<SessionOwnershipPage, IdentityStoreError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        let owner = owner.clone();
+        Box::pin(async move {
+            if limit == 0 || limit > MAX_SESSION_PAGE_ITEMS {
+                return Err(IdentityStoreError::Conflict);
+            }
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| IdentityStoreError::Unavailable)?;
+            tokio::task::spawn_blocking(move || list_session_ownership(&path, &owner, after, limit))
+                .await
+                .map_err(|_| IdentityStoreError::Unavailable)?
+        })
+    }
 }
 
 impl RunReadPort for SqliteRunPersistence {
@@ -546,6 +571,26 @@ impl RunReadPort for SqliteRunPersistence {
                 .await
                 .map_err(|_| PersistencePortError::Unavailable)?;
             tokio::task::spawn_blocking(move || list_runs(&path, after, limit))
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?
+        })
+    }
+
+    fn list_session_runs<'a>(
+        &'a self,
+        session_id: SessionId,
+        after: Option<RunPageCursor>,
+        limit: u16,
+    ) -> ReadFuture<'a, Result<DurableRunPage, PersistencePortError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        Box::pin(async move {
+            validate_page_limit(limit)?;
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| PersistencePortError::Unavailable)?;
+            tokio::task::spawn_blocking(move || list_session_runs(&path, session_id, after, limit))
                 .await
                 .map_err(|_| PersistencePortError::Unavailable)?
         })
@@ -632,6 +677,7 @@ fn find_run(path: &Path, key: RunKey) -> Result<Option<DurableRunSummary>, Persi
         key,
         record.recovery_contract(),
         decode_optional_sequence(last_sequence.as_deref())?,
+        run_started_at(&connection, key)?,
         terminal == 1,
         record.authorization().cloned(),
     )))
@@ -691,6 +737,7 @@ fn list_runs(
             record.key(),
             record.recovery_contract(),
             decode_optional_sequence(last_sequence.as_deref())?,
+            run_started_at(&connection, record.key())?,
             terminal == 1,
             record.authorization().cloned(),
         ));
@@ -703,6 +750,123 @@ fn list_runs(
         })
         .flatten();
     Ok(DurableRunPage::new(items, next))
+}
+
+fn list_session_runs(
+    path: &Path,
+    session_id: SessionId,
+    after: Option<RunPageCursor>,
+    limit: u16,
+) -> Result<DurableRunPage, PersistencePortError> {
+    let connection = Connection::open(path).map_err(map_unavailable)?;
+    configure(&connection)?;
+    validate_store_identity(&connection)?;
+    let before_rowid = match after {
+        Some(cursor) => connection
+            .query_row(
+                "SELECT rowid FROM runs WHERE run_id=?1 AND session_id=?2",
+                params![cursor.run_id().to_string(), session_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(map_failed)?
+            .ok_or(PersistencePortError::Conflict)?,
+        None => i64::MAX,
+    };
+    let mut statement = connection
+        .prepare(
+            "SELECT run_id,session_id,record,record_checksum,last_sequence,terminal FROM runs
+             WHERE session_id=?1 AND rowid<?2 ORDER BY rowid DESC LIMIT ?3",
+        )
+        .map_err(map_failed)?;
+    let rows: Vec<ReadRunRow> = statement
+        .query_map(
+            params![session_id.to_string(), before_rowid, i64::from(limit) + 1],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .map_err(map_failed)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_failed)?;
+    let has_more = rows.len() > usize::from(limit);
+    let mut items = Vec::with_capacity(rows.len().min(usize::from(limit)));
+    for (run_id, stored_session_id, bytes, stored_checksum, last_sequence, terminal) in
+        rows.into_iter().take(usize::from(limit))
+    {
+        if checksum(&bytes) != stored_checksum || !matches!(terminal, 0 | 1) {
+            return Err(PersistencePortError::Corrupt);
+        }
+        let record: RunRecord = decode(&bytes)?;
+        if record.key().run_id().to_string() != run_id
+            || record.key().session_id().to_string() != stored_session_id
+            || record.key().session_id() != session_id
+        {
+            return Err(PersistencePortError::Corrupt);
+        }
+        if record.store_schema_version() != CURRENT_STORE_SCHEMA_VERSION
+            || record.checkpoint_schema_version() != CURRENT_CHECKPOINT_SCHEMA_VERSION
+        {
+            return Err(PersistencePortError::UnsupportedVersion);
+        }
+        items.push(DurableRunSummary::new(
+            record.key(),
+            record.recovery_contract(),
+            decode_optional_sequence(last_sequence.as_deref())?,
+            run_started_at(&connection, record.key())?,
+            terminal == 1,
+            record.authorization().cloned(),
+        ));
+    }
+    let next = has_more
+        .then(|| {
+            items
+                .last()
+                .map(|item| RunPageCursor::new(item.key().run_id()))
+        })
+        .flatten();
+    Ok(DurableRunPage::new(items, next))
+}
+
+fn run_started_at(
+    connection: &Connection,
+    key: RunKey,
+) -> Result<Option<u64>, PersistencePortError> {
+    let stored: Option<StoredEventRow> = connection
+        .query_row(
+            "SELECT sequence,event_schema_version,payload,checksum FROM events
+             WHERE run_id=?1 ORDER BY sequence LIMIT 1",
+            [key.run_id().to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(map_failed)?;
+    let Some((sequence, event_version, bytes, stored_checksum)) = stored else {
+        return Ok(None);
+    };
+    if event_version != CURRENT_EVENT_SCHEMA_VERSION.get() || checksum(&bytes) != stored_checksum {
+        return Err(PersistencePortError::Corrupt);
+    }
+    let event: AgentEvent = decode(&bytes)?;
+    if event.run_id() != key.run_id()
+        || event.sequence().get() != 0
+        || sequence != encode_sequence(event.sequence())
+    {
+        return Err(PersistencePortError::Corrupt);
+    }
+    match event.kind() {
+        AgentEventKind::RunStarted {
+            started_at_unix_millis,
+        } => Ok(Some(*started_at_unix_millis)),
+        _ => Err(PersistencePortError::Corrupt),
+    }
 }
 
 fn read_events(
@@ -954,6 +1118,68 @@ fn load_session_ownership(
         return Err(IdentityStoreError::Corrupt);
     }
     Ok(Some(record))
+}
+
+fn list_session_ownership(
+    path: &Path,
+    owner: &PrincipalId,
+    after: Option<SessionPageCursor>,
+    limit: u16,
+) -> Result<SessionOwnershipPage, IdentityStoreError> {
+    let connection = Connection::open(path).map_err(|_| IdentityStoreError::Unavailable)?;
+    configure(&connection).map_err(map_identity_error)?;
+    validate_store_identity(&connection).map_err(map_identity_error)?;
+    let before_rowid = match after {
+        Some(cursor) => connection
+            .query_row(
+                "SELECT rowid FROM service_sessions WHERE session_id=?1",
+                [cursor.session_id().to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|_| IdentityStoreError::Unavailable)?
+            .ok_or(IdentityStoreError::Conflict)?,
+        None => i64::MAX,
+    };
+    let mut statement = connection
+        .prepare(
+            "SELECT session_id,record,checksum FROM service_sessions
+             WHERE rowid<?1 ORDER BY rowid DESC",
+        )
+        .map_err(|_| IdentityStoreError::Unavailable)?;
+    let mut rows = statement
+        .query([before_rowid])
+        .map_err(|_| IdentityStoreError::Unavailable)?;
+    let mut matching = Vec::with_capacity(usize::from(limit) + 1);
+    while let Some(row) = rows.next().map_err(|_| IdentityStoreError::Unavailable)? {
+        let session_id: String = row.get(0).map_err(|_| IdentityStoreError::Corrupt)?;
+        let bytes: Vec<u8> = row.get(1).map_err(|_| IdentityStoreError::Corrupt)?;
+        let stored_checksum: Vec<u8> = row.get(2).map_err(|_| IdentityStoreError::Corrupt)?;
+        if checksum(&bytes) != stored_checksum {
+            return Err(IdentityStoreError::Corrupt);
+        }
+        let record: SessionOwnershipRecord =
+            serde_json::from_slice(&bytes).map_err(|_| IdentityStoreError::Corrupt)?;
+        if record.session_id().to_string() != session_id {
+            return Err(IdentityStoreError::Corrupt);
+        }
+        if record.owner() == owner {
+            matching.push(record);
+            if matching.len() > usize::from(limit) {
+                break;
+            }
+        }
+    }
+    let has_more = matching.len() > usize::from(limit);
+    matching.truncate(usize::from(limit));
+    let next = has_more
+        .then(|| {
+            matching
+                .last()
+                .map(|item| SessionPageCursor::new(item.session_id()))
+        })
+        .flatten();
+    Ok(SessionOwnershipPage::new(matching, next))
 }
 
 fn map_identity_error(error: PersistencePortError) -> IdentityStoreError {
@@ -1702,8 +1928,14 @@ mod tests {
             .expect("summary");
         assert_eq!(found.key(), record.key());
         assert_eq!(found.last_sequence(), Some(EventSequence::new(0)));
+        assert_eq!(found.started_at_unix_millis(), Some(1));
         let runs = store.list_runs(None, 1).await.expect("runs");
         assert_eq!(runs.items(), &[found]);
+        let session_runs = store
+            .list_session_runs(record.key().session_id(), None, 1)
+            .await
+            .expect("session runs");
+        assert_eq!(session_runs.items(), runs.items());
         let events = store
             .read_events(record.key(), None, 1)
             .await
@@ -1875,6 +2107,37 @@ mod tests {
         assert_eq!(
             reopened.load_session(session_id).await,
             Err(IdentityStoreError::Corrupt)
+        );
+    }
+
+    #[tokio::test]
+    async fn session_history_pages_are_owner_isolated_and_cursor_bounded() {
+        let (directory, _, _) = fixture();
+        let store = store(&directory).await;
+        let owner = agent_core::PrincipalId::new("owner-1").expect("principal");
+        let other = agent_core::PrincipalId::new("owner-2").expect("principal");
+        let first = SessionOwnershipRecord::new(SessionId::new(), owner.clone());
+        let hidden = SessionOwnershipRecord::new(SessionId::new(), other);
+        let second = SessionOwnershipRecord::new(SessionId::new(), owner.clone());
+        for record in [&first, &hidden, &second] {
+            store.create_session(record).await.expect("create session");
+        }
+
+        let page = store
+            .list_sessions(&owner, None, 1)
+            .await
+            .expect("first page");
+        assert_eq!(page.items(), std::slice::from_ref(&second));
+        let cursor = page.next().expect("more owner sessions");
+        let tail = store
+            .list_sessions(&owner, Some(cursor), 1)
+            .await
+            .expect("second page");
+        assert_eq!(tail.items(), std::slice::from_ref(&first));
+        assert_eq!(tail.next(), None);
+        assert_eq!(
+            store.list_sessions(&owner, None, 0).await,
+            Err(IdentityStoreError::Conflict)
         );
     }
 

@@ -11,7 +11,7 @@ use agent_deployment::{
     BuildInfoV1, OperationalMetrics, OperationsState, ReadinessCache, ReadinessSnapshotV1,
     ReadinessStatusV1,
 };
-use agent_identity::VerifiedPrincipal;
+use agent_identity::{SessionPageCursor, VerifiedPrincipal};
 use agent_service::{
     AgentService, ApprovalDecisionV1, DurableApprovalWaitId, EventSequence, MAX_ACTIVE_RUNS,
     MAX_COMMAND_QUEUE, OperationalRunPageV1, OperationalRunViewV1, RunId, RunInput, RunKey,
@@ -260,8 +260,11 @@ pub fn router_with_operations(
             get(operational_run),
         )
         .route("/v1/operations/reconciliation", get(reconciliation_runs))
-        .route("/v1/sessions", post(create_session))
-        .route("/v1/sessions/{session_id}/runs", post(start_run))
+        .route("/v1/sessions", get(list_sessions).post(create_session))
+        .route(
+            "/v1/sessions/{session_id}/runs",
+            get(list_session_runs).post(start_run),
+        )
         .route("/v1/sessions/{session_id}/runs/{run_id}", get(run_status))
         .route(
             "/v1/sessions/{session_id}/runs/{run_id}/events",
@@ -470,6 +473,30 @@ struct SessionResponse {
     session_id: SessionId,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionQuery {
+    after_session_id: Option<SessionId>,
+    limit: Option<u16>,
+}
+
+async fn list_sessions(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Json<agent_service::ConversationPageV1>, ApiError> {
+    Ok(Json(
+        state
+            .service
+            .conversation_page(
+                &principal,
+                query.after_session_id.map(SessionPageCursor::new),
+                query.limit.unwrap_or(64),
+            )
+            .await?,
+    ))
+}
+
 async fn create_session(
     State(state): State<HttpState>,
     Extension(principal): Extension<VerifiedPrincipal>,
@@ -486,6 +513,32 @@ struct StartRunBody {
     start_request_id: Uuid,
     workflow_id: WorkflowId,
     input: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunHistoryQuery {
+    after_run_id: Option<RunId>,
+    limit: Option<u16>,
+}
+
+async fn list_session_runs(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
+    Path(session_id): Path<String>,
+    Query(query): Query<RunHistoryQuery>,
+) -> Result<Json<agent_service::RunHistoryPageV1>, ApiError> {
+    Ok(Json(
+        state
+            .service
+            .session_run_page(
+                &principal,
+                parse_id(&session_id)?,
+                query.after_run_id.map(agent_harness::RunPageCursor::new),
+                query.limit.unwrap_or(64),
+            )
+            .await?,
+    ))
 }
 
 async fn start_run(
@@ -1096,6 +1149,71 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn conversation_history_routes_are_bounded_metadata_projections() {
+        let (_directory, service) = service().await;
+        let principal = test_principal();
+        let session = service.create_session(&principal).await.expect("session");
+        let run = service
+            .start_run(
+                &principal,
+                session,
+                Uuid::new_v4(),
+                &WorkflowId::new("test").expect("workflow"),
+                RunInput::new(b"history input".to_vec()).expect("input"),
+            )
+            .await
+            .expect("run");
+        let app = unix_app(service);
+
+        let sessions = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/sessions?limit=1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(sessions.status(), StatusCode::OK);
+        let sessions_body = sessions
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let sessions_json: serde_json::Value =
+            serde_json::from_slice(&sessions_body).expect("session JSON");
+        assert_eq!(sessions_json["items"][0]["session_id"], session.to_string());
+        assert!(sessions_json["items"][0].get("owner").is_none());
+        assert!(sessions_json["items"][0].get("input").is_none());
+
+        let runs = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/sessions/{session}/runs?limit=1"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(runs.status(), StatusCode::OK);
+        let runs_body = runs.into_body().collect().await.expect("body").to_bytes();
+        let runs_json: serde_json::Value = serde_json::from_slice(&runs_body).expect("run JSON");
+        assert_eq!(runs_json["items"][0]["run_id"], run.run_id.to_string());
+        for forbidden in [
+            "prompt",
+            "input",
+            "answer",
+            "evidence",
+            "capsule",
+            "credential",
+        ] {
+            assert!(!String::from_utf8_lossy(&runs_body).contains(forbidden));
+        }
     }
 
     #[tokio::test]

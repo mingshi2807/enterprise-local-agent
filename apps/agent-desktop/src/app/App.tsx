@@ -92,10 +92,10 @@ export function App() {
   ) === true;
 
   const newTask = useCallback(() => {
-    setSelectedSessionId(null);
+    void conversation.newConversation();
     setComposerFocusNonce((value) => value + 1);
     setPaletteOpen(false);
-  }, []);
+  }, [conversation]);
 
   const refresh = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: serviceQueryKeys.all });
@@ -208,6 +208,8 @@ export function App() {
           <SessionSidebar
             expanded={sidebarOpen}
             conversations={conversation.conversations}
+            loading={conversation.historyLoading}
+            error={conversation.historyError}
             selectedSessionId={selectedSessionId}
             onSelectSession={setSelectedSessionId}
             onNewTask={newTask}

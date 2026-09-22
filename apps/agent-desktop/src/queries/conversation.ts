@@ -5,6 +5,8 @@ import type {
   ApplicationCitation,
   ApprovalDecision,
   ApprovalPreview,
+  ConversationSummary,
+  RunHistoryItem,
   RunView,
   ServiceEvent,
   WaitingApproval,
@@ -50,6 +52,9 @@ export interface Conversation {
   lastRun: RunView | null;
   lastRunEvents: ServiceEvent[];
   lastRunStartedAtMillis: number | null;
+  lastActivityMillis: number | null;
+  runHistory: RunHistoryItem[];
+  restoredRunId: string | null;
   approval: WaitingApproval | null;
 }
 
@@ -64,6 +69,7 @@ export interface ApprovalUiState {
 }
 
 const conversationsKey = ["conversations"] as const;
+const historyKey = ["conversation-history"] as const;
 
 function titleFor(prompt: string) {
   const firstLine = prompt.split(/\r?\n/, 1)[0]?.trim() ?? "New conversation";
@@ -83,7 +89,7 @@ function errorMessage(kind: ConversationErrorKind) {
     case "cancelled":
       return "This run was cancelled.";
     case "result_unavailable":
-      return "This run completed, but its answer is no longer available after restart.";
+      return "Result unavailable";
     case "manual_reconciliation":
       return "This run requires operator reconciliation and cannot be resumed from the desktop.";
     case "run_failed":
@@ -115,12 +121,58 @@ function replaceConversation(
   );
 }
 
+function runViewFromHistory(sessionId: string, run: RunHistoryItem): RunView {
+  return {
+    session_id: sessionId,
+    run_id: run.run_id,
+    disposition: run.disposition,
+    last_sequence: run.last_sequence,
+    outcome: run.outcome,
+    workflow_id: run.workflow_id,
+    result: null,
+    duration_millis: null,
+  };
+}
+
+function conversationFromSummary(summary: ConversationSummary): Conversation {
+  return {
+    sessionId: summary.session_id,
+    title: summary.title,
+    messages: [],
+    activeRun: null,
+    lastPrompt: "",
+    lastRun: summary.latest_run === null ? null : runViewFromHistory(summary.session_id, summary.latest_run),
+    lastRunEvents: [],
+    lastRunStartedAtMillis: summary.latest_run?.started_at_unix_millis ?? null,
+    lastActivityMillis: summary.last_activity_unix_millis,
+    runHistory: summary.latest_run === null ? [] : [summary.latest_run],
+    restoredRunId: null,
+    approval: null,
+  };
+}
+
 export function useConversationController(
   selectedSessionId: string | null,
   onSelectSession: (sessionId: string) => void,
   serviceAvailable: boolean,
 ) {
   const queryClient = useQueryClient();
+  const history = useQuery({
+    queryKey: historyKey,
+    enabled: serviceAvailable,
+    retry: false,
+    queryFn: async () => {
+      const summaries: ConversationSummary[] = [];
+      let cursor: string | null = null;
+      for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
+        const page = await localService.listSessions(cursor);
+        summaries.push(...page.items);
+        cursor = page.next_session_id;
+        if (cursor === null) return summaries;
+      }
+      throw new Error("session_page_limit");
+    },
+  });
   const { data: conversations = [] } = useQuery({
     queryKey: conversationsKey,
     queryFn: async (): Promise<Conversation[]> => [],
@@ -135,6 +187,104 @@ export function useConversationController(
   const setConversations = useCallback((update: (current: Conversation[]) => Conversation[]) => {
     queryClient.setQueryData<Conversation[]>(conversationsKey, (current = []) => update(current));
   }, [queryClient]);
+
+  useEffect(() => {
+    if (history.data === undefined) return;
+    setConversations((current) => {
+      const bySession = new Map(current.map((conversation) => [conversation.sessionId, conversation]));
+      const durable = history.data.map((summary) => {
+        const existing = bySession.get(summary.session_id);
+        bySession.delete(summary.session_id);
+        if (existing === undefined) return conversationFromSummary(summary);
+        return {
+          ...existing,
+          title: summary.title,
+          lastActivityMillis: summary.last_activity_unix_millis,
+          lastRun: existing.activeRun === null && existing.restoredRunId === null
+            ? summary.latest_run === null
+              ? null
+              : runViewFromHistory(summary.session_id, summary.latest_run)
+            : existing.lastRun,
+          lastRunStartedAtMillis: existing.lastRunStartedAtMillis
+            ?? summary.latest_run?.started_at_unix_millis
+            ?? null,
+        };
+      });
+      return [...durable, ...bySession.values()];
+    });
+    if (selectedSessionId === null && history.data[0] !== undefined) {
+      onSelectSession(history.data[0].session_id);
+    }
+  }, [history.data, onSelectSession, selectedSessionId, setConversations]);
+
+  const selectedHistory = useQuery({
+    queryKey: ["conversation-runs", selectedSessionId],
+    enabled: serviceAvailable && selectedSessionId !== null,
+    retry: false,
+    queryFn: async () => {
+      if (selectedSessionId === null) throw new Error("missing_session");
+      const page = await localService.listRuns(selectedSessionId, null);
+      const latest = page.items[0] ?? null;
+      const status = latest === null
+        ? null
+        : await localService.runStatus(selectedSessionId, latest.run_id);
+      return { items: page.items, latest, status };
+    },
+  });
+
+  useEffect(() => {
+    if (
+      selectedSessionId === null
+      || selectedHistory.data === undefined
+      || selectedHistory.data.latest === null
+      || selectedHistory.data.status === null
+    ) {
+      return;
+    }
+    const { latest, status } = selectedHistory.data;
+    setConversations((current) => replaceConversation(current, selectedSessionId, (conversation) => {
+      if (conversation.restoredRunId === latest.run_id || conversation.activeRun?.runId === latest.run_id) {
+        return conversation;
+      }
+      return {
+        ...conversation,
+        restoredRunId: latest.run_id,
+        lastRun: status,
+        lastRunStartedAtMillis: latest.started_at_unix_millis,
+        runHistory: selectedHistory.data.items,
+        activeRun: {
+          runId: latest.run_id,
+          startRequestId: "restored",
+          startedAtMillis: latest.started_at_unix_millis ?? Date.now(),
+          cursor: null,
+          events: [],
+          activity: status.disposition === "waiting" ? "Waiting for decision…" : "Reconnecting…",
+        },
+      };
+    }));
+  }, [selectedHistory.data, selectedSessionId, setConversations]);
+
+  const newConversationMutation = useMutation({
+    mutationFn: async () => localService.createSession(),
+    onSuccess: (session) => {
+      setConversations((current) => [{
+        sessionId: session.session_id,
+        title: "New conversation",
+        messages: [],
+        activeRun: null,
+        lastPrompt: "",
+        lastRun: null,
+        lastRunEvents: [],
+        lastRunStartedAtMillis: null,
+        lastActivityMillis: null,
+        runHistory: [],
+        restoredRunId: null,
+        approval: null,
+      }, ...current.filter(({ sessionId }) => sessionId !== session.session_id)]);
+      onSelectSession(session.session_id);
+      void queryClient.invalidateQueries({ queryKey: historyKey });
+    },
+  });
 
   const sendMutation = useMutation({
     mutationFn: async ({ prompt, mode }: { prompt: string; mode: WorkflowMode }) => {
@@ -165,6 +315,9 @@ export function useConversationController(
               lastRun: null,
               lastRunEvents: [],
               lastRunStartedAtMillis: null,
+              lastActivityMillis: null,
+              runHistory: [],
+              restoredRunId: null,
               approval: null,
             },
             ...current,
@@ -194,8 +347,11 @@ export function useConversationController(
               activity: "Starting…",
             },
             lastRun: run,
+            lastActivityMillis: Date.now(),
+            restoredRunId: run.run_id,
           })),
         );
+        void queryClient.invalidateQueries({ queryKey: historyKey });
         return sessionId;
       } catch {
         setConversations((current) =>
@@ -261,6 +417,9 @@ export function useConversationController(
           lastRun: null,
           lastRunEvents: [],
           lastRunStartedAtMillis: null,
+          lastActivityMillis: null,
+          runHistory: [],
+          restoredRunId: item.run_id,
           approval: item,
         }, ...next];
       }
@@ -333,6 +492,7 @@ export function useConversationController(
             lastRun: status,
             lastRunEvents: events,
             lastRunStartedAtMillis: conversation.activeRun.startedAtMillis,
+            lastActivityMillis: conversation.activeRun.startedAtMillis,
             messages: [
               ...conversation.messages,
               {
@@ -353,6 +513,7 @@ export function useConversationController(
             lastRun: status,
             lastRunEvents: events,
             lastRunStartedAtMillis: conversation.activeRun.startedAtMillis,
+            lastActivityMillis: conversation.activeRun.startedAtMillis,
             messages: [...conversation.messages, {
               id: crypto.randomUUID(), role: "assistant", content: "The workspace file was written successfully.",
             }],
@@ -367,6 +528,7 @@ export function useConversationController(
             lastRun: status,
             lastRunEvents: events,
             lastRunStartedAtMillis: conversation.activeRun.startedAtMillis,
+            lastActivityMillis: conversation.activeRun.startedAtMillis,
             messages: [...conversation.messages, {
               id: crypto.randomUUID(), role: "error", content: "The LocalWrite request was denied.", errorKind: "run_failed",
             }],
@@ -384,6 +546,7 @@ export function useConversationController(
           lastRun: status,
           lastRunEvents: events,
           lastRunStartedAtMillis: conversation.activeRun.startedAtMillis,
+          lastActivityMillis: conversation.activeRun.startedAtMillis,
           messages: [
             ...conversation.messages,
             {
@@ -521,6 +684,9 @@ export function useConversationController(
   return {
     conversations,
     selected,
+    historyLoading: history.isPending,
+    historyError: history.isError,
+    newConversation: () => newConversationMutation.mutateAsync(),
     send: (prompt: string, mode: WorkflowMode = "readonly") => sendMutation.mutateAsync({ prompt, mode }),
     cancel: () => cancelMutation.mutateAsync(),
     retry: selected === null || selected.lastPrompt === "" ? null : () => sendMutation.mutateAsync({ prompt: selected.lastPrompt, mode: "readonly" }),

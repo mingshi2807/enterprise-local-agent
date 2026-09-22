@@ -110,6 +110,33 @@ export const runViewSchema = z
   })
   .strict();
 
+export const runHistoryItemSchema = z.object({
+  run_id: uuid,
+  disposition: runViewSchema.shape.disposition,
+  last_sequence: z.number().int().nonnegative().nullable(),
+  outcome: runViewSchema.shape.outcome,
+  workflow_id: workflowIdSchema.nullable(),
+  started_at_unix_millis: z.number().int().nonnegative().nullable(),
+  result_available: z.boolean(),
+}).strict();
+
+export const runHistoryPageSchema = z.object({
+  items: z.array(runHistoryItemSchema).max(64),
+  next_run_id: uuid.nullable(),
+}).strict();
+
+export const conversationSummarySchema = z.object({
+  session_id: uuid,
+  title: boundedMetadata,
+  last_activity_unix_millis: z.number().int().nonnegative().nullable(),
+  latest_run: runHistoryItemSchema.nullable(),
+}).strict();
+
+export const conversationPageSchema = z.object({
+  items: z.array(conversationSummarySchema).max(64),
+  next_session_id: uuid.nullable(),
+}).strict();
+
 export const serviceEventSchema = z
   .object({
     version: z.literal(2),
@@ -188,6 +215,10 @@ export type Readiness = z.infer<typeof readinessSchema>;
 export type BuildInfo = z.infer<typeof buildInfoSchema>;
 export type Session = z.infer<typeof sessionSchema>;
 export type RunView = z.infer<typeof runViewSchema>;
+export type RunHistoryItem = z.infer<typeof runHistoryItemSchema>;
+export type RunHistoryPage = z.infer<typeof runHistoryPageSchema>;
+export type ConversationSummary = z.infer<typeof conversationSummarySchema>;
+export type ConversationPage = z.infer<typeof conversationPageSchema>;
 export type ApplicationCitation = z.infer<typeof applicationCitationSchema>;
 export type ServiceEvent = z.infer<typeof serviceEventSchema>;
 export type WorkflowId = z.infer<typeof workflowIdSchema>;
