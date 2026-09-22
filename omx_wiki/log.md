@@ -163,3 +163,15 @@
 ## [2026-09-21T20:57:09.678Z] lint
 - **Pages:** m0-foundation.md, m1-enterprise-harness.md, m2-deterministic-loop.md, m3-rig-model-adapter.md, m4-openai-compatible-gateway.md, m5-typed-action-planning.md, m6-approval-and-containment-boundary.md
 - **Summary:** Lint: 7 issues (0 orphan, 7 stale, 0 broken, 0 contradictions)
+
+## [2026-09-22] update
+- **Pages:** enterprise-local-agent-milestone-index.md, m16-desktop-foundation.md, index.md
+- **Summary:** Added M16.4 compact activity, metadata-only run inspection, strict event ordering, lazy loading, limitations, and verification evidence
+
+## [2026-09-22T06:58:37.906Z] add
+- **Pages:** enterprise-local-agent-milestone-index.md, m0-foundation.md, m1-enterprise-harness.md, m10-durable-graph-pause-resume-hitl.md, m11-governed-mcp-integration.md, m12-agent-service-api.md, m13-local-enterprise-agent-mvp.md, m14-deployment-operations-hardening.md, m15-enterprise-identity-authorization.md, m16-desktop-foundation.md, m2-deterministic-loop.md, m3-rig-model-adapter.md, m4-openai-compatible-gateway.md, m5-typed-action-planning.md, m6-1-production-linux-localwrite-containment.md, m6-approval-and-containment-boundary.md, m7-durable-event-persistence-and-recovery.md, m8-enterprise-knowledge-integration.md, m9-deterministic-graph-engine-poc.md
+- **Summary:** Refreshed wiki index and derived metadata surfaces
+
+## [2026-09-22T06:58:41.957Z] lint
+- **Pages:** m0-foundation.md, m1-enterprise-harness.md, m2-deterministic-loop.md, m3-rig-model-adapter.md, m4-openai-compatible-gateway.md, m5-typed-action-planning.md, m6-approval-and-containment-boundary.md
+- **Summary:** Lint: 7 issues (0 orphan, 7 stale, 0 broken, 0 contradictions)

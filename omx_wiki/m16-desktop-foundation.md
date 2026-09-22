@@ -1,22 +1,22 @@
 ---
-title: "M16 Desktop Foundation, App Shell, and ReadOnly Conversation"
-tags: ["m16", "desktop", "tauri", "react", "design-system", "app-shell", "conversation", "readonly"]
+title: "M16 Desktop Foundation, ReadOnly Conversation, and Run Inspector"
+tags: ["m16", "desktop", "tauri", "react", "design-system", "app-shell", "conversation", "readonly", "activity", "inspector"]
 created: 2026-09-21
-updated: 2026-09-21
-sources: ["apps/agent-desktop/src-tauri/src/service_client.rs", "apps/agent-desktop/src-tauri/src/lib.rs", "apps/agent-desktop/src-tauri/capabilities/main.json", "apps/agent-desktop/src/app/App.tsx", "apps/agent-desktop/src/app/CommandPalette.tsx", "apps/agent-desktop/src/bridge/contracts.ts", "apps/agent-desktop/src/bridge/service.ts", "apps/agent-desktop/src/queries/conversation.ts", "apps/agent-desktop/src/components/ConversationWorkspace.tsx", "apps/agent-desktop/src/components/MarkdownAnswer.tsx", "apps/agent-desktop/src/components/SessionSidebar.tsx", "apps/agent-desktop/src/components/ReadinessInspector.tsx", "apps/agent-desktop/src/styles/tokens.css"]
+updated: 2026-09-22
+sources: ["apps/agent-desktop/src-tauri/src/service_client.rs", "apps/agent-desktop/src-tauri/src/lib.rs", "apps/agent-desktop/src-tauri/capabilities/main.json", "apps/agent-desktop/src/app/App.tsx", "apps/agent-desktop/src/app/CommandPalette.tsx", "apps/agent-desktop/src/bridge/contracts.ts", "apps/agent-desktop/src/bridge/service.ts", "apps/agent-desktop/src/queries/conversation.ts", "apps/agent-desktop/src/features/runActivity.ts", "apps/agent-desktop/src/components/ConversationWorkspace.tsx", "apps/agent-desktop/src/components/MarkdownAnswer.tsx", "apps/agent-desktop/src/components/RunInspector.tsx", "apps/agent-desktop/src/components/SessionSidebar.tsx", "apps/agent-desktop/src/styles/tokens.css"]
 links: ["enterprise-local-agent-milestone-index.md", "m15-enterprise-identity-authorization.md", "m12-agent-service-api.md", "m14-deployment-operations-hardening.md"]
 category: architecture
 confidence: high
 schemaVersion: 1
 ---
 
-# M16 Desktop Foundation, App Shell, and ReadOnly Conversation
+# M16 Desktop Foundation, ReadOnly Conversation, and Run Inspector
 
 ## Status
 
 M16.0 architecture was approved. M16.1 and M16.2 are implemented and committed
-as `29942c3` and `0672edf`. M16.3 is implemented and verified in the current
-worktree. No M16 milestone tag has been created.
+as `29942c3` and `0672edf`. M16.3 and M16.4 are implemented and verified in the
+current worktree. No M16 milestone tag has been created.
 
 ## Boundary
 
@@ -57,12 +57,12 @@ connections.
 
 ## M16.2 Conversation-First Shell
 
-The desktop now provides:
+At M16.2 the desktop established:
 
 - a compact application bar and subtle connection footer;
-- a collapsible session sidebar with clearly labelled mock layout data;
+- a collapsible session sidebar with placeholder layout data;
 - a dominant central conversation/task workspace;
-- a read-only task composer that cannot dispatch work;
+- a task-composer surface that did not yet dispatch work;
 - an optional readiness inspector for secondary operational metadata;
 - an accessible command palette with filtering and keyboard navigation;
 - shortcuts for new task, sidebar, inspector, and command palette;
@@ -112,6 +112,40 @@ payloads are neither requested nor rendered. Model-generated links are shown
 as inert text. The terminal application result, not progress events, is the
 answer authority.
 
+## M16.4 Activity and Run Inspector
+
+The conversation remains the default visual focus. While a run is active, one
+compact row shows only a user-facing phase (`Searching knowledge`, `Thinking`,
+`Verifying`, `Finishing`, reconnecting, or stopping), elapsed time, a restrained
+activity indicator, and Stop. After termination it collapses to outcome,
+duration, and citation-source count. No internal event name or reasoning trace
+is displayed.
+
+The right inspector is closed by default and lazy-loaded on demand. It derives
+the following only from bounded `RunView` and `ServiceEventV2` metadata:
+
+- workflow, disposition, current phase, elapsed duration, and terminal status;
+- unique model-call count plus available model and graph budget counters;
+- retrieval backend route and citation count;
+- secondary copyable Run, retrieval, and model correlation IDs;
+- a lightweight Retrieve, Model, Verify, Complete timeline.
+
+The current event projection does not expose retrieval evidence count. The
+inspector displays `Not exposed` and does not misuse citation count as evidence
+count. Prompts, evidence content, raw model output, reasoning, action arguments,
+tool results, internal `AgentEvent` structures, and credentials remain absent.
+
+Event-page reduction now accepts the service's zero-based sequence, ignores
+already-seen duplicates, and requires exact contiguous ordering for new events.
+A gap, out-of-order page, or wrong RunId leaves the cursor unchanged and enters
+the existing reconnecting state. Once status is terminal, polling stops and no
+later transient activity can replace the terminal summary or result.
+
+Markdown/GFM rendering and the run inspector use natural React lazy boundaries.
+The final build emits an approximately 155 KiB Markdown chunk and 5.8 KiB
+inspector chunk. The initial minified JavaScript chunk falls from approximately
+697 KiB to 543.5 KiB; Vite's advisory remains because it is still above 500 KiB.
+
 ## Service States
 
 The shell presents ready, degraded, unavailable, and draining states from the
@@ -121,21 +155,23 @@ a status refresh; it does not add retries or execution behavior to the UI.
 
 ## Verification
 
-The current M16.3 implementation passed:
+The current M16.4 implementation passed:
 
 - TypeScript typecheck and ESLint with zero warnings;
-- twelve frontend tests covering fixed workflow start, keyboard submission,
-  one active run, cancellation, final answers, citations, model/knowledge and
-  malformed-result failures, cursor catch-up, volatile result loss, payload
-  rejection, shell states, and compact layout;
+- sixteen frontend tests covering the M16.3 conversation path, activity
+  transitions, terminal collapse, cancellation, zero-based sequences,
+  duplicate suppression, gap/out-of-order/wrong-run rejection, reconnect
+  cursor behavior, safe inspector metadata, keyboard access, payload rejection,
+  shell states, and compact layout;
 - Vite production builds and Tauri debug build with `--no-bundle`;
 - strict Rust Clippy and six Rust service-bridge tests;
 - capability, dependency-direction, and forbidden-surface scans;
 - `cargo fmt --all -- --check` and clean diff validation.
 
-M16.3 regenerates Tauri ACL files for the five named conversation commands. A
-non-failing Vite advisory reports a roughly 697 KiB initial JavaScript chunk;
-code splitting remains deferred until a real route boundary exists.
+M16.4 changes no Tauri command, ACL, service, persistence, model, or execution
+authority. Native host Clippy lacks the required GTK development libraries, so
+the established Tauri build container supplied those system dependencies for
+strict Clippy, Rust tests, and the final debug build.
 
 ## Guarantees and Limits
 
@@ -143,6 +179,8 @@ M16 provides a bounded local-service bridge, minimal WebView capability set,
 responsive accessible design foundation, and real ReadOnly conversation path.
 Transport credentials are not exposed to JavaScript, clients cannot select the
 workflow or infrastructure, and terminal results remain service-authoritative.
+Activity and inspection are metadata projections only and do not create a new
+event or result authority.
 
 It does not provide LocalWrite, approval, durable Waiting interaction,
 settings, ACP, pane resizing, packaging/signing, generic service transport, or
@@ -161,3 +199,5 @@ and are reported without replaying the model call.
   containment infrastructure.
 - Keep conversation payloads out of metadata-only operational surfaces.
 - Preserve keyboard accessibility, reduced motion, and compact-window support.
+- Keep terminal results authoritative over transient activity projections.
+- Never infer unavailable evidence or usage metadata from citation content.

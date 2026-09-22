@@ -437,6 +437,25 @@ payload persistence. Event delivery uses bounded cursor polling over named
 commands rather than exposing generic HTTP or SSE transport to the WebView.
 `agent-service` and `ExecutionHarness` remain authoritative.
 
+M16.4 adds compact agent activity and an on-demand run inspector without
+turning the conversation into an operations dashboard. Active runs show only
+safe user-facing phases, elapsed time, and Stop; terminal runs collapse to a
+small outcome, duration, and citation-source summary. The inspector remains
+closed by default and derives workflow, phase, model-call count, model and
+graph budgets, retrieval backends, citations, correlation IDs, and a bounded
+Retrieve/Model/Verify/Complete timeline exclusively from `RunView` and
+`ServiceEventV2` metadata. It never renders internal event names, prompts,
+evidence, model output, reasoning, action arguments, or tool results.
+
+Cursor handling now accepts the service's zero-based `EventSequence`, ignores
+duplicates, and rejects gaps, out-of-order pages, or wrong-run events without
+advancing the cursor. Terminal status wins permanently over transient
+activity. Markdown/GFM and the inspector are lazy-loaded; the production build
+emits separate approximately 155 KiB and 6 KiB chunks and reduces the initial
+JavaScript chunk to approximately 544 KiB. Evidence count is shown as
+`Not exposed` because the current `ServiceEventV2` does not carry it; the UI
+does not substitute citation count or infer unavailable metadata.
+
 ## Deterministic demonstration
 
 The default CLI path is network-free. It uses `RigModelAdapter<FakeRigModel>`

@@ -1,6 +1,6 @@
 # Wiki Index
 
-> 19 pages | Last updated: 2026-09-21T20:57:09.405Z
+> 19 pages | Last updated: 2026-09-22T06:58:37.905Z
 
 ## architecture
 
@@ -12,7 +12,7 @@
 - [M13 Local Enterprise Agent MVP and Real LLM Smoke Test](m13-local-enterprise-agent-mvp.md) — # M13 Local Enterprise Agent MVP and Real LLM Smoke Test
 - [M14 Deployment and Operations Hardening](m14-deployment-operations-hardening.md) — # M14 Deployment and Operations Hardening
 - [M15 Enterprise Identity and Authorization](m15-enterprise-identity-authorization.md) — # M15 Enterprise Identity and Authorization
-- [M16 Desktop Foundation, App Shell, and ReadOnly Conversation](m16-desktop-foundation.md) — # M16 Desktop Foundation, App Shell, and ReadOnly Conversation
+- [M16 Desktop Foundation, ReadOnly Conversation, and Run Inspector](m16-desktop-foundation.md) — # M16 Desktop Foundation, ReadOnly Conversation, and Run Inspector
 - [M2 Deterministic Loop](m2-deterministic-loop.md) — # M2 Deterministic Loop
 - [M3 Rig Model Adapter](m3-rig-model-adapter.md) — # M3 Rig Model Adapter
 - [M4 OpenAI Compatible Gateway](m4-openai-compatible-gateway.md) — # M4 OpenAI-Compatible Gateway
