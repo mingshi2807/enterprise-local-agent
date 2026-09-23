@@ -2,9 +2,9 @@ mod service_client;
 
 use serde::Serialize;
 use service_client::{
-    ApprovalDecisionV1, BuildInfoV1, ConversationPageV1, DesktopApprovalPreviewV1, HealthV1,
-    LocalServiceClient, ReadinessSnapshotV1, RunHistoryPageV1, RunViewV1, ServiceEventV2,
-    SessionV1, WaitingPageV1,
+    ApprovalDecisionV1, BuildInfoV1, ConversationPageV1, DesktopApprovalPreviewV1,
+    DesktopReadinessSnapshotV1, HealthV1, LocalServiceClient, RunHistoryPageV1, RunViewV1,
+    ServiceEventV2, SessionV1, WaitingPageV1,
 };
 use tauri::State;
 
@@ -29,7 +29,7 @@ async fn service_health(
 #[tauri::command]
 async fn service_readiness(
     client: State<'_, LocalServiceClient>,
-) -> Result<ReadinessSnapshotV1, DesktopCommandError> {
+) -> Result<DesktopReadinessSnapshotV1, DesktopCommandError> {
     client.readiness().await.map_err(Into::into)
 }
 

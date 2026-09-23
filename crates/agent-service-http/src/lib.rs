@@ -260,6 +260,7 @@ pub fn router_with_operations(
             get(operational_run),
         )
         .route("/v1/operations/reconciliation", get(reconciliation_runs))
+        .route("/v1/runtime/status", get(runtime_status))
         .route("/v1/sessions", get(list_sessions).post(create_session))
         .route(
             "/v1/sessions/{session_id}/runs",
@@ -335,6 +336,17 @@ async fn metrics(
 
 async fn version(State(state): State<HttpState>) -> Json<BuildInfoV1> {
     Json(state.operations.build().clone())
+}
+
+async fn runtime_status(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
+) -> Result<Json<agent_service::RuntimeStatusV1>, ApiError> {
+    state
+        .service
+        .runtime_status(&principal)
+        .map(Json)
+        .map_err(Into::into)
 }
 
 #[derive(Deserialize)]
@@ -948,6 +960,9 @@ mod tests {
         fn recovery_contract(&self) -> RecoveryContract {
             RecoveryContract::NonRestartable
         }
+        fn budget(&self) -> RunBudget {
+            RunBudget::new(1, 1, 1, Duration::from_secs(5)).expect("budget")
+        }
         fn new_context(&self, key: RunKey) -> RunContext {
             RunContext::new(
                 key.run_id(),
@@ -1225,6 +1240,7 @@ mod tests {
             "/v1/operations/readiness",
             "/v1/operations/metrics",
             "/v1/operations/version",
+            "/v1/runtime/status",
             "/v1/operations/runs?limit=64",
             "/v1/operations/reconciliation?limit=64",
         ] {

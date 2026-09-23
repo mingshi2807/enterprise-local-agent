@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use agent_core::{AgentEvent, AgentEventKind, DurableApprovalOutcome, RunOutcome};
+use agent_core::{AgentEvent, AgentEventKind, DurableApprovalOutcome, RunBudget, RunOutcome};
 pub use agent_core::{DurableApprovalWaitId, EventSequence, RunId, SessionId};
 use agent_harness::{
     DurableApprovalStatus, DurableApprovalView, DurableRunPage, DurableRunSummary,
@@ -21,8 +21,9 @@ use agent_harness::{
 pub use agent_harness::{RunKey, WaitingPageCursor};
 use agent_identity::{
     AuthorizationAction, AuthorizationDecision, AuthorizationResource, DurableRunAuthorization,
-    SecurityAuditEvent, SecurityAuditPhase, SecurityAuditPort, ServiceAuthorizationPolicy,
-    SessionOwnershipPort, SessionOwnershipRecord, SessionPageCursor, VerifiedPrincipal,
+    PrincipalKind, PrincipalRole, SecurityAuditEvent, SecurityAuditPhase, SecurityAuditPort,
+    ServiceAuthorizationPolicy, SessionOwnershipPort, SessionOwnershipRecord, SessionPageCursor,
+    VerifiedPrincipal,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -184,6 +185,36 @@ pub struct OperationalRunPageV1 {
     pub next_run_id: Option<RunId>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrincipalViewV1 {
+    pub principal_id: agent_core::PrincipalId,
+    pub kind: PrincipalKind,
+    pub roles: Vec<PrincipalRole>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowBudgetV1 {
+    pub workflow_id: WorkflowId,
+    pub max_model_calls: u32,
+    pub max_tool_calls: u32,
+    pub max_iterations: u32,
+    pub max_approval_requests: u32,
+    pub max_graph_steps: u32,
+    pub max_elapsed_millis: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeStatusV1 {
+    pub principal: PrincipalViewV1,
+    pub max_active_runs: u16,
+    pub max_run_input_bytes: u32,
+    pub max_read_page_items: u16,
+    pub workflow_budgets: Vec<WorkflowBudgetV1>,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplicationCitationV1 {
@@ -316,6 +347,7 @@ pub struct ApprovalPreviewV1 {
 
 pub trait ConfiguredWorkflow: Send + Sync {
     fn id(&self) -> &WorkflowId;
+    fn budget(&self) -> RunBudget;
     fn recovery_contract(&self) -> RecoveryContract;
     fn validate_input(&self, _input: &RunInput) -> Result<(), WorkflowError> {
         Ok(())
@@ -809,6 +841,56 @@ impl AgentService {
         }
         self.view_for_disposition(self.harness.recover_run(key).await?)
             .await
+    }
+
+    pub fn runtime_status(
+        &self,
+        principal: &VerifiedPrincipal,
+    ) -> Result<RuntimeStatusV1, ServiceError> {
+        self.authorize(
+            principal,
+            AuthorizationAction::ReadRuntimeStatus,
+            AuthorizationResource::Global,
+        )?;
+        let mut workflow_budgets = self
+            .workflows
+            .values()
+            .map(|workflow| {
+                let budget = workflow.budget();
+                let max_elapsed_millis = u64::try_from(budget.max_elapsed().as_millis())
+                    .map_err(|_| ServiceError::Configuration)?;
+                Ok(WorkflowBudgetV1 {
+                    workflow_id: workflow.id().clone(),
+                    max_model_calls: budget.max_model_calls(),
+                    max_tool_calls: budget.max_tool_calls(),
+                    max_iterations: budget.max_iterations(),
+                    max_approval_requests: budget.max_approval_requests(),
+                    max_graph_steps: budget.max_graph_steps(),
+                    max_elapsed_millis,
+                })
+            })
+            .collect::<Result<Vec<_>, ServiceError>>()?;
+        workflow_budgets
+            .sort_by(|left, right| left.workflow_id.as_str().cmp(right.workflow_id.as_str()));
+        let roles = [
+            PrincipalRole::User,
+            PrincipalRole::Approver,
+            PrincipalRole::Operator,
+        ]
+        .into_iter()
+        .filter(|role| principal.has_role(*role))
+        .collect();
+        Ok(RuntimeStatusV1 {
+            principal: PrincipalViewV1 {
+                principal_id: principal.id().clone(),
+                kind: principal.kind(),
+                roles,
+            },
+            max_active_runs: MAX_ACTIVE_RUNS as u16,
+            max_run_input_bytes: MAX_RUN_INPUT_BYTES as u32,
+            max_read_page_items: MAX_READ_PAGE_ITEMS,
+            workflow_budgets,
+        })
     }
 
     pub async fn conversation_page(
@@ -1809,6 +1891,9 @@ mod tests {
         fn recovery_contract(&self) -> RecoveryContract {
             RecoveryContract::NonRestartable
         }
+        fn budget(&self) -> RunBudget {
+            RunBudget::new(1, 1, 1, Duration::from_secs(10)).expect("budget")
+        }
         fn new_context(&self, key: RunKey) -> RunContext {
             RunContext::new(
                 key.run_id(),
@@ -1946,6 +2031,37 @@ mod tests {
             .expect("durable retry");
         assert_eq!(retry.run_id, first.run_id);
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_status_is_bounded_sorted_and_contains_no_runtime_authority() {
+        let (_directory, service, _invocations) = fixture(Duration::from_millis(1)).await;
+        let status = service
+            .runtime_status(&test_principal())
+            .expect("runtime status");
+
+        assert_eq!(status.principal.principal_id.as_str(), "test-user");
+        assert_eq!(
+            status.principal.roles,
+            vec![PrincipalRole::User, PrincipalRole::Approver]
+        );
+        assert_eq!(status.max_active_runs as usize, MAX_ACTIVE_RUNS);
+        assert_eq!(status.max_run_input_bytes as usize, MAX_RUN_INPUT_BYTES);
+        assert_eq!(status.workflow_budgets.len(), 1);
+        assert_eq!(status.workflow_budgets[0].workflow_id.as_str(), "test");
+        assert_eq!(status.workflow_budgets[0].max_model_calls, 1);
+
+        let encoded = serde_json::to_string(&status).expect("serialize status");
+        for forbidden in [
+            "credential",
+            "token",
+            "endpoint",
+            "capsule",
+            "action",
+            "evidence",
+        ] {
+            assert!(!encoded.contains(forbidden), "status leaked {forbidden}");
+        }
     }
 
     #[tokio::test]

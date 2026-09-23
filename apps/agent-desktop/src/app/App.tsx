@@ -9,6 +9,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Search,
+  Settings,
   Sun,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -24,6 +25,10 @@ import { serviceQueryKeys, useServiceState } from "@/queries/service";
 
 const RunInspector = lazy(() =>
   import("@/components/RunInspector").then(({ RunInspector: component }) => ({ default: component })),
+);
+
+const SettingsView = lazy(() =>
+  import("@/components/SettingsView").then(({ SettingsView: component }) => ({ default: component })),
 );
 
 const nextTheme: Record<ThemePreference, ThemePreference> = {
@@ -68,6 +73,7 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(() => window.matchMedia("(min-width: 821px)").matches);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
   const connected = health.isSuccess;
@@ -92,10 +98,17 @@ export function App() {
   ) === true;
 
   const newTask = useCallback(() => {
+    setSettingsOpen(false);
     void conversation.newConversation();
     setComposerFocusNonce((value) => value + 1);
     setPaletteOpen(false);
   }, [conversation]);
+
+  const openSettings = useCallback(() => {
+    setSettingsOpen(true);
+    setInspectorOpen(false);
+    setPaletteOpen(false);
+  }, []);
 
   const refresh = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: serviceQueryKeys.all });
@@ -118,9 +131,10 @@ export function App() {
         icon: inspectorOpen ? PanelRightClose : PanelRightOpen,
         action: () => setInspectorOpen((value) => !value),
       },
+      { id: "settings", label: "Open settings", icon: Settings, action: openSettings },
       { id: "refresh", label: "Refresh service status", icon: Search, action: () => void refresh() },
     ],
-    [inspectorOpen, newTask, refresh, sidebarOpen],
+    [inspectorOpen, newTask, openSettings, refresh, sidebarOpen],
   );
 
   useEffect(() => {
@@ -194,6 +208,17 @@ export function App() {
           >
             {inspectorOpen ? <PanelRightClose aria-hidden="true" /> : <PanelRightOpen aria-hidden="true" />}
           </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="Open settings"
+            title="Settings"
+            aria-pressed={settingsOpen}
+            onClick={openSettings}
+          >
+            <Settings aria-hidden="true" className="size-4" />
+          </Button>
           <ThemeButton />
         </div>
       </header>
@@ -217,7 +242,16 @@ export function App() {
         </motion.div>
 
         <main className="min-w-0 flex-1 bg-background">
-          <ConversationWorkspace
+          {settingsOpen ? (
+            <Suspense fallback={<div className="px-6 py-5 text-xs text-muted">Loading settings…</div>}>
+              <SettingsView
+                state={serviceState}
+                readiness={readiness.data}
+                version={version.data}
+                onClose={() => setSettingsOpen(false)}
+              />
+            </Suspense>
+          ) : <ConversationWorkspace
             conversation={conversation.selected}
             serviceState={serviceState}
             readonlyReady={readonlyReady}
@@ -236,11 +270,11 @@ export function App() {
             onDeny={() => conversation.decideApproval("deny")}
             onResume={conversation.resumeApproval}
             onAbort={conversation.abortApproval}
-          />
+          />}
         </main>
 
         <AnimatePresence initial={false}>
-          {inspectorOpen && (
+          {inspectorOpen && !settingsOpen && (
             <motion.div
               className="inspector-pane z-30 w-[300px] shrink-0 overflow-hidden border-l border-border bg-panel"
               initial={reduceMotion ? false : { x: 18, opacity: 0 }}

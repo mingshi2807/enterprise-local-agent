@@ -64,20 +64,96 @@ pub struct WorkflowReadinessV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReadinessSnapshotV1 {
+struct ServiceReadinessSnapshotV1 {
     version: u16,
     overall: ReadinessStatusV1,
     dependencies: Vec<DependencyReadinessV1>,
     workflows: Vec<WorkflowReadinessV1>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopReadinessSnapshotV1 {
+    version: u16,
+    overall: ReadinessStatusV1,
+    dependencies: Vec<DependencyReadinessV1>,
+    workflows: Vec<WorkflowReadinessV1>,
+    runtime: RuntimeStatusV1,
+    reconciliation: ReconciliationStatusV1,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BuildInfoV1 {
+pub struct PrincipalViewV1 {
+    principal_id: String,
+    kind: PrincipalKindV1,
+    roles: Vec<PrincipalRoleV1>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrincipalKindV1 {
+    Human,
+    Service,
+    LocalProcess,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrincipalRoleV1 {
+    User,
+    Approver,
+    Operator,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowBudgetV1 {
+    workflow_id: String,
+    max_model_calls: u32,
+    max_tool_calls: u32,
+    max_iterations: u32,
+    max_approval_requests: u32,
+    max_graph_steps: u32,
+    max_elapsed_millis: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeStatusV1 {
+    principal: PrincipalViewV1,
+    max_active_runs: u16,
+    max_run_input_bytes: u32,
+    max_read_page_items: u16,
+    workflow_budgets: Vec<WorkflowBudgetV1>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "access")]
+pub enum ReconciliationStatusV1 {
+    Authorized { count: u16, truncated: bool },
+    NotAuthorized,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceBuildInfoV1 {
     application: String,
     version: String,
     git_identity: Option<String>,
     deployment_fingerprint: String,
+    config_schema_version: u16,
+    store_schema_version: u16,
+    event_schema_version: u16,
+    checkpoint_schema_version: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildInfoV1 {
+    application: String,
+    version: String,
     config_schema_version: u16,
     store_schema_version: u16,
     event_schema_version: u16,
@@ -198,6 +274,24 @@ pub struct ConversationSummaryV1 {
 pub struct ConversationPageV1 {
     items: Vec<ConversationSummaryV1>,
     next_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperationalRunViewV1 {
+    session_id: String,
+    run_id: String,
+    disposition: RunDispositionV1,
+    last_sequence: Option<u64>,
+    workflow_id: Option<String>,
+    duration_millis: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperationalRunPageV1 {
+    items: Vec<OperationalRunViewV1>,
+    next_run_id: Option<String>,
 }
 
 impl fmt::Debug for RunViewV1 {
@@ -373,7 +467,7 @@ impl BoundedResponse for HealthV1 {
     }
 }
 
-impl BoundedResponse for ReadinessSnapshotV1 {
+impl BoundedResponse for ServiceReadinessSnapshotV1 {
     fn validate(&self) -> Result<(), LocalServiceError> {
         if self.version != 1
             || self.dependencies.len() > MAX_ITEMS
@@ -393,7 +487,31 @@ impl BoundedResponse for ReadinessSnapshotV1 {
     }
 }
 
-impl BoundedResponse for BuildInfoV1 {
+impl BoundedResponse for RuntimeStatusV1 {
+    fn validate(&self) -> Result<(), LocalServiceError> {
+        if !bounded_text(&self.principal.principal_id)
+            || self.principal.roles.is_empty()
+            || self.principal.roles.len() > 3
+            || self.max_active_runs == 0
+            || self.max_run_input_bytes == 0
+            || self.max_read_page_items == 0
+            || self.max_read_page_items as usize > MAX_ITEMS
+            || self.workflow_budgets.len() > 32
+            || self.workflow_budgets.iter().any(|budget| {
+                !matches!(
+                    budget.workflow_id.as_str(),
+                    READONLY_WORKFLOW_ID | LOCALWRITE_WORKFLOW_ID | "service-health" | "test"
+                ) || budget.max_elapsed_millis == 0
+                    || budget.max_graph_steps > 64
+            })
+        {
+            return Err(LocalServiceError::InvalidResponse);
+        }
+        Ok(())
+    }
+}
+
+impl BoundedResponse for ServiceBuildInfoV1 {
     fn validate(&self) -> Result<(), LocalServiceError> {
         let valid = [
             self.application.as_str(),
@@ -463,6 +581,28 @@ impl BoundedResponse for ConversationPageV1 {
             })
             || self
                 .next_session_id
+                .as_deref()
+                .is_some_and(|id| !valid_uuid(id))
+        {
+            return Err(LocalServiceError::InvalidResponse);
+        }
+        Ok(())
+    }
+}
+
+impl BoundedResponse for OperationalRunPageV1 {
+    fn validate(&self) -> Result<(), LocalServiceError> {
+        if self.items.len() > MAX_ITEMS
+            || self.items.iter().any(|item| {
+                !valid_uuid(&item.session_id)
+                    || !valid_uuid(&item.run_id)
+                    || item.disposition != RunDispositionV1::ManualReconciliationRequired
+                    || item.workflow_id.as_deref().is_some_and(|workflow| {
+                        workflow != READONLY_WORKFLOW_ID && workflow != LOCALWRITE_WORKFLOW_ID
+                    })
+            })
+            || self
+                .next_run_id
                 .as_deref()
                 .is_some_and(|id| !valid_uuid(id))
         {
@@ -755,12 +895,45 @@ impl LocalServiceClient {
         self.get("healthz").await
     }
 
-    pub async fn readiness(&self) -> Result<ReadinessSnapshotV1, LocalServiceError> {
-        self.get("v1/operations/readiness").await
+    pub async fn readiness(&self) -> Result<DesktopReadinessSnapshotV1, LocalServiceError> {
+        let readiness: ServiceReadinessSnapshotV1 = self.get("v1/operations/readiness").await?;
+        let runtime: RuntimeStatusV1 = self.get("v1/runtime/status").await?;
+        let reconciliation = if runtime.principal.roles.contains(&PrincipalRoleV1::Operator) {
+            match self
+                .get::<OperationalRunPageV1>("v1/operations/reconciliation?limit=64")
+                .await
+            {
+                Ok(page) => ReconciliationStatusV1::Authorized {
+                    count: u16::try_from(page.items.len())
+                        .map_err(|_| LocalServiceError::InvalidResponse)?,
+                    truncated: page.next_run_id.is_some(),
+                },
+                Err(LocalServiceError::Unauthorized) => ReconciliationStatusV1::NotAuthorized,
+                Err(_) => ReconciliationStatusV1::Unavailable,
+            }
+        } else {
+            ReconciliationStatusV1::NotAuthorized
+        };
+        Ok(DesktopReadinessSnapshotV1 {
+            version: readiness.version,
+            overall: readiness.overall,
+            dependencies: readiness.dependencies,
+            workflows: readiness.workflows,
+            runtime,
+            reconciliation,
+        })
     }
 
     pub async fn version(&self) -> Result<BuildInfoV1, LocalServiceError> {
-        self.get("v1/operations/version").await
+        let version: ServiceBuildInfoV1 = self.get("v1/operations/version").await?;
+        Ok(BuildInfoV1 {
+            application: version.application,
+            version: version.version,
+            config_schema_version: version.config_schema_version,
+            store_schema_version: version.store_schema_version,
+            event_schema_version: version.event_schema_version,
+            checkpoint_schema_version: version.checkpoint_schema_version,
+        })
     }
 
     pub async fn create_session(&self) -> Result<SessionV1, LocalServiceError> {
@@ -1328,7 +1501,7 @@ mod tests {
         );
         assert!(unknown.is_err());
 
-        let response = BuildInfoV1 {
+        let response = ServiceBuildInfoV1 {
             application: "x".repeat(MAX_TEXT_BYTES + 1),
             version: "0.1.0".to_owned(),
             git_identity: None,
@@ -1339,6 +1512,34 @@ mod tests {
             checkpoint_schema_version: 4,
         };
         assert!(response.validate().is_err());
+
+        let desktop = BuildInfoV1 {
+            application: "enterprise-local-agent".to_owned(),
+            version: "0.1.0".to_owned(),
+            config_schema_version: 2,
+            store_schema_version: 2,
+            event_schema_version: 9,
+            checkpoint_schema_version: 4,
+        };
+        let encoded = serde_json::to_string(&desktop)
+            .unwrap_or_else(|error| panic!("serialize desktop build info: {error}"));
+        assert!(!encoded.contains("git_identity"));
+        assert!(!encoded.contains("deployment_fingerprint"));
+    }
+
+    #[test]
+    fn runtime_status_contract_is_bounded_and_rejects_payload_fields() {
+        let status = serde_json::from_str::<RuntimeStatusV1>(
+            r#"{"principal":{"principal_id":"desktop-user","kind":"human","roles":["user"]},"max_active_runs":8,"max_run_input_bytes":16384,"max_read_page_items":64,"workflow_budgets":[{"workflow_id":"enterprise-engineering-readonly-v1","max_model_calls":1,"max_tool_calls":0,"max_iterations":0,"max_approval_requests":0,"max_graph_steps":8,"max_elapsed_millis":30000}]}"#,
+        )
+        .unwrap_or_else(|error| panic!("decode runtime status: {error}"));
+        assert!(status.validate().is_ok());
+        assert!(
+            serde_json::from_str::<RuntimeStatusV1>(
+                r#"{"principal":{"principal_id":"desktop-user","kind":"human","roles":["user"],"token":"secret"},"max_active_runs":8,"max_run_input_bytes":16384,"max_read_page_items":64,"workflow_budgets":[]}"#,
+            )
+            .is_err()
+        );
     }
 
     #[test]

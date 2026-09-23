@@ -98,6 +98,10 @@ impl ConfiguredWorkflow for EnterpriseMvpWorkflow {
         &self.id
     }
 
+    fn budget(&self) -> RunBudget {
+        self.budget
+    }
+
     fn recovery_contract(&self) -> RecoveryContract {
         RecoveryContract::Graph {
             program_version: RECOVERY_VERSION,

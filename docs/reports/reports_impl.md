@@ -2105,3 +2105,59 @@
       - Terminal application results remain volatile across service restart by design.
       - No rename or archive operation was added.
       - No commit was created.
+
+# M16.7 implementation reporting
+
+• 1. Changed Tree
+
+- Added apps/agent-desktop/src/components/SettingsView.tsx.
+- Updated desktop app, strict bridge contracts, Tauri service client, service/HTTP identity projections, workflow budgets, and readiness composition.
+- No commit created.
+
+  1. Settings UX
+
+- Lazy-loaded Settings from app bar and command palette.
+- System/Light/Dark theme controls.
+- Compact grouped rows, restrained status indicators, responsive wrapping, and keyboard focus states.
+
+  1. Runtime/Operations Status
+
+- Shows service, model, OCPP/Standards knowledge, workflows, LocalWrite, containment, identity, versions, limits, budgets, MCP readiness, and authorized reconciliation count.
+- Added authenticated metadata-only /v1/runtime/status.
+
+  1. Identity/Authorization
+
+- Added default-deny ReadRuntimeStatus.
+- Returns only bounded principal ID, principal kind, and current roles.
+- Reconciliation counts are fetched only for principals carrying the Operator role.
+
+  1. Security Boundary
+
+- Existing service_readiness Tauri command aggregates the new projections.
+- No new Tauri command, permission, or capability.
+- Deployment fingerprint and git identity are removed in Rust before data reaches JavaScript.
+- No configuration mutation, generic HTTP, paths, credentials, or runtime authority exposed.
+
+  1. Bundle Impact
+
+- Settings is a separate lazy chunk: 7.13 kB, 2.39 kB gzip.
+- Existing 559 kB main-bundle warning remains unchanged.
+
+  1. Tests
+
+- Frontend: typecheck, ESLint, 31 tests, and production build passed.
+- Desktop Rust: 9 tests, strict Clippy, and Tauri release build passed in the GTK/WebKit image.
+- Full workspace strict Clippy passed.
+- Workspace tests excluding M11 adapter passed.
+- Full workspace reproduced only the documented M11 termination_reaps_process_group_descendant failure; no MCP files were changed.
+- cargo fmt --all -- --check and git diff --check passed.
+- Codebase Memory blast-radius scan found no unexpected authority-boundary change.
+
+  1. Screenshots
+
+- None captured; validation was headless without a running desktop service.
+
+  1. Deviations
+
+- Normal build output directory was owned by a previous container user, so the production frontend build used /tmp/ela-m167-dist-final.
+- The known M11 process-reaping regression remains documented separately and unchanged.

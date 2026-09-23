@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const readinessStatus = z.enum(["ready", "degraded", "unavailable"]);
+const principalRole = z.enum(["user", "approver", "operator"]);
 const uuid = z.string().uuid();
 const boundedMetadata = z.string().min(1).max(256);
 
@@ -43,6 +44,46 @@ export const readinessSchema = z
           .strict(),
       )
       .max(32),
+    runtime: z
+      .object({
+        principal: z
+          .object({
+            principal_id: z.string().min(1).max(256),
+            kind: z.enum(["human", "service", "local_process"]),
+            roles: z.array(principalRole).min(1).max(3),
+          })
+          .strict(),
+        max_active_runs: z.number().int().positive(),
+        max_run_input_bytes: z.number().int().positive(),
+        max_read_page_items: z.number().int().positive().max(64),
+        workflow_budgets: z
+          .array(
+            z
+              .object({
+                workflow_id: z.string().min(1).max(128),
+                max_model_calls: z.number().int().nonnegative(),
+                max_tool_calls: z.number().int().nonnegative(),
+                max_iterations: z.number().int().nonnegative(),
+                max_approval_requests: z.number().int().nonnegative(),
+                max_graph_steps: z.number().int().nonnegative().max(64),
+                max_elapsed_millis: z.number().int().positive(),
+              })
+              .strict(),
+          )
+          .max(32),
+      })
+      .strict(),
+    reconciliation: z.discriminatedUnion("access", [
+      z
+        .object({
+          access: z.literal("authorized"),
+          count: z.number().int().nonnegative().max(64),
+          truncated: z.boolean(),
+        })
+        .strict(),
+      z.object({ access: z.literal("not_authorized") }).strict(),
+      z.object({ access: z.literal("unavailable") }).strict(),
+    ]),
   })
   .strict();
 
@@ -50,8 +91,6 @@ export const buildInfoSchema = z
   .object({
     application: z.string().min(1).max(128),
     version: z.string().min(1).max(64),
-    git_identity: z.string().max(128).nullable(),
-    deployment_fingerprint: z.string().min(1).max(256),
     config_schema_version: z.number().int().nonnegative(),
     store_schema_version: z.number().int().nonnegative(),
     event_schema_version: z.number().int().nonnegative(),

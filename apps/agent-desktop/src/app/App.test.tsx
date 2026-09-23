@@ -29,13 +29,42 @@ function event(sequence: number, category: "knowledge" | "model" | "graph", phas
   return { version: 2, sequence, run_id: runId, category, phase, correlation_id: `${category}-${sequence}`, workflow_id: workflow, knowledge_backends: category === "knowledge" ? ["standards"] : [], graph_node_id: graphNodeId, budget_usage: null, budget_limit: null };
 }
 
+function readiness(overrides: Record<string, unknown> = {}) {
+  return {
+    version: 1,
+    overall: "ready",
+    dependencies: [
+      { dependency: "model", status: "ready", code: "ready", checked_unix_seconds: 1 },
+      { dependency: "knowledge", status: "ready", code: "ready", checked_unix_seconds: 1 },
+      { dependency: "knowledge:standards", status: "ready", code: "ready", checked_unix_seconds: 1 },
+      { dependency: "containment", status: "ready", code: "bounded_probe_passed", checked_unix_seconds: 1 },
+    ],
+    workflows: [
+      { workflow, enabled: true, required: true, status: "ready" },
+      { workflow: localWriteWorkflow, enabled: true, required: false, status: "ready" },
+    ],
+    runtime: {
+      principal: { principal_id: "desktop-user", kind: "human", roles: ["user", "approver"] },
+      max_active_runs: 8,
+      max_run_input_bytes: 16_384,
+      max_read_page_items: 64,
+      workflow_budgets: [
+        { workflow_id: workflow, max_model_calls: 1, max_tool_calls: 0, max_iterations: 0, max_approval_requests: 0, max_graph_steps: 8, max_elapsed_millis: 30_000 },
+        { workflow_id: localWriteWorkflow, max_model_calls: 1, max_tool_calls: 1, max_iterations: 0, max_approval_requests: 1, max_graph_steps: 12, max_elapsed_millis: 60_000 },
+      ],
+    },
+    reconciliation: { access: "not_authorized" },
+    ...overrides,
+  };
+}
+
 function installServiceMock(handler?: (command: string, args?: Record<string, unknown>) => unknown) {
   invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
     const custom = handler?.(command, args);
     if (custom !== undefined) return Promise.resolve(custom);
     if (command === "service_health") return Promise.resolve({ version: 1, lifecycle: "serving" });
-    if (command === "service_readiness") return Promise.resolve({ version: 1, overall: "ready", dependencies: [{ dependency: "knowledge", status: "ready", code: "ready", checked_unix_seconds: 1 }], workflows: [{ workflow, enabled: true, required: true, status: "ready" }, { workflow: localWriteWorkflow, enabled: true, required: false, status: "ready" }] });
-    if (command === "service_version") return Promise.resolve({ application: "enterprise-local-agent", version: "0.1.0", git_identity: null, deployment_fingerprint: "test", config_schema_version: 2, store_schema_version: 2, event_schema_version: 9, checkpoint_schema_version: 4 });
+    if (command === "service_readiness") return Promise.resolve(readiness());
+    if (command === "service_version") return Promise.resolve({ application: "enterprise-local-agent", version: "0.1.0", config_schema_version: 2, store_schema_version: 2, event_schema_version: 9, checkpoint_schema_version: 4 });
     if (command === "conversation_create_session") return Promise.resolve({ session_id: sessionId });
     if (command === "conversation_list_sessions") return Promise.resolve({ items: [], next_session_id: null });
     if (command === "conversation_list_runs") return Promise.resolve({ items: [], next_run_id: null });
@@ -426,5 +455,86 @@ describe("App shell states", () => {
     await screen.findByText("Local service ready");
     expect(screen.getByRole("button", { name: "Expand conversations" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Task composer" })).toBeInTheDocument();
+  });
+
+  it("lazy-loads Settings from the app bar and changes the local theme", async () => {
+    installServiceMock();
+    renderApp();
+    await screen.findByText("Local service ready");
+    expect(screen.queryByRole("heading", { name: "Settings" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("radio", { name: "Dark" }));
+    expect(document.documentElement).toHaveClass("dark");
+    expect(window.localStorage.getItem("ela-desktop-theme")).toBe("dark");
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    expect(await screen.findByRole("textbox", { name: "Task composer" })).toBeInTheDocument();
+  });
+
+  it("opens Settings from the searchable command palette", async () => {
+    installServiceMock();
+    renderApp();
+    await screen.findByText("Local service ready");
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    fireEvent.click(await screen.findByRole("button", { name: /Open settings/ }));
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("renders safe workflow, identity, readiness, and unavailable LocalWrite status", async () => {
+    installServiceMock((command) => {
+      if (command !== "service_readiness") return undefined;
+      return readiness({
+        overall: "degraded",
+        dependencies: [
+          { dependency: "model", status: "degraded", code: "probe_failed", checked_unix_seconds: 1 },
+          { dependency: "knowledge", status: "ready", code: "ready", checked_unix_seconds: 1 },
+          { dependency: "containment", status: "unavailable", code: "unavailable", checked_unix_seconds: 1 },
+        ],
+        workflows: [
+          { workflow, enabled: true, required: true, status: "ready" },
+          { workflow: localWriteWorkflow, enabled: false, required: false, status: "unavailable" },
+        ],
+      });
+    });
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+
+    expect(await screen.findByText("desktop-user")).toBeInTheDocument();
+    expect(screen.getByText("user · approver")).toBeInTheDocument();
+    expect(screen.getByText("LocalWrite").parentElement?.parentElement).toHaveTextContent("Unavailable");
+    expect(screen.getByText("Model provider").parentElement?.parentElement).toHaveTextContent("Degraded");
+    expect(screen.getByText("Containment").parentElement?.parentElement).toHaveTextContent("Unavailable");
+  });
+
+  it("shows reconciliation counts only for an operator-authorized projection", async () => {
+    installServiceMock((command) => {
+      if (command !== "service_readiness") return undefined;
+      const base = readiness();
+      return readiness({
+        runtime: {
+          ...base.runtime,
+          principal: { principal_id: "ops-user", kind: "human", roles: ["operator"] },
+        },
+        reconciliation: { access: "authorized", count: 1, truncated: false },
+      });
+    });
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+    fireEvent.click(await screen.findByText("Advanced operations"));
+    expect(screen.getByText("1 run requires attention")).toBeInTheDocument();
+    expect(screen.getByText("ops-user")).toBeInTheDocument();
+  });
+
+  it("does not render security configuration or credential-bearing metadata", async () => {
+    installServiceMock();
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+    fireEvent.click(await screen.findByText("Advanced operations"));
+    const visible = document.body.textContent ?? "";
+    for (const forbidden of ["deployment_fingerprint", "git_identity", "credential", "token", "seal key", "/usr/bin", "capsule"]) {
+      expect(visible).not.toContain(forbidden);
+    }
+    expect(screen.getByText("Operator access required")).toBeInTheDocument();
   });
 });

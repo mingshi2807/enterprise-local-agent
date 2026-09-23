@@ -116,6 +116,7 @@ pub enum AuthorizationAction {
     DecideApproval,
     ResumeRun,
     AbortWaiting,
+    ReadRuntimeStatus,
     ReadOperations,
     InspectReconciliation,
 }
@@ -228,6 +229,11 @@ impl ServiceAuthorizationPolicy for DefaultDenyServiceAuthorizationPolicy {
                     && self.workflow_allowed(workflow_id)
             }
             (A::ListWaiting, R::Global) => principal.has_role(Role::Approver),
+            (A::ReadRuntimeStatus, R::Global) => {
+                principal.has_role(Role::User)
+                    || principal.has_role(Role::Approver)
+                    || principal.has_role(Role::Operator)
+            }
             (
                 A::ReadApprovalPreview | A::DecideApproval,
                 R::Approval {
@@ -627,6 +633,26 @@ mod tests {
             ),
             AuthorizationDecision::Denied
         );
+    }
+
+    #[test]
+    fn runtime_status_is_available_to_authenticated_roles_only() {
+        let policy = policy(ApprovalSeparation::RequesterMayApprove);
+        for role in [
+            PrincipalRole::User,
+            PrincipalRole::Approver,
+            PrincipalRole::Operator,
+        ] {
+            let actor = principal("status-reader", &[role]);
+            assert_eq!(
+                policy.authorize(
+                    &actor,
+                    AuthorizationAction::ReadRuntimeStatus,
+                    AuthorizationResource::Global,
+                ),
+                AuthorizationDecision::Granted
+            );
+        }
     }
 
     #[test]

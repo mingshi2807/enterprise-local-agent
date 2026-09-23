@@ -311,6 +311,9 @@ impl ConfiguredWorkflow for HealthWorkflow {
     fn id(&self) -> &WorkflowId {
         &self.id
     }
+    fn budget(&self) -> RunBudget {
+        self.budget
+    }
     fn recovery_contract(&self) -> RecoveryContract {
         RecoveryContract::NonRestartable
     }
@@ -496,6 +499,18 @@ async fn main() -> anyhow::Result<()> {
             checked_unix_seconds: checked_at,
         },
     ];
+    match &config.knowledge {
+        KnowledgeConfigV1::Ocpp { .. } => {
+            dependencies.push(ready_dependency("knowledge:ocpp", checked_at));
+        }
+        KnowledgeConfigV1::Standards { .. } => {
+            dependencies.push(ready_dependency("knowledge:standards", checked_at));
+        }
+        KnowledgeConfigV1::Federated { .. } => {
+            dependencies.push(ready_dependency("knowledge:ocpp", checked_at));
+            dependencies.push(ready_dependency("knowledge:standards", checked_at));
+        }
+    }
     if config.workflows.local_write_enabled {
         for dependency in ["action_seal_key", "workspace_binding", "tool_contract"] {
             dependencies.push(DependencyReadinessV1 {
