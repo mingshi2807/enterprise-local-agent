@@ -119,6 +119,43 @@ describe("App conversation", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("conversation_cancel_run", { sessionId, runId }));
   });
 
+  it("auto-grows the composer and enforces the bounded UTF-8 input before sending", async () => {
+    installServiceMock();
+    renderApp();
+    const composer = await screen.findByRole("textbox", { name: "Task composer" });
+    await waitFor(() => expect(composer).toBeEnabled());
+    Object.defineProperty(composer, "scrollHeight", { configurable: true, value: 132 });
+    fireEvent.change(composer, { target: { value: "Line one\nLine two\nLine three" } });
+    expect(composer).toHaveStyle({ height: "132px" });
+
+    fireEvent.change(composer, { target: { value: "x".repeat(8_193) } });
+    expect(composer).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText("8,193 / 8,192 bytes")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send task" })).toBeDisabled();
+  });
+
+  it("renders readable GFM tables while keeping model-provided links inert", async () => {
+    installServiceMock((command) => {
+      if (command === "conversation_read_events") return [event(0, "model", "completed")];
+      if (command === "conversation_run_status") return runView({
+        disposition: "completed",
+        last_sequence: 0,
+        outcome: "completed",
+        result: {
+          kind: "final_answer",
+          answer: "| State | Meaning |\n| --- | --- |\n| Ready | Safe |\n\n[External reference](https://example.invalid)",
+          citations: [],
+        },
+      });
+      return undefined;
+    });
+    renderApp();
+    await submit("Render structured answer");
+    expect(await screen.findByRole("table")).toBeInTheDocument();
+    expect(screen.getByText("External reference")).toBeInTheDocument();
+    expect(document.querySelector("a[href]")).toBeNull();
+  });
+
   it("starts only the fixed LocalWrite workflow when explicitly selected", async () => {
     installServiceMock((command) => {
       if (command === "conversation_start_localwrite_run") return runView({ workflow_id: localWriteWorkflow });
@@ -294,6 +331,43 @@ describe("App conversation", () => {
     expect(window.localStorage.length).toBe(0);
   });
 
+  it("labels a durable cancelled run as cancelled rather than failed", async () => {
+    installServiceMock((command) => {
+      if (command === "conversation_list_sessions") return {
+        items: [{
+          session_id: sessionId,
+          title: "Cancelled task",
+          last_activity_unix_millis: 1_000,
+          latest_run: { run_id: runId, disposition: "failed", last_sequence: 0, outcome: "cancelled", workflow_id: workflow, started_at_unix_millis: 900, result_available: false },
+        }],
+        next_session_id: null,
+      };
+      if (command === "conversation_list_runs") return {
+        items: [{ run_id: runId, disposition: "failed", last_sequence: 0, outcome: "cancelled", workflow_id: workflow, started_at_unix_millis: 900, result_available: false }],
+        next_run_id: null,
+      };
+      if (command === "conversation_run_status") return runView({ disposition: "failed", last_sequence: 0, outcome: "cancelled" });
+      return undefined;
+    });
+    renderApp();
+    expect(await screen.findByText("Cancelled")).toBeInTheDocument();
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Run needs attention")).not.toBeInTheDocument();
+  });
+
+  it("styles a cancelled run distinctly from a failure", async () => {
+    installServiceMock((command) => {
+      if (command === "conversation_read_events") return [event(0, "graph", "failed")];
+      if (command === "conversation_run_status") return runView({ disposition: "failed", last_sequence: 0, outcome: "cancelled" });
+      return undefined;
+    });
+    renderApp();
+    await submit("Cancel this task");
+    const message = await screen.findByText("This run was cancelled.");
+    expect(message.closest("article")).toHaveClass("message-cancelled");
+    expect(screen.getByLabelText("Run summary")).toHaveTextContent("Cancelled");
+  });
+
   it("reports a malformed terminal model result without exposing raw output", async () => {
     installServiceMock((command) => {
       if (command === "conversation_read_events") return [event(0, "model", "completed")];
@@ -315,6 +389,7 @@ describe("App conversation", () => {
     renderApp();
     await submit("Legacy waiting state");
     expect(await screen.findByText("This run requires operator reconciliation and cannot be resumed from the desktop.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Run summary")).toHaveTextContent("Reconciliation required");
     expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Resume/ })).not.toBeInTheDocument();
   });
@@ -354,6 +429,7 @@ describe("App conversation", () => {
     expect(await screen.findByRole("heading", { name: "LocalWrite approval required" })).toBeInTheDocument();
     expect(screen.getByText("reports/result.txt")).toBeInTheDocument();
     expect(screen.getByText("28 bytes")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
     expect(invoke.mock.calls.some(([command]) => command === "conversation_start_localwrite_run")).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
@@ -439,6 +515,7 @@ describe("App shell states", () => {
     expect(screen.getByRole("button", { name: "Expand conversations" })).toBeInTheDocument();
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Search commands" })).toHaveAttribute("aria-activedescendant", "command-new-task");
   });
 
   it("shows a sanitized unavailable state", async () => {
@@ -446,6 +523,23 @@ describe("App shell states", () => {
     renderApp();
     expect(await screen.findByRole("heading", { name: "Local service unavailable" })).toBeInTheDocument();
     expect(screen.queryByText(/credential=secret/)).not.toBeInTheDocument();
+  });
+
+  it("shows unavailable after a previously healthy service disconnects", async () => {
+    let healthAvailable = true;
+    installServiceMock((command) => {
+      if (command === "service_health" && !healthAvailable) return Promise.reject(new Error("offline"));
+      return undefined;
+    });
+    renderApp();
+    expect(await screen.findByText("Local service ready")).toBeInTheDocument();
+
+    healthAvailable = false;
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    fireEvent.change(screen.getByRole("textbox", { name: "Search commands" }), { target: { value: "refresh" } });
+    fireEvent.click(screen.getByRole("option", { name: /Refresh service status/ }));
+
+    expect(await screen.findByRole("heading", { name: "Local service unavailable" })).toBeInTheDocument();
   });
 
   it("keeps the task workspace visible in a compact window", async () => {
@@ -465,11 +559,13 @@ describe("App shell states", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close settings" })).toHaveFocus();
     fireEvent.click(screen.getByRole("radio", { name: "Dark" }));
     expect(document.documentElement).toHaveClass("dark");
     expect(window.localStorage.getItem("ela-desktop-theme")).toBe("dark");
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     expect(await screen.findByRole("textbox", { name: "Task composer" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open settings" })).toHaveFocus());
   });
 
   it("opens Settings from the searchable command palette", async () => {

@@ -50,9 +50,11 @@ export function ApprovalPanel({ approval, onApprove, onDeny, onResume, onAbort }
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-3">
             <h3 id="approval-title" className="text-xs font-semibold">LocalWrite approval required</h3>
-            <span className="text-[11px] capitalize text-muted">{item.state}</span>
+            <span className="rounded-control border border-border px-1.5 py-0.5 text-[11px] capitalize text-secondary" aria-live="polite">
+              {item.state === "approved" ? "Ready to resume" : item.state}
+            </span>
           </div>
-          {loadingPreview && <p className="mt-2 text-xs text-muted">Loading trusted preview…</p>}
+          {loadingPreview && <p className="mt-2 text-xs text-muted" role="status">Loading trusted preview…</p>}
           {preview !== null && (
             <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
               <dt className="text-muted">Operation</dt><dd>{preview.operation}</dd>
@@ -68,7 +70,7 @@ export function ApprovalPanel({ approval, onApprove, onDeny, onResume, onAbort }
           <div className="mt-3 flex flex-wrap items-center gap-2">
             {item.state === "waiting" && (
               <>
-                <Button className="h-7 px-2 text-xs" disabled={busy || preview === null} onClick={() => void run(onApprove)}>
+                <Button className="h-7 px-2 text-xs" variant="primary" disabled={busy || preview === null} onClick={() => void run(onApprove)}>
                   <Check aria-hidden="true" className="size-3.5" />Approve
                 </Button>
                 <Button className="h-7 px-2 text-xs" variant="secondary" disabled={busy || preview === null} onClick={() => void run(onDeny)}>
@@ -79,14 +81,14 @@ export function ApprovalPanel({ approval, onApprove, onDeny, onResume, onAbort }
             )}
             {decided && (
               <>
-                <Button className="h-7 px-2 text-xs" disabled={busy} onClick={() => void run(onResume)}>
+                <Button className="h-7 px-2 text-xs" variant="primary" disabled={busy} onClick={() => void run(onResume)}>
                   {busy && <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin" />}
                   {item.state === "approved" ? "Resume approved run" : "Finish denied run"}
                 </Button>
-                <span className="text-[11px] text-muted">Execution starts only after explicit resume.</span>
               </>
             )}
             {item.state === "executing" && <span className="text-xs text-muted">Contained execution is in progress.</span>}
+            {busy && item.state === "waiting" && <span className="text-[11px] text-muted" role="status">Recording decision…</span>}
           </div>
         </div>
       </div>

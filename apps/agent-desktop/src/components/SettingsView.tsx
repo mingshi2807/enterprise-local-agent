@@ -1,4 +1,5 @@
 import { Monitor, Moon, Sun, X } from "lucide-react";
+import { useEffect, useRef } from "react";
 
 import { useTheme, type ThemePreference } from "@/app/ThemeContext";
 import type { BuildInfo, Readiness } from "@/bridge/contracts";
@@ -73,6 +74,15 @@ function formatDuration(milliseconds: number) {
 
 export function SettingsView({ state, readiness, version, onClose }: SettingsViewProps) {
   const { preference, setPreference } = useTheme();
+  const closeButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    closeButton.current?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
   const principal = readiness?.runtime.principal;
   const localWrite = readiness?.workflows.find(
     (workflow) => workflow.workflow === "enterprise-engineering-localwrite-v1",
@@ -93,7 +103,7 @@ export function SettingsView({ state, readiness, version, onClose }: SettingsVie
             <h2 id="settings-heading" className="text-base font-semibold">Settings</h2>
             <p className="mt-1 text-xs text-muted">Appearance and trusted runtime status</p>
           </div>
-          <Button type="button" variant="ghost" size="icon" aria-label="Close settings" onClick={onClose}>
+          <Button ref={closeButton} type="button" variant="ghost" size="icon" aria-label="Close settings" onClick={onClose}>
             <X aria-hidden="true" className="size-4" />
           </Button>
         </div>

@@ -111,6 +111,8 @@ export function CommandPalette({ open, commands, onOpenChange }: CommandPaletteP
                   setActiveIndex(0);
                 }}
                 aria-label="Search commands"
+                aria-controls="command-palette-options"
+                aria-activedescendant={filtered[activeIndex] === undefined ? undefined : `command-${filtered[activeIndex].id}`}
                 placeholder="Type a command"
                 className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted"
               />
@@ -118,7 +120,7 @@ export function CommandPalette({ open, commands, onOpenChange }: CommandPaletteP
                 <X aria-hidden="true" className="size-4" />
               </Button>
             </div>
-            <div className="max-h-72 overflow-auto p-1.5" role="listbox" aria-label="Available commands">
+            <div id="command-palette-options" className="max-h-72 overflow-auto p-1.5" role="listbox" aria-label="Available commands">
               {filtered.length === 0 ? (
                 <p className="px-3 py-6 text-center text-xs text-muted">No matching commands</p>
               ) : (
@@ -127,6 +129,7 @@ export function CommandPalette({ open, commands, onOpenChange }: CommandPaletteP
                   return (
                     <button
                       key={item.id}
+                      id={`command-${item.id}`}
                       type="button"
                       role="option"
                       aria-selected={index === activeIndex}

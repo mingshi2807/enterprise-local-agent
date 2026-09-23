@@ -1,5 +1,5 @@
 import { Check, Circle, CircleAlert, Copy, LoaderCircle, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { BuildInfo, Readiness } from "@/bridge/contracts";
 import { Button } from "@/components/ui/button";
@@ -20,17 +20,26 @@ interface RunInspectorProps {
 
 function CopyableId({ label, value }: { label: string; value: string }) {
   const [copied, setCopied] = useState(false);
+  const resetTimer = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (resetTimer.current !== null) window.clearTimeout(resetTimer.current);
+  }, []);
   const copy = async () => {
-    await navigator.clipboard.writeText(value);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1_500);
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      if (resetTimer.current !== null) window.clearTimeout(resetTimer.current);
+      resetTimer.current = window.setTimeout(() => setCopied(false), 1_500);
+    } catch {
+      setCopied(false);
+    }
   };
 
   return (
     <div className="grid grid-cols-[5rem_minmax(0,1fr)_1.75rem] items-center gap-2 py-1 text-xs">
       <span className="text-muted">{label}</span>
       <code className="truncate text-[11px] text-secondary" title={value}>{value}</code>
-      <Button type="button" variant="ghost" size="icon" aria-label={`Copy ${label}`} title={`Copy ${label}`} onClick={() => void copy()}>
+      <Button type="button" variant="ghost" size="icon" aria-label={copied ? `${label} copied` : `Copy ${label}`} title={copied ? "Copied" : `Copy ${label}`} onClick={() => void copy()}>
         {copied ? <Check aria-hidden="true" className="size-3 text-success" /> : <Copy aria-hidden="true" className="size-3" />}
       </Button>
     </div>
@@ -40,11 +49,21 @@ function CopyableId({ label, value }: { label: string; value: string }) {
 function TimelineIcon({ state }: { state: TimelineItem["state"] }) {
   if (state === "active") return <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin text-accent" />;
   if (state === "completed") return <Check aria-hidden="true" className="size-3.5 text-success" />;
-  if (state === "failed" || state === "cancelled") return <CircleAlert aria-hidden="true" className="size-3.5 text-danger" />;
+  if (state === "failed") return <CircleAlert aria-hidden="true" className="size-3.5 text-danger" />;
+  if (state === "cancelled") return <Circle aria-hidden="true" className="size-3.5 text-muted" />;
   return <Circle aria-hidden="true" className="size-3 text-border-strong" />;
 }
 
 export function RunInspector({ state, readiness, version, conversation, nowMillis, onClose }: RunInspectorProps) {
+  const closeButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    closeButton.current?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
   const active = conversation?.activeRun ?? null;
   const status = conversation?.lastRun ?? null;
   const events = active?.events ?? conversation?.lastRunEvents ?? [];
@@ -55,7 +74,7 @@ export function RunInspector({ state, readiness, version, conversation, nowMilli
     <aside aria-labelledby="inspector-title" className="flex h-full w-[300px] flex-col">
       <div className="flex h-10 items-center justify-between border-b border-border px-3">
         <h2 id="inspector-title" className="text-xs font-semibold">Run details</h2>
-        <Button variant="ghost" size="icon" aria-label="Close inspector" onClick={onClose}>
+        <Button ref={closeButton} variant="ghost" size="icon" aria-label="Close inspector" onClick={onClose}>
           <X aria-hidden="true" className="size-3.5" />
         </Button>
       </div>

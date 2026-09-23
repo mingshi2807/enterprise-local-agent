@@ -159,7 +159,11 @@ export function runDetails(
     || status.disposition === "manual_reconciliation_required";
   const elapsedMillis = status.duration_millis ?? Math.max(0, nowMillis - startedAtMillis);
   const currentPhase = terminal
-    ? status.outcome === "cancelled" ? "Cancelled" : status.disposition === "completed" ? "Complete" : "Failed"
+    ? status.disposition === "manual_reconciliation_required"
+      ? "Reconciliation required"
+      : status.outcome === "cancelled"
+        ? "Cancelled"
+        : status.disposition === "completed" ? "Complete" : "Failed"
     : (activity ?? "Starting…").replace("…", "");
 
   return {
@@ -176,7 +180,11 @@ export function runDetails(
     citationCount: status.result?.kind === "final_answer" ? status.result.citations.length : 0,
     retrievalIds,
     modelIds,
-    terminalStatus: terminal ? (status.outcome ?? status.disposition) : null,
+    terminalStatus: terminal
+      ? status.disposition === "manual_reconciliation_required"
+        ? status.disposition
+        : (status.outcome ?? status.disposition)
+      : null,
     timeline: timelineFor(events, status, !terminal),
   };
 }

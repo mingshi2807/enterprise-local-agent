@@ -2161,3 +2161,134 @@
 
 - Normal build output directory was owned by a previous container user, so the production frontend build used /tmp/ela-m167-dist-final.
 - The known M11 process-reaping regression remains documented separately and unchanged.
+
+# M16.8 implementation reporting
+
+• 1. Visual Changes
+
+- Refined typography, spacing, borders, icon sizing, status colors, and light/dark parity.
+- Improved Markdown headings, lists, tables, quotes, inline code, and code blocks.
+- Preserved neutral surfaces, limited radius, restrained color, and minimal shadows.
+
+  1. Conversation/Composer Polish
+
+- Auto-growing composer from 56–160px.
+- Enforced the 8 KiB UTF-8 input limit with accessible feedback.
+- Clear Send, Stop, disabled, offline, and approval-required states.
+- Added manual-scroll preservation and “Jump to latest.”
+- Reduced elapsed-time rerenders from 250ms to 1s.
+- Memoized Markdown and session-history rendering.
+
+  1. Activity/HITL Polish
+
+- Removed duplicate Stop controls.
+- Refined approval states and made approved actions clearly ready to resume.
+- Improved inspector timeline treatment for cancellation and terminal states.
+- Server state remains authoritative; no approval semantics changed.
+
+  1. Accessibility
+
+- Added focus transfer and restoration for Settings and Run Inspector.
+- Escape closes temporary surfaces.
+- Command palette now exposes active option relationships.
+- Added reduced-motion and forced-colors behavior.
+- Improved text scaling, disabled-state semantics, labels, and copy announcements.
+
+  1. Responsive Behavior
+
+- CSS can reflow down to 320px for browser zoom; native Tauri minimum remains 760px.
+- Added compact layout adjustments below 820px.
+- Conversation width remains readable at wide sizes.
+- CSS: 25.96 → 27.79 kB, gzip 6.70 → 7.10 kB.
+- Markdown, inspector, settings, and approval surfaces remain lazy chunks.
+- Existing 500 kB main-chunk warning remains; no artificial splitting was added.
+
+  1. Tests
+
+- TypeScript typecheck: PASS
+- ESLint: PASS
+- Frontend: 33 tests passed
+- Production Vite build: PASS
+- Rust formatting/diff checks: PASS
+- Desktop Rust: 9 tests passed
+- Desktop strict Clippy: PASS
+- Tauri release build: PASS
+- Workspace strict Clippy: PASS
+- Workspace tests excluding agent-mcp-adapters: PASS
+- Full workspace retains the known M11 failure: termination_reaps_process_group_descendant; the other 12 MCP stdio tests passed.
+- Tauri capability/bridge diff: empty
+- Codebase Memory blast radius: no transitive runtime impact
+
+  1. Screenshots/Manual Review
+  Automated screenshots were unavailable because the environment lacks suitable browser display/automation tooling for injecting the required service states.
+
+  Manual review checklist:
+
+- 760×520, 1280×800, and 1600×1000
+- Light, dark, and system themes
+- 100%, 150%, and 200% text scaling
+- Empty, active, completed, Waiting, degraded, unavailable, cancelled, failed, result-unavailable, and reconciliation states
+- Code, tables, citations, long answers, manual scrolling
+- Keyboard navigation, Escape, focus restoration, reduced motion, and forced colors
+
+  1. Remaining UX Debt
+
+- Main application chunk still exceeds Vite’s advisory threshold.
+- No dedicated automated visual-regression or axe test harness.
+- Large history uses bounded pagination and rendering containment, not virtualization.
+- Manual cross-platform native-window validation remains necessary.
+
+  1. Deviations
+
+- No screenshots were produced.
+- The known M11 process-reaping regression remains separate and unchanged.
+- No runtime APIs, Tauri capabilities, service commands, or authority boundaries changed.
+- No commit was created.
+
+# M16.8 review reporting
+
+• 1. Environments/Sizes Reviewed
+
+- Native Tauri release binary using GTK/WebKitGTK in the existing runtime container, connected to host X11.
+- Controlled loopback service fixture using only existing service contracts.
+- Reviewed at 760×520, 1280×800, and 1700×900.
+- Reviewed at 100%, 150%, and 200% native GTK DPI scaling.
+- Reviewed light and dark themes.
+- Covered all requested conversation, activity, HITL, failure, Settings, Inspector, and command-palette states.
+- Keyboard-only palette, Settings, Inspector, Escape, focus restoration, and approval interactions were exercised.
+
+  1. Visual Issues Found
+
+  1. Composer/footer clipping at 200% scaling.
+  1. A disconnected service remained visually “Degraded” after a previously successful health check.
+  1. Cancelled runs appeared as “Failed” in history and used failure styling.
+  1. Reconciliation summaries displayed generic “Failed” instead of the durable reconciliation classification.
+
+  1. Fixes
+
+- Removed redundant WebView minimum-height constraints while retaining Tauri’s native minimum window.
+- Treat health refetch failures as service unavailable.
+- Added distinct neutral cancellation styling and corrected sidebar status/icon behavior.
+- Show “Reconciliation required” in run summaries and inspector phase metadata.
+- Added regression coverage for disconnects, durable cancellation, cancellation styling, and reconciliation classification.
+- Final checks:
+  - TypeScript and ESLint: PASS
+  - Frontend: 36 tests passed
+  - Production build: PASS
+  - Desktop Rust: 9 tests passed
+  - Strict desktop Clippy: PASS
+  - Tauri release build: PASS
+  - Formatting and diff checks: PASS
+  - Capability/bridge diff: empty
+
+  1. Remaining UX Debt
+
+- Native AT-SPI screen-reader integration could not be exercised because the runtime container lacks an accessibility bus.
+- No automated pixel-diff visual suite exists.
+- The existing main-bundle advisory remains at 561.29 kB, 172.66 kB gzip.
+- Static fixture timestamps produced unrealistic elapsed durations during review; this did not affect layout behavior.
+
+  1. Final Verdict
+  M16.8 PASS
+
+  No architecture, service command, capability, permission, or execution-authority changes were introduced. No commit was created.

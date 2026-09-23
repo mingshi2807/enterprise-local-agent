@@ -1,5 +1,6 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { ArrowUp, CircleAlert, LoaderCircle, RefreshCw, Square, Sparkles } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, CircleAlert, LoaderCircle, RefreshCw, Square, Sparkles } from "lucide-react";
+import { useReducedMotion } from "motion/react";
 
 import { Button } from "@/components/ui/button";
 import { formatDuration, runDetails } from "@/features/runActivity";
@@ -13,6 +14,7 @@ const ApprovalPanel = lazy(() =>
 );
 
 type ServiceState = "ready" | "degraded" | "unavailable" | "draining";
+const MAX_INPUT_BYTES = 8 * 1024;
 
 interface Props {
   conversation: Conversation | null;
@@ -35,15 +37,28 @@ interface Props {
   onAbort: () => Promise<unknown>;
 }
 
-function Composer({ disabled, busy, focusNonce, onSend, localWriteReady }: Pick<Props, "focusNonce" | "onSend" | "localWriteReady"> & { disabled: boolean; busy: boolean }) {
+function Composer({ workflowReady, running, stoppable, approvalRequired, busy, cancelling, focusNonce, onSend, onCancel, localWriteReady }: Pick<Props, "focusNonce" | "onSend" | "onCancel" | "localWriteReady" | "cancelling"> & { workflowReady: boolean; running: boolean; stoppable: boolean; approvalRequired: boolean; busy: boolean }) {
   const [text, setText] = useState("");
   const [mode, setMode] = useState<WorkflowMode>("readonly");
   const [submissionError, setSubmissionError] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const bytes = new TextEncoder().encode(text).byteLength;
-  const valid = text.trim().length > 0 && bytes <= 8 * 1024 && !disabled && !busy;
+  const valid = text.trim().length > 0
+    && bytes <= MAX_INPUT_BYTES
+    && workflowReady
+    && (mode === "readonly" || localWriteReady)
+    && !running
+    && !busy;
 
   useEffect(() => textarea.current?.focus(), [focusNonce]);
+  useLayoutEffect(() => {
+    const element = textarea.current;
+    if (element === null) return;
+    element.style.height = "0px";
+    const height = Math.min(Math.max(element.scrollHeight, 56), 160);
+    element.style.height = `${height}px`;
+    element.style.overflowY = element.scrollHeight > 160 ? "auto" : "hidden";
+  }, [text]);
 
   const submit = async () => {
     if (!valid) return;
@@ -61,17 +76,18 @@ function Composer({ disabled, busy, focusNonce, onSend, localWriteReady }: Pick<
   return (
     <div className="mx-auto w-full max-w-3xl px-4 pb-4">
       {submissionError && <p className="mb-2 text-xs text-danger" role="alert">The local agent service could not start this task.</p>}
-      <div className="rounded-composer border border-border-strong bg-panel focus-within:border-focus focus-within:ring-1 focus-within:ring-focus">
+      <div className="rounded-composer border border-border-strong bg-panel transition-colors focus-within:border-focus focus-within:ring-1 focus-within:ring-focus">
         <label htmlFor="task-composer" className="sr-only">Task composer</label>
         <textarea
           ref={textarea}
           id="task-composer"
-          rows={2}
+          rows={1}
           value={text}
-          disabled={disabled}
+          disabled={!workflowReady || running}
           aria-describedby="composer-status"
-          placeholder={disabled ? "ReadOnly workflow unavailable" : "Ask about your enterprise engineering knowledge"}
-          className="block max-h-40 min-h-18 w-full resize-none bg-transparent px-3.5 pt-3 text-sm leading-6 outline-none placeholder:text-muted disabled:cursor-not-allowed disabled:opacity-60"
+          aria-invalid={bytes > MAX_INPUT_BYTES}
+          placeholder={running ? "Run in progress" : !workflowReady ? "ReadOnly workflow unavailable" : "Ask about your enterprise engineering knowledge"}
+          className="block min-h-14 w-full resize-none bg-transparent px-3.5 pt-3 text-sm leading-6 outline-none placeholder:text-muted disabled:cursor-not-allowed disabled:opacity-60"
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
@@ -85,12 +101,18 @@ function Composer({ disabled, busy, focusNonce, onSend, localWriteReady }: Pick<
             <button type="button" className={`h-6 rounded-control px-2 text-[11px] ${mode === "readonly" ? "bg-selection text-foreground" : "text-muted"}`} aria-pressed={mode === "readonly"} onClick={() => setMode("readonly")}>Read only</button>
             <button type="button" disabled={!localWriteReady} className={`h-6 rounded-control px-2 text-[11px] disabled:opacity-40 ${mode === "localwrite" ? "bg-selection text-foreground" : "text-muted"}`} aria-pressed={mode === "localwrite"} title={localWriteReady ? "Allow a governed LocalWrite proposal" : "LocalWrite workflow unavailable"} onClick={() => setMode("localwrite")}>Local write</button>
           </div>
-          <span id="composer-status" className={bytes > 8 * 1024 ? "text-[11px] text-danger" : "text-[11px] text-muted"}>
-            {bytes > 7 * 1024 ? `${bytes.toLocaleString()} / 8,192 bytes` : "Ctrl Enter to send"}
+          <span id="composer-status" className={bytes > MAX_INPUT_BYTES ? "text-[11px] text-danger" : "text-[11px] text-muted"}>
+            {approvalRequired ? "Approval required" : running ? "Run in progress" : bytes > 7 * 1024 ? `${bytes.toLocaleString()} / 8,192 bytes` : "Ctrl Enter to send"}
           </span>
-          <Button variant="primary" size="icon" aria-label="Send task" title="Send task (Ctrl+Enter)" disabled={!valid} onClick={() => void submit()}>
-            {busy ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="size-4" />}
-          </Button>
+          {stoppable ? (
+            <Button className="ml-auto" variant="secondary" size="icon" aria-label={cancelling ? "Stopping" : "Stop"} title="Stop run" disabled={cancelling} onClick={() => void onCancel()}>
+              {cancelling ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <Square aria-hidden="true" className="size-3.5" />}
+            </Button>
+          ) : !running ? (
+            <Button className="ml-auto" variant="primary" size="icon" aria-label="Send task" title="Send task (Ctrl+Enter)" disabled={!valid} onClick={() => void submit()}>
+              {busy ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="size-4" />}
+            </Button>
+          ) : null}
         </div>
       </div>
     </div>
@@ -122,6 +144,8 @@ export function ConversationWorkspace(props: Props) {
   const { conversation, serviceState, readonlyReady, localWriteReady, approval, sending, cancelling, focusNonce, nowMillis, onSend, onCancel, onNewTask, onRetryRun, onRetryConnection, onApprove, onDeny, onResume, onAbort } = props;
   const scrollArea = useRef<HTMLDivElement>(null);
   const followTail = useRef(true);
+  const [atTail, setAtTail] = useState(true);
+  const reduceMotion = useReducedMotion();
   const active = conversation?.activeRun ?? null;
   const unavailable = serviceState === "unavailable";
 
@@ -130,15 +154,27 @@ export function ConversationWorkspace(props: Props) {
   const startedAt = active?.startedAtMillis ?? conversation?.lastRunStartedAtMillis ?? nowMillis;
   const details = status === null ? null : runDetails(status, events, startedAt, nowMillis, active?.activity ?? null);
 
-  useEffect(() => {
+  const scrollToEnd = useCallback((behavior: ScrollBehavior) => {
     const area = scrollArea.current;
-    if (!followTail.current || area === null) return;
+    if (area === null) return;
+    followTail.current = true;
+    setAtTail(true);
     if (typeof area.scrollTo === "function") {
-      area.scrollTo({ top: area.scrollHeight, behavior: "smooth" });
+      area.scrollTo({ top: area.scrollHeight, behavior });
     } else {
       area.scrollTop = area.scrollHeight;
     }
-  }, [conversation?.messages.length, active?.activity]);
+  }, []);
+
+  useEffect(() => {
+    followTail.current = true;
+    scrollToEnd("auto");
+  }, [conversation?.sessionId, scrollToEnd]);
+
+  useEffect(() => {
+    if (!followTail.current) return;
+    scrollToEnd(reduceMotion ? "auto" : "smooth");
+  }, [active?.activity, conversation?.messages.length, reduceMotion, scrollToEnd]);
 
   return (
     <section aria-label="Task workspace" className="flex h-full min-w-0 flex-col">
@@ -158,7 +194,9 @@ export function ConversationWorkspace(props: Props) {
         className="min-h-0 flex-1 overflow-auto"
         onScroll={(event) => {
           const element = event.currentTarget;
-          followTail.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+          const nextAtTail = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+          followTail.current = nextAtTail;
+          setAtTail(nextAtTail);
         }}
       >
         {unavailable && conversation === null ? (
@@ -182,7 +220,7 @@ export function ConversationWorkspace(props: Props) {
         ) : (
           <div className="mx-auto w-full max-w-3xl px-5 py-6">
             {conversation.messages.map((message) => (
-              <article key={message.id} className={`message-row message-${message.role}`}>
+              <article key={message.id} className={`message-row message-${message.errorKind === "cancelled" ? "cancelled" : message.role}`}>
                 <div className="message-label">{message.role === "user" ? "You" : message.role === "assistant" ? "Agent" : "Run status"}</div>
                 {message.role === "assistant" ? (
                   <>
@@ -209,17 +247,18 @@ export function ConversationWorkspace(props: Props) {
                 <span className="activity-pulse" aria-hidden="true" />
                 <span className="font-medium text-secondary">{active.activity}</span>
                 <span className="text-muted">{formatDuration(details.elapsedMillis)}</span>
-                {approval === null && (
-                  <Button variant="ghost" className="ml-auto h-7 px-2 text-xs" disabled={cancelling} onClick={() => void onCancel()}>
-                    {cancelling ? <LoaderCircle aria-hidden="true" className="size-3 animate-spin" /> : <Square aria-hidden="true" className="size-3" />} Stop
-                  </Button>
-                )}
               </div>
             )}
             {active === null && details !== null && (
               <div className="run-summary" aria-label="Run summary">
                 <span className={details.terminalStatus === "completed" ? "text-success" : details.terminalStatus === "cancelled" ? "text-muted" : "text-danger"}>
-                  {details.terminalStatus === "completed" ? "Completed" : details.terminalStatus === "cancelled" ? "Cancelled" : "Failed"}
+                  {details.terminalStatus === "completed"
+                    ? "Completed"
+                    : details.terminalStatus === "cancelled"
+                      ? "Cancelled"
+                      : details.terminalStatus === "manual_reconciliation_required"
+                        ? "Reconciliation required"
+                        : "Failed"}
                 </span>
                 <span aria-hidden="true">·</span>
                 <span>{formatDuration(details.elapsedMillis)}</span>
@@ -227,11 +266,32 @@ export function ConversationWorkspace(props: Props) {
                 <span>{details.citationCount} {details.citationCount === 1 ? "source" : "sources"}</span>
               </div>
             )}
+            {!atTail && (
+              <Button
+                type="button"
+                variant="secondary"
+                className="sticky bottom-3 left-1/2 h-7 -translate-x-1/2 px-2 text-xs shadow-sm"
+                onClick={() => scrollToEnd(reduceMotion ? "auto" : "smooth")}
+              >
+                <ArrowDown aria-hidden="true" className="size-3.5" />Jump to latest
+              </Button>
+            )}
           </div>
         )}
       </div>
 
-      <Composer disabled={!readonlyReady || active !== null} busy={sending} focusNonce={focusNonce} onSend={onSend} localWriteReady={localWriteReady} />
+      <Composer
+        workflowReady={readonlyReady}
+        running={active !== null}
+        stoppable={active !== null && approval === null}
+        approvalRequired={approval !== null}
+        busy={sending}
+        cancelling={cancelling}
+        focusNonce={focusNonce}
+        onSend={onSend}
+        onCancel={onCancel}
+        localWriteReady={localWriteReady}
+      />
     </section>
   );
 }

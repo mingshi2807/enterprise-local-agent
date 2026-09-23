@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Command,
@@ -76,14 +76,16 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
-  const connected = health.isSuccess;
+  const settingsTrigger = useRef<HTMLButtonElement>(null);
+  const inspectorTrigger = useRef<HTMLButtonElement>(null);
+  const connected = health.isSuccess && !health.isRefetchError;
   const conversation = useConversationController(selectedSessionId, setSelectedSessionId, connected);
   const [nowMillis, setNowMillis] = useState(Date.now);
   const selectedActiveRunId = conversation.selected?.activeRun?.runId ?? null;
 
   useEffect(() => {
     if (selectedActiveRunId === null) return;
-    const timer = window.setInterval(() => setNowMillis(Date.now()), 250);
+    const timer = window.setInterval(() => setNowMillis(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [selectedActiveRunId]);
 
@@ -110,6 +112,15 @@ export function App() {
     setPaletteOpen(false);
   }, []);
 
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false);
+    window.setTimeout(() => settingsTrigger.current?.focus(), 0);
+  }, []);
+
+  const toggleInspector = useCallback(() => {
+    setInspectorOpen((value) => !value);
+  }, []);
+
   const refresh = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: serviceQueryKeys.all });
   }, [queryClient]);
@@ -129,12 +140,12 @@ export function App() {
         label: inspectorOpen ? "Hide inspector" : "Show inspector",
         shortcut: "Ctrl Shift I",
         icon: inspectorOpen ? PanelRightClose : PanelRightOpen,
-        action: () => setInspectorOpen((value) => !value),
+        action: toggleInspector,
       },
       { id: "settings", label: "Open settings", icon: Settings, action: openSettings },
       { id: "refresh", label: "Refresh service status", icon: Search, action: () => void refresh() },
     ],
-    [inspectorOpen, newTask, openSettings, refresh, sidebarOpen],
+    [inspectorOpen, newTask, openSettings, refresh, sidebarOpen, toggleInspector],
   );
 
   useEffect(() => {
@@ -157,16 +168,16 @@ export function App() {
         setSidebarOpen((value) => !value);
       } else if (key === "i" && event.shiftKey) {
         event.preventDefault();
-        setInspectorOpen((value) => !value);
+        toggleInspector();
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [newTask]);
+  }, [newTask, toggleInspector]);
 
   return (
-    <div className="grid h-dvh min-h-[520px] grid-rows-[40px_minmax(0,1fr)_22px] overflow-hidden bg-background text-foreground">
+    <div className="grid h-dvh grid-rows-[40px_minmax(0,1fr)_22px] overflow-hidden bg-background text-foreground">
       <header className="flex items-center justify-between border-b border-border bg-panel px-2.5">
         <div className="flex min-w-0 items-center gap-1.5">
           <Button
@@ -178,7 +189,7 @@ export function App() {
             aria-pressed={sidebarOpen}
             onClick={() => setSidebarOpen((value) => !value)}
           >
-            {sidebarOpen ? <PanelLeftClose aria-hidden="true" /> : <PanelLeftOpen aria-hidden="true" />}
+            {sidebarOpen ? <PanelLeftClose aria-hidden="true" className="size-4" /> : <PanelLeftOpen aria-hidden="true" className="size-4" />}
           </Button>
           <span className="mx-1 h-4 w-px bg-border" aria-hidden="true" />
           <h1 className="truncate text-[13px] font-semibold">Enterprise Local Agent</h1>
@@ -198,17 +209,19 @@ export function App() {
 
         <div className="flex items-center gap-0.5">
           <Button
+            ref={inspectorTrigger}
             type="button"
             variant="ghost"
             size="icon"
             aria-label={inspectorOpen ? "Hide inspector" : "Show inspector"}
             title="Toggle inspector (Ctrl+Shift+I)"
             aria-pressed={inspectorOpen}
-            onClick={() => setInspectorOpen((value) => !value)}
+            onClick={toggleInspector}
           >
-            {inspectorOpen ? <PanelRightClose aria-hidden="true" /> : <PanelRightOpen aria-hidden="true" />}
+            {inspectorOpen ? <PanelRightClose aria-hidden="true" className="size-4" /> : <PanelRightOpen aria-hidden="true" className="size-4" />}
           </Button>
           <Button
+            ref={settingsTrigger}
             type="button"
             variant="ghost"
             size="icon"
@@ -248,7 +261,7 @@ export function App() {
                 state={serviceState}
                 readiness={readiness.data}
                 version={version.data}
-                onClose={() => setSettingsOpen(false)}
+                onClose={closeSettings}
               />
             </Suspense>
           ) : <ConversationWorkspace
@@ -289,7 +302,10 @@ export function App() {
                   version={version.data}
                   conversation={conversation.selected}
                   nowMillis={nowMillis}
-                  onClose={() => setInspectorOpen(false)}
+                  onClose={() => {
+                    setInspectorOpen(false);
+                    window.setTimeout(() => inspectorTrigger.current?.focus(), 0);
+                  }}
                 />
               </Suspense>
             </motion.div>
