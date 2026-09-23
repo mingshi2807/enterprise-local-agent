@@ -33,7 +33,7 @@ This is the durable navigation page for architectural milestones. Git and the im
 | M13 Local Enterprise Agent MVP and Real LLM Smoke Test | Implemented, real-smoke verified, and Linux containment-certified, uncommitted | Not tagged | [[m13-local-enterprise-agent-mvp]] |
 | M14 Deployment and Operations Hardening | Implemented, verified, Linux containment-certified, and committed | Not tagged | [[m14-deployment-operations-hardening]] |
 | M15 Enterprise Identity and Authorization | Completed, verified, and Linux containment-certified | `m15-enterprise-identity` | [[m15-enterprise-identity-authorization]] |
-| M16 Desktop Foundation and Governed Conversation | M16.0 approved; M16.1-M16.2 committed; M16.3-M16.6 implemented and verified | Not tagged | [[m16-desktop-foundation]] |
+| M16 Desktop Foundation and Governed Conversation | M16.0 approved; M16.1-M16.8 implemented, verified, and committed | Not tagged | [[m16-desktop-foundation]] |
 
 ## Stable architecture
 
@@ -99,6 +99,13 @@ service, catches up through existing event cursors, and reconstructs durable
 Waiting without creating a duplicate run. SQLite remains adapter-side, no
 conversation payload is stored in the WebView, and a missing volatile terminal
 result is displayed as `Result unavailable` rather than regenerated.
+M16.7 adds lazy-loaded observational Settings for local appearance and bounded
+runtime, workflow, identity, and authorized operations status. It exposes no
+deployment mutation or generic configuration authority. M16.8 completes the
+desktop quality pass and native Tauri review across compact, normal, and wide
+windows, light/dark themes, and 100%/150%/200% scaling. The review fixed
+high-DPI clipping and status-projection defects without changing the named
+command or capability boundary.
 
 Provider and framework types remain outside agent-core, agent-harness, agent-loop,
 and agent-graph. ExecutionHarness remains the authority for lifecycle, budgets,

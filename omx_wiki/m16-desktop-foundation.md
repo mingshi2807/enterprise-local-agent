@@ -1,22 +1,22 @@
 ---
-title: "M16 Desktop Foundation, Conversation, HITL, and Durable History"
-tags: ["m16", "desktop", "tauri", "react", "design-system", "app-shell", "conversation", "readonly", "activity", "inspector", "hitl", "localwrite", "approval", "history", "recovery"]
+title: "M16 Desktop Foundation, Governed Conversation, and Quality"
+tags: ["m16", "desktop", "tauri", "react", "design-system", "app-shell", "conversation", "readonly", "activity", "inspector", "hitl", "localwrite", "approval", "history", "recovery", "settings", "accessibility", "native-review"]
 created: 2026-09-21
-updated: 2026-09-22
-sources: ["apps/agent-desktop/src-tauri/src/service_client.rs", "apps/agent-desktop/src-tauri/src/lib.rs", "apps/agent-desktop/src-tauri/capabilities/main.json", "apps/agent-desktop/src/app/App.tsx", "apps/agent-desktop/src/app/CommandPalette.tsx", "apps/agent-desktop/src/bridge/contracts.ts", "apps/agent-desktop/src/bridge/service.ts", "apps/agent-desktop/src/queries/conversation.ts", "apps/agent-desktop/src/features/runActivity.ts", "apps/agent-desktop/src/components/ApprovalPanel.tsx", "apps/agent-desktop/src/components/ConversationWorkspace.tsx", "apps/agent-desktop/src/components/MarkdownAnswer.tsx", "apps/agent-desktop/src/components/RunInspector.tsx", "apps/agent-desktop/src/components/SessionSidebar.tsx", "apps/agent-desktop/src/styles/tokens.css"]
+updated: 2026-09-23
+sources: ["apps/agent-desktop/src-tauri/src/service_client.rs", "apps/agent-desktop/src-tauri/src/lib.rs", "apps/agent-desktop/src-tauri/capabilities/main.json", "apps/agent-desktop/src/app/App.tsx", "apps/agent-desktop/src/app/CommandPalette.tsx", "apps/agent-desktop/src/bridge/contracts.ts", "apps/agent-desktop/src/bridge/service.ts", "apps/agent-desktop/src/queries/conversation.ts", "apps/agent-desktop/src/features/runActivity.ts", "apps/agent-desktop/src/components/ApprovalPanel.tsx", "apps/agent-desktop/src/components/ConversationWorkspace.tsx", "apps/agent-desktop/src/components/MarkdownAnswer.tsx", "apps/agent-desktop/src/components/RunInspector.tsx", "apps/agent-desktop/src/components/SessionSidebar.tsx", "apps/agent-desktop/src/components/SettingsView.tsx", "apps/agent-desktop/src/styles/tokens.css"]
 links: ["enterprise-local-agent-milestone-index.md", "m15-enterprise-identity-authorization.md", "m12-agent-service-api.md", "m14-deployment-operations-hardening.md"]
 category: architecture
 confidence: high
 schemaVersion: 1
 ---
 
-# M16 Desktop Foundation, Conversation, HITL, and Durable History
+# M16 Desktop Foundation, Governed Conversation, and Quality
 
 ## Status
 
-M16.0 architecture was approved. M16.1 and M16.2 are implemented and committed
-as `29942c3` and `0672edf`. M16.3 through M16.6 are implemented and verified in
-the current worktree. No M16 milestone tag has been created.
+M16.0 architecture was approved. M16.1 through M16.8 are implemented and
+committed. M16.7 is `8584c1d`; the completed M16.8 native quality pass is
+`caf5204`. No M16 milestone tag has been created.
 
 ## Boundary
 
@@ -225,6 +225,48 @@ remain absent from browser storage; only the theme preference is local.
 Previous run status metadata is available in the optional inspector. Rename,
 archive, folders, tags, and search remain deferred.
 
+## M16.7 Settings and Runtime Status
+
+Settings is a lazy-loaded, observational surface. Local appearance preferences
+support system, light, and dark themes. Safe runtime rows project only bounded
+service, model, knowledge, workflow, LocalWrite, containment, identity,
+version, budget, and authorized reconciliation metadata already exposed by the
+service.
+
+The surface cannot modify model or knowledge endpoints, MCP registration,
+policy, identity roles, action-seal keys, containment, or deployment
+configuration. It adds no generic configuration API. Operator-only operational
+information remains gated by M15 service authorization rather than by desktop
+navigation or local UI state.
+
+## M16.8 Desktop Quality and Native Review
+
+The quality pass aligns typography, spacing, borders, icon sizing, status
+colors, Markdown, code, tables, citations, activity, HITL, and error states in
+light and dark themes. The composer auto-grows within a bounded height, retains
+Ctrl/Cmd+Enter submission, and keeps Send/Stop and offline semantics explicit.
+Tail following yields to manual scroll and exposes `Jump to latest` without
+forcing the viewport. Focus restoration, keyboard labels, reduced motion,
+forced-color behavior, and zoom-safe layout are part of the shared foundation.
+
+A real Tauri GTK/WebKit review covered `760x520`, approximately `1280x800`, and
+`1700x900`, light and dark themes, and 100%, 150%, and 200% native GTK scaling.
+Reviewed states included empty, active, completed Markdown with citations/code/
+table, manual scroll, Waiting, approved-ready, degraded, unavailable,
+cancelled, failed, unavailable result, reconciliation, Settings, Run Inspector,
+and command palette.
+
+The review found and fixed four UX defects:
+
+- a redundant fixed WebView minimum height clipped content at 200% scaling;
+- a failed health refetch could leave the shell visually connected;
+- cancelled runs were styled and summarized as failures;
+- manual reconciliation used generic failure wording instead of its explicit
+  non-resumable status.
+
+The Tauri native window minimum remains authoritative. No named command, ACL,
+plugin, credential, transport, or execution capability changed in M16.8.
+
 ## Service States
 
 The shell presents ready, degraded, unavailable, and draining states from the
@@ -234,16 +276,16 @@ a status refresh; it does not add retries or execution behavior to the UI.
 
 ## Verification
 
-The current M16.6 implementation passed:
+The completed M16.8 implementation passed:
 
 - TypeScript typecheck and ESLint with zero warnings;
-- twenty-six frontend tests, including durable restoration, pagination,
-  no-duplicate-start, unavailable-result, and focused approval coverage;
-- Vite production builds and Tauri debug build with `--no-bundle`;
-- eight Rust service-bridge tests;
+- 36 frontend tests covering conversation, history, HITL, settings, activity,
+  cancellation, reconciliation, and unavailable-service behavior;
+- Vite production build and Tauri release build;
+- nine desktop Rust service-bridge tests and strict Clippy;
 - capability, dependency-direction, and forbidden-surface scans;
-- `cargo fmt --all -- --check`, strict workspace Clippy, and all workspace tests
-  outside the known M11 process-group regression.
+- native visual and interaction review across compact, normal, wide, light,
+  dark, and 100%/150%/200% scaling configurations.
 
 The M16.5 closure review confirmed the exact `approval_submit_decision` command
 and dedicated ACL. The pre-existing M11
@@ -256,18 +298,21 @@ Clippy, Rust tests, and the final debug build.
 ## Guarantees and Limits
 
 M16 provides a bounded local-service bridge, minimal WebView capability set,
-responsive accessible design foundation, real ReadOnly conversation path, and
-a durable LocalWrite approval client over existing server authority.
+responsive accessible design foundation, real ReadOnly conversation path, a
+durable LocalWrite approval client, durable service-owned history, and
+observational Settings over existing server authority.
 Transport credentials are not exposed to JavaScript, clients cannot select the
 workflow or infrastructure, and terminal results remain service-authoritative.
 Activity and inspection are metadata projections only and do not create a new
 event or result authority.
 
 It does not provide desktop-side policy, approval authority, containment,
-settings, ACP, pane resizing, packaging/signing, generic service transport, or
-conversation payload persistence. Event subscription uses bounded cursor
-polling instead of a persistent WebView SSE connection. Durable history stores
-only existing service metadata; it does not make volatile M13 answers durable.
+deployment mutation, ACP, pane resizing, packaging/signing, generic service
+transport, or conversation payload persistence. Event subscription uses
+bounded cursor polling instead of a persistent WebView SSE connection. Durable
+history stores only existing service metadata; it does not make volatile M13
+answers durable. Native screen-reader certification and automated pixel-diff
+coverage remain future quality work.
 Missing results are reported without replaying the model call.
 
 ## Forward Constraints
@@ -287,3 +332,5 @@ Missing results are reported without replaying the model call.
   resume and service-authoritative terminal state.
 - Keep history reads owner-authorized, bounded, metadata-only, and passive.
 - Never replay external effects or infer a missing result during restoration.
+- Keep Settings observational and local appearance preferences non-authoritative.
+- Do not widen WebView capabilities for visual, accessibility, or UX changes.

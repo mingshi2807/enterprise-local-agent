@@ -492,6 +492,29 @@ as `Result unavailable`; the desktop never regenerates it. Previous run status
 metadata is available on demand in the inspector. Rename and archive remain
 deferred, and the only browser-stored value remains the theme preference.
 
+M16.7 adds a lazy-loaded Settings surface for local appearance preferences and
+safe runtime status. It shows bounded service, model, knowledge, workflow,
+LocalWrite, containment, identity, version, budget, and authorized
+reconciliation projections. Settings is observational: it cannot modify
+deployment configuration, endpoints, policy, identity roles, seal keys,
+containment, or runtime authority. Operator-only information remains protected
+by the existing M15 authorization boundary.
+
+M16.8 completes the desktop quality pass across typography, Markdown, code,
+tables, citations, activity, HITL, composer behavior, focus handling, reduced
+motion, and compact layouts. The composer auto-grows within a bounded height,
+manual scrolling exposes `Jump to latest`, cancellation is visually distinct
+from failure, and manual reconciliation remains explicitly non-resumable.
+
+The native Tauri application was reviewed at `760x520`, approximately
+`1280x800`, and `1700x900`, in light and dark themes and at 100%, 150%, and 200%
+GTK scaling. That review corrected high-DPI WebView clipping, stale connected
+status after a failed health refresh, cancellation styled as failure, and
+generic failure text for reconciliation. The native window minimum remains in
+Tauri, and the named command and capability boundary is unchanged. M16.8 passed
+36 frontend tests, 9 desktop Rust tests, strict Clippy, and the Tauri release
+build.
+
 ## Deterministic demonstration
 
 The default CLI path is network-free. It uses `RigModelAdapter<FakeRigModel>`

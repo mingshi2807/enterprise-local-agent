@@ -183,3 +183,7 @@
 ## [2026-09-22] update
 - **Pages:** enterprise-local-agent-milestone-index.md, m16-desktop-foundation.md, index.md
 - **Summary:** Added M16.6 service-authoritative durable conversation history, owner-scoped pagination, restart restoration, unavailable-result semantics, and verification evidence
+
+## [2026-09-23] update
+- **Pages:** enterprise-local-agent-milestone-index.md, m16-desktop-foundation.md, index.md
+- **Summary:** Added M16.7 observational Settings and M16.8 desktop quality, accessibility, native scaling review, fixes, and verification evidence
