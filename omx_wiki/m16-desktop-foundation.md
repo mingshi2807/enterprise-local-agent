@@ -1,21 +1,22 @@
 ---
-title: "M16 Desktop Foundation, Governed Conversation, and Quality"
-tags: ["m16", "desktop", "tauri", "react", "design-system", "app-shell", "conversation", "readonly", "activity", "inspector", "hitl", "localwrite", "approval", "history", "recovery", "settings", "accessibility", "native-review"]
+title: "M16 Desktop Foundation, Governed Conversation, Quality, and Packaging"
+tags: ["m16", "desktop", "tauri", "react", "design-system", "app-shell", "conversation", "readonly", "activity", "inspector", "hitl", "localwrite", "approval", "history", "recovery", "settings", "accessibility", "native-review", "packaging", "release-engineering"]
 created: 2026-09-21
-updated: 2026-09-23
-sources: ["apps/agent-desktop/src-tauri/src/service_client.rs", "apps/agent-desktop/src-tauri/src/lib.rs", "apps/agent-desktop/src-tauri/capabilities/main.json", "apps/agent-desktop/src/app/App.tsx", "apps/agent-desktop/src/app/CommandPalette.tsx", "apps/agent-desktop/src/bridge/contracts.ts", "apps/agent-desktop/src/bridge/service.ts", "apps/agent-desktop/src/queries/conversation.ts", "apps/agent-desktop/src/features/runActivity.ts", "apps/agent-desktop/src/components/ApprovalPanel.tsx", "apps/agent-desktop/src/components/ConversationWorkspace.tsx", "apps/agent-desktop/src/components/MarkdownAnswer.tsx", "apps/agent-desktop/src/components/RunInspector.tsx", "apps/agent-desktop/src/components/SessionSidebar.tsx", "apps/agent-desktop/src/components/SettingsView.tsx", "apps/agent-desktop/src/styles/tokens.css"]
+updated: 2026-09-25
+sources: ["apps/agent-desktop/src-tauri/src/service_client.rs", "apps/agent-desktop/src-tauri/src/lib.rs", "apps/agent-desktop/src-tauri/capabilities/main.json", "apps/agent-desktop/src-tauri/tauri.conf.json", "apps/agent-desktop/src-tauri/tauri.linux.conf.json", "apps/agent-desktop/src-tauri/tauri.macos.conf.json", "apps/agent-desktop/src/app/App.tsx", "apps/agent-desktop/src/app/CommandPalette.tsx", "apps/agent-desktop/src/bridge/contracts.ts", "apps/agent-desktop/src/bridge/service.ts", "apps/agent-desktop/src/queries/conversation.ts", "apps/agent-desktop/src/features/runActivity.ts", "apps/agent-desktop/src/components/ApprovalPanel.tsx", "apps/agent-desktop/src/components/ConversationWorkspace.tsx", "apps/agent-desktop/src/components/MarkdownAnswer.tsx", "apps/agent-desktop/src/components/RunInspector.tsx", "apps/agent-desktop/src/components/SessionSidebar.tsx", "apps/agent-desktop/src/components/SettingsView.tsx", "apps/agent-desktop/src/styles/tokens.css", "apps/agent-desktop/scripts/desktop-release.mjs", "docs/release/desktop.md", ".github/workflows/desktop-packaging.yml"]
 links: ["enterprise-local-agent-milestone-index.md", "m15-enterprise-identity-authorization.md", "m12-agent-service-api.md", "m14-deployment-operations-hardening.md"]
 category: architecture
 confidence: high
 schemaVersion: 1
 ---
 
-# M16 Desktop Foundation, Governed Conversation, and Quality
+# M16 Desktop Foundation, Governed Conversation, Quality, and Packaging
 
 ## Status
 
 M16.0 architecture was approved. M16.1 through M16.8 are implemented and
-committed. M16.7 is `8584c1d`; the completed M16.8 native quality pass is
+committed. M16.9 release engineering is implemented and verified but remains
+uncommitted. M16.7 is `8584c1d`; the completed M16.8 native quality pass is
 `caf5204`. No M16 milestone tag has been created.
 
 ## Boundary
@@ -267,6 +268,37 @@ The review found and fixed four UX defects:
 The Tauri native window minimum remains authoritative. No named command, ACL,
 plugin, credential, transport, or execution capability changed in M16.8.
 
+## M16.9 Desktop Packaging and Release Engineering
+
+M16.9 adds repeatable desktop packaging without embedding runtime authority.
+The workspace Cargo version is authoritative; npm metadata is a checked mirror,
+and Tauri inherits the Cargo package version. A bounded named command exposes
+only application version, optional validated git revision, release profile,
+service API v1, and `ServiceEventV2` compatibility. Production source maps,
+automatic updater artifacts, sidecars, and bundled runtime components remain
+disabled.
+
+The initial release targets are Apple Silicon macOS `.app` plus DMG and Linux
+x86_64 Debian packaging. macOS declares version 12.0 as its minimum, enables the
+hardened runtime, and uses an empty entitlements file. Normal CI builds unsigned
+artifacts without Apple credentials. Production signing follows explicit
+codesign, notarization, stapling, and verification under release-operator
+credentials stored outside the repository. Linux packaging declares its
+GTK/WebKit runtime dependencies and was verified for desktop entry, icons,
+install/uninstall behavior, dynamic linkage, unavailable-service startup, and
+absence of credentials, debug assets, sidecars, service binaries, containment
+workers, and Bubblewrap.
+
+The release tool validates configuration/version consistency and writes a
+strict per-target manifest containing the artifact filename, size, SHA-256,
+version, target, git revision, deterministic timestamp, source-cleanliness
+state, update policy, and compatibility metadata. A dirty-worktree override is
+development-only and marks the manifest non-releasable. The desktop continues
+to connect to a separately installed trusted `agent-service-daemon`; packaging
+does not install, launch, or update the service, model, knowledge backends, or
+containment artifacts. Automatic updates, AppImage, and Windows packaging are
+deferred.
+
 ## Service States
 
 The shell presents ready, degraded, unavailable, and draining states from the
@@ -287,6 +319,16 @@ The completed M16.8 implementation passed:
 - native visual and interaction review across compact, normal, wide, light,
   dark, and 100%/150%/200% scaling configurations.
 
+The completed M16.9 implementation additionally passed release configuration
+validation, three release-tool tests, 36 frontend tests, 11 desktop Rust tests,
+strict workspace Clippy, Debian package verification, disposable
+install/uninstall, unavailable-service packaged startup, release-manifest
+rehashing, and package/capability leakage scans. The Linux package and manifest
+were produced from the uncommitted worktree and are correctly marked dirty,
+therefore they are verification artifacts rather than publishable releases.
+macOS artifact, signing, notarization, and stapling verification remain pending
+an Apple Silicon release environment.
+
 The M16.5 closure review confirmed the exact `approval_submit_decision` command
 and dedicated ACL. The pre-existing M11
 `termination_reaps_process_group_descendant` regression reproduces in the
@@ -299,16 +341,19 @@ Clippy, Rust tests, and the final debug build.
 
 M16 provides a bounded local-service bridge, minimal WebView capability set,
 responsive accessible design foundation, real ReadOnly conversation path, a
-durable LocalWrite approval client, durable service-owned history, and
-observational Settings over existing server authority.
+durable LocalWrite approval client, durable service-owned history,
+observational Settings, and verified release packaging over existing server
+authority.
 Transport credentials are not exposed to JavaScript, clients cannot select the
 workflow or infrastructure, and terminal results remain service-authoritative.
 Activity and inspection are metadata projections only and do not create a new
 event or result authority.
 
 It does not provide desktop-side policy, approval authority, containment,
-deployment mutation, ACP, pane resizing, packaging/signing, generic service
-transport, or conversation payload persistence. Event subscription uses
+deployment mutation, ACP, pane resizing, automatic updates, embedded service
+distribution, generic service transport, or conversation payload persistence.
+macOS signing and notarization are defined but require external release
+credentials and Apple infrastructure. Event subscription uses
 bounded cursor polling instead of a persistent WebView SSE connection. Durable
 history stores only existing service metadata; it does not make volatile M13
 answers durable. Native screen-reader certification and automated pixel-diff
@@ -334,3 +379,7 @@ Missing results are reported without replaying the model call.
 - Never replay external effects or infer a missing result during restoration.
 - Keep Settings observational and local appearance preferences non-authoritative.
 - Do not widen WebView capabilities for visual, accessibility, or UX changes.
+- Keep signing keys and notarization credentials outside the repository.
+- Publish only clean-source manifests whose artifact hashes verify.
+- Keep the service and containment artifacts separately deployed until a
+  managed-sidecar design receives explicit architectural review.

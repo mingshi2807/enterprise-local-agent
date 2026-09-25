@@ -187,3 +187,7 @@
 ## [2026-09-23] update
 - **Pages:** enterprise-local-agent-milestone-index.md, m16-desktop-foundation.md, index.md
 - **Summary:** Added M16.7 observational Settings and M16.8 desktop quality, accessibility, native scaling review, fixes, and verification evidence
+
+## [2026-09-25] update
+- **Pages:** enterprise-local-agent-milestone-index.md, m16-desktop-foundation.md, index.md
+- **Summary:** Added M16.9 desktop packaging, release manifests, signing policy, separate-service assumptions, and Linux verification evidence

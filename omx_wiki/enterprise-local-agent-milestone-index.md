@@ -2,7 +2,7 @@
 title: "Enterprise Local Agent Milestone Index"
 tags: ["enterprise-local-agent", "milestones", "roadmap", "index"]
 created: 2026-08-15T13:34:09.996Z
-updated: 2026-09-21
+updated: 2026-09-25
 sources: ["docs/proposal/proposal.md", "docs/reports/reports_impl.md", "git history"]
 links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m6-1-production-linux-localwrite-containment.md", "m7-durable-event-persistence-and-recovery.md", "m8-enterprise-knowledge-integration.md", "m9-deterministic-graph-engine-poc.md", "m10-durable-graph-pause-resume-hitl.md", "m11-governed-mcp-integration.md", "m12-agent-service-api.md", "m13-local-enterprise-agent-mvp.md", "m14-deployment-operations-hardening.md", "m15-enterprise-identity-authorization.md", "m16-desktop-foundation.md"]
 category: reference
@@ -33,7 +33,7 @@ This is the durable navigation page for architectural milestones. Git and the im
 | M13 Local Enterprise Agent MVP and Real LLM Smoke Test | Implemented, real-smoke verified, and Linux containment-certified, uncommitted | Not tagged | [[m13-local-enterprise-agent-mvp]] |
 | M14 Deployment and Operations Hardening | Implemented, verified, Linux containment-certified, and committed | Not tagged | [[m14-deployment-operations-hardening]] |
 | M15 Enterprise Identity and Authorization | Completed, verified, and Linux containment-certified | `m15-enterprise-identity` | [[m15-enterprise-identity-authorization]] |
-| M16 Desktop Foundation and Governed Conversation | M16.0 approved; M16.1-M16.8 implemented, verified, and committed | Not tagged | [[m16-desktop-foundation]] |
+| M16 Desktop Foundation and Governed Conversation | M16.0 approved; M16.1-M16.8 committed; M16.9 implemented and verified, uncommitted | Not tagged | [[m16-desktop-foundation]] |
 
 ## Stable architecture
 
@@ -106,6 +106,12 @@ desktop quality pass and native Tauri review across compact, normal, and wide
 windows, light/dark themes, and 100%/150%/200% scaling. The review fixed
 high-DPI clipping and status-projection defects without changing the named
 command or capability boundary.
+M16.9 adds credential-free unsigned `.app`/DMG and Debian packaging paths,
+strict version/build metadata, deterministic compatibility manifests and
+artifact hashes, package verification, and a documented external macOS signing
+and notarization flow. The desktop still expects a separately installed trusted
+service and bundles no model, knowledge backend, containment artifact, signing
+credential, or automatic updater.
 
 Provider and framework types remain outside agent-core, agent-harness, agent-loop,
 and agent-graph. ExecutionHarness remains the authority for lifecycle, budgets,

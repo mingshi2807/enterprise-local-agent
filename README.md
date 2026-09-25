@@ -531,6 +531,15 @@ continues to require a separately installed trusted `agent-service-daemon`; it
 does not bundle or launch the service or containment artifacts. See
 [`docs/release/desktop.md`](docs/release/desktop.md) for commands and policy.
 
+The Linux release path produced and verified an installable x86_64 Debian
+package, including desktop entry, icons, declared GTK/WebKit runtime closure,
+install/uninstall behavior, unavailable-service startup, and package leakage
+scans. Release configuration tests, frontend checks, desktop Rust tests, strict
+workspace Clippy, and the workspace suite excluding the separately tracked M11
+process-reaping regression passed. macOS artifact production, Developer ID
+signing, notarization, and stapling still require an Apple Silicon release
+environment. Initial releases remain manual; automatic updates are disabled.
+
 ## Deterministic demonstration
 
 The default CLI path is network-free. It uses `RigModelAdapter<FakeRigModel>`
