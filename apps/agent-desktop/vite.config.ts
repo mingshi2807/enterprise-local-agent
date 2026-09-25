@@ -18,7 +18,7 @@ export default defineConfig({
   build: {
     target: "es2022",
     minify: "oxc",
-    sourcemap: true,
+    sourcemap: false,
   },
   test: {
     environment: "jsdom",

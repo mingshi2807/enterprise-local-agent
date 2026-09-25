@@ -2,7 +2,7 @@ import { Monitor, Moon, Sun, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import { useTheme, type ThemePreference } from "@/app/ThemeContext";
-import type { BuildInfo, Readiness } from "@/bridge/contracts";
+import type { BuildInfo, DesktopBuildInfo, Readiness } from "@/bridge/contracts";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 
@@ -11,6 +11,7 @@ type DisplayStatus = "Ready" | "Degraded" | "Unavailable";
 
 interface SettingsViewProps {
   state: ServiceState;
+  desktopBuildInfo?: DesktopBuildInfo;
   readiness?: Readiness;
   version?: BuildInfo;
   onClose: () => void;
@@ -72,7 +73,7 @@ function formatDuration(milliseconds: number) {
   return `${Math.round(milliseconds / 1_000)}s`;
 }
 
-export function SettingsView({ state, readiness, version, onClose }: SettingsViewProps) {
+export function SettingsView({ state, desktopBuildInfo, readiness, version, onClose }: SettingsViewProps) {
   const { preference, setPreference } = useTheme();
   const closeButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -162,7 +163,10 @@ export function SettingsView({ state, readiness, version, onClose }: SettingsVie
               </div>
             )}
           </SettingRow>
-          <SettingRow label="Application version" detail="Desktop and service contract">
+          <SettingRow label="Desktop application" detail="Installed client version">
+            {desktopBuildInfo === undefined ? "Unavailable" : desktopBuildInfo.version}
+          </SettingRow>
+          <SettingRow label="Service build" detail="Connected runtime version">
             {version === undefined ? "Unavailable" : `${version.application} ${version.version}`}
           </SettingRow>
         </section>
@@ -220,6 +224,16 @@ export function SettingsView({ state, readiness, version, onClose }: SettingsVie
             {version !== undefined && (
               <SettingRow label="Contract versions" detail="Configuration · store · event · checkpoint">
                 {version.config_schema_version} · {version.store_schema_version} · {version.event_schema_version} · {version.checkpoint_schema_version}
+              </SettingRow>
+            )}
+            {desktopBuildInfo !== undefined && (
+              <SettingRow label="Desktop build" detail="Profile · revision">
+                {desktopBuildInfo.build_profile} · {desktopBuildInfo.git_revision?.slice(0, 12) ?? "development"}
+              </SettingRow>
+            )}
+            {desktopBuildInfo !== undefined && (
+              <SettingRow label="Service compatibility" detail="HTTP API · event projection">
+                v{desktopBuildInfo.service_api_version} · v{desktopBuildInfo.service_event_version}
               </SettingRow>
             )}
           </div>

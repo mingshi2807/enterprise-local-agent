@@ -1,0 +1,122 @@
+name: Desktop packaging
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-deb:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/agent-desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+            desktop-file-utils
+      - name: Install frontend dependencies
+        working-directory: apps/agent-desktop
+        run: npm ci
+      - name: Validate and test desktop
+        working-directory: apps/agent-desktop
+        run: |
+          npm run release:validate
+          npm run release:test
+          npm run typecheck
+          npm run lint
+          npm test
+          npm run build
+      - name: Build unsigned Debian package
+        working-directory: apps/agent-desktop
+        env:
+          ELA_GIT_REVISION: ${{ github.sha }}
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          npm run tauri -- build --bundles deb --ci --no-sign
+      - name: Verify package and manifest
+        env:
+          ELA_GIT_REVISION: ${{ github.sha }}
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          deb="$(find target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          apps/agent-desktop/scripts/verify-linux-deb.sh "$deb"
+          node apps/agent-desktop/scripts/desktop-release.mjs manifest \
+            --target linux-x86_64 \
+            --output target/release/enterprise-local-agent-desktop-linux-x86_64.json \
+            "$deb"
+          node apps/agent-desktop/scripts/desktop-release.mjs verify \
+            --manifest target/release/enterprise-local-agent-desktop-linux-x86_64.json \
+            --artifact-dir "$(dirname "$deb")"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: enterprise-local-agent-desktop-linux-x86_64
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/enterprise-local-agent-desktop-linux-x86_64.json
+          if-no-files-found: error
+
+  macos-apple-silicon:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/agent-desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Install and test frontend
+        working-directory: apps/agent-desktop
+        run: |
+          npm ci
+          npm run release:validate
+          npm run release:test
+          npm run typecheck
+          npm run lint
+          npm test
+          npm run build
+      - name: Build unsigned Apple Silicon artifacts
+        working-directory: apps/agent-desktop
+        env:
+          ELA_GIT_REVISION: ${{ github.sha }}
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          npm run tauri -- build --target aarch64-apple-darwin --bundles app,dmg --ci --no-sign
+      - name: Verify artifacts and manifest
+        env:
+          ELA_GIT_REVISION: ${{ github.sha }}
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          app="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          dmg="$(find target/aarch64-apple-darwin/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          apps/agent-desktop/scripts/verify-macos.sh unsigned "$app" "$dmg"
+          release_dir=target/aarch64-apple-darwin/release/artifacts
+          mkdir -p "$release_dir"
+          cp -R "$app" "$release_dir/"
+          cp "$dmg" "$release_dir/"
+          node apps/agent-desktop/scripts/desktop-release.mjs manifest \
+            --target macos-aarch64 \
+            --output target/aarch64-apple-darwin/release/enterprise-local-agent-desktop-macos-aarch64.json \
+            "$release_dir/$(basename "$app")" "$release_dir/$(basename "$dmg")"
+          node apps/agent-desktop/scripts/desktop-release.mjs verify \
+            --manifest target/aarch64-apple-darwin/release/enterprise-local-agent-desktop-macos-aarch64.json \
+            --artifact-dir "$release_dir"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: enterprise-local-agent-desktop-macos-aarch64-unsigned
+          path: |
+            target/aarch64-apple-darwin/release/artifacts/*.app
+            target/aarch64-apple-darwin/release/artifacts/*.dmg
+            target/aarch64-apple-darwin/release/enterprise-local-agent-desktop-macos-aarch64.json
+          if-no-files-found: error

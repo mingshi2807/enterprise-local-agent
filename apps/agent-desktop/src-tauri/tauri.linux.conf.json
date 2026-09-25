@@ -1,0 +1,12 @@
+{
+  "productName": "Enterprise Local Agent Desktop",
+  "bundle": {
+    "targets": ["deb"],
+    "linux": {
+      "deb": {
+        "section": "devel",
+        "priority": "optional"
+      }
+    }
+  }
+}

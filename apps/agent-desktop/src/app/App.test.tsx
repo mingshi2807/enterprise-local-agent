@@ -62,6 +62,7 @@ function installServiceMock(handler?: (command: string, args?: Record<string, un
   invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
     const custom = handler?.(command, args);
     if (custom !== undefined) return Promise.resolve(custom);
+    if (command === "desktop_build_info") return Promise.resolve({ application: "enterprise-local-agent-desktop", version: "0.1.0", git_revision: "b396a10028cb8bcc6d9420f12e93ec422351dd61", build_profile: "release", service_api_version: 1, service_event_version: 2 });
     if (command === "service_health") return Promise.resolve({ version: 1, lifecycle: "serving" });
     if (command === "service_readiness") return Promise.resolve(readiness());
     if (command === "service_version") return Promise.resolve({ application: "enterprise-local-agent", version: "0.1.0", config_schema_version: 2, store_schema_version: 2, event_schema_version: 9, checkpoint_schema_version: 4 });
@@ -601,6 +602,8 @@ describe("App shell states", () => {
     expect(screen.getByText("LocalWrite").parentElement?.parentElement).toHaveTextContent("Unavailable");
     expect(screen.getByText("Model provider").parentElement?.parentElement).toHaveTextContent("Degraded");
     expect(screen.getByText("Containment").parentElement?.parentElement).toHaveTextContent("Unavailable");
+    expect(screen.getByText("Desktop application").parentElement?.parentElement).toHaveTextContent("0.1.0");
+    expect(screen.getByText("Service build").parentElement?.parentElement).toHaveTextContent("enterprise-local-agent 0.1.0");
   });
 
   it("shows reconciliation counts only for an operator-authorized projection", async () => {

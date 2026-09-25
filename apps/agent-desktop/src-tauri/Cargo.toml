@@ -3,6 +3,10 @@ name = "agent-desktop"
 version.workspace = true
 edition.workspace = true
 build = "build.rs"
+authors = ["Enterprise Local Agent contributors"]
+description = "Thin desktop client for the governed Enterprise Local Agent service"
+homepage = "https://github.com/mingshi2807/enterprise-local-agent"
+repository = "https://github.com/mingshi2807/enterprise-local-agent"
 
 [lib]
 name = "agent_desktop"

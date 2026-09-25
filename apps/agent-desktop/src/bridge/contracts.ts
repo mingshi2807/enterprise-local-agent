@@ -98,6 +98,17 @@ export const buildInfoSchema = z
   })
   .strict();
 
+export const desktopBuildInfoSchema = z
+  .object({
+    application: z.literal("enterprise-local-agent-desktop"),
+    version: z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/).max(64),
+    git_revision: z.string().regex(/^[0-9a-fA-F]{40}$/).nullable(),
+    build_profile: z.enum(["debug", "release", "unknown"]),
+    service_api_version: z.literal(1),
+    service_event_version: z.literal(2),
+  })
+  .strict();
+
 export const sessionSchema = z.object({ session_id: uuid }).strict();
 
 const applicationCitationSchema = z
@@ -252,6 +263,7 @@ export const approvalPreviewSchema = z.object({
 export type Health = z.infer<typeof healthSchema>;
 export type Readiness = z.infer<typeof readinessSchema>;
 export type BuildInfo = z.infer<typeof buildInfoSchema>;
+export type DesktopBuildInfo = z.infer<typeof desktopBuildInfoSchema>;
 export type Session = z.infer<typeof sessionSchema>;
 export type RunView = z.infer<typeof runViewSchema>;
 export type RunHistoryItem = z.infer<typeof runHistoryItemSchema>;

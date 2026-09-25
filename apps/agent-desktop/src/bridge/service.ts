@@ -5,6 +5,7 @@ import {
   approvalPreviewSchema,
   buildInfoSchema,
   conversationPageSchema,
+  desktopBuildInfoSchema,
   healthSchema,
   readinessSchema,
   runViewSchema,
@@ -20,6 +21,7 @@ async function invokeAndValidate<T>(command: string, schema: z.ZodType<T>, args?
 }
 
 export const localService = {
+  desktopBuildInfo: () => invokeAndValidate("desktop_build_info", desktopBuildInfoSchema),
   health: () => invokeAndValidate("service_health", healthSchema),
   readiness: () => invokeAndValidate("service_readiness", readinessSchema),
   version: () => invokeAndValidate("service_version", buildInfoSchema),

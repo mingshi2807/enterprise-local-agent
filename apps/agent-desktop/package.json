@@ -9,6 +9,8 @@
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint . --max-warnings 0",
     "test": "vitest run",
+    "release:validate": "node scripts/desktop-release.mjs validate",
+    "release:test": "node --test scripts/desktop-release.node.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

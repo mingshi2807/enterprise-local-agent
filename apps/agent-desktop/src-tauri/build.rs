@@ -1,5 +1,19 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=ELA_GIT_REVISION");
+
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_owned());
+    println!("cargo:rustc-env=ELA_DESKTOP_BUILD_PROFILE={profile}");
+
+    if let Ok(revision) = std::env::var("ELA_GIT_REVISION") {
+        if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            eprintln!("ELA_GIT_REVISION must be a 40-character hexadecimal commit ID");
+            std::process::exit(1);
+        }
+        println!("cargo:rustc-env=ELA_DESKTOP_GIT_REVISION={revision}");
+    }
+
     let manifest = tauri_build::AppManifest::new().commands(&[
+        "desktop_build_info",
         "service_health",
         "service_readiness",
         "service_version",

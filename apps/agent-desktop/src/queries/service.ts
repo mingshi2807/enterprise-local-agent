@@ -4,14 +4,20 @@ import { localService } from "@/bridge/service";
 
 export const serviceQueryKeys = {
   all: ["local-service"] as const,
+  desktopBuildInfo: () => [...serviceQueryKeys.all, "desktop-build-info"] as const,
   health: () => [...serviceQueryKeys.all, "health"] as const,
   readiness: () => [...serviceQueryKeys.all, "readiness"] as const,
   version: () => [...serviceQueryKeys.all, "version"] as const,
 };
 
 export function useServiceState() {
-  const [health, readiness, version] = useQueries({
+  const [desktopBuildInfo, health, readiness, version] = useQueries({
     queries: [
+      queryOptions({
+        queryKey: serviceQueryKeys.desktopBuildInfo(),
+        queryFn: localService.desktopBuildInfo,
+        staleTime: Number.POSITIVE_INFINITY,
+      }),
       queryOptions({
         queryKey: serviceQueryKeys.health(),
         queryFn: localService.health,
@@ -30,5 +36,5 @@ export function useServiceState() {
     ],
   });
 
-  return { health, readiness, version };
+  return { desktopBuildInfo, health, readiness, version };
 }

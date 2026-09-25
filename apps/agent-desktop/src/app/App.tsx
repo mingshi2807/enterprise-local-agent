@@ -69,7 +69,7 @@ function ThemeButton() {
 export function App() {
   const queryClient = useQueryClient();
   const reduceMotion = useReducedMotion();
-  const { health, readiness, version } = useServiceState();
+  const { desktopBuildInfo, health, readiness, version } = useServiceState();
   const [sidebarOpen, setSidebarOpen] = useState(() => window.matchMedia("(min-width: 821px)").matches);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -259,6 +259,7 @@ export function App() {
             <Suspense fallback={<div className="px-6 py-5 text-xs text-muted">Loading settings…</div>}>
               <SettingsView
                 state={serviceState}
+                desktopBuildInfo={desktopBuildInfo.data}
                 readiness={readiness.data}
                 version={version.data}
                 onClose={closeSettings}

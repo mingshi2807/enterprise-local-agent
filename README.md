@@ -515,6 +515,22 @@ Tauri, and the named command and capability boundary is unchanged. M16.8 passed
 36 frontend tests, 9 desktop Rust tests, strict Clippy, and the Tauri release
 build.
 
+M16.9 adds release packaging without embedding runtime authority. Tauri now
+produces an Apple Silicon `.app` and DMG with macOS 12 minimum and hardened
+runtime settings, plus an x86_64 Debian package. The desktop version inherits
+the workspace Cargo version; npm mirrors are checked, and bounded desktop build
+metadata reports the version, git revision, build profile, and supported service
+API/event contracts. Production source maps and automatic updater artifacts are
+disabled.
+
+Credential-free CI builds unsigned packages. Production macOS signing,
+notarization, stapling, and verification use release-operator credentials held
+outside the repository. Deterministic manifests record compatibility metadata
+and SHA-256 values and reject dirty sources or tampered artifacts. The desktop
+continues to require a separately installed trusted `agent-service-daemon`; it
+does not bundle or launch the service or containment artifacts. See
+[`docs/release/desktop.md`](docs/release/desktop.md) for commands and policy.
+
 ## Deterministic demonstration
 
 The default CLI path is network-free. It uses `RigModelAdapter<FakeRigModel>`

@@ -2292,3 +2292,120 @@
   M16.8 PASS
 
   No architecture, service command, capability, permission, or execution-authority changes were introduced. No commit was created.
+
+# M16.9 implementation report
+
+• 1. Packaging Tree/Config
+
+- Added platform configs: apps/agent-desktop/src-tauri/tauri.macos.conf.json, apps/agent-desktop/src-tauri/tauri.linux.conf.json, and apps/agent-desktop/src-tauri/Entitlements.plist.
+- Added release tooling under apps/agent-desktop/scripts.
+- Added release documentation at docs/release/desktop.md.
+- Added manual packaging CI at .github/workflows/desktop-packaging.yml.
+
+  1. macOS Strategy/Artifacts
+
+- Target: Apple Silicon aarch64-apple-darwin.
+- Artifacts: .app and DMG.
+- Minimum macOS: 12.0.
+- Hardened runtime enabled with no entitlement exceptions.
+- Unsigned packaging is configured in CI.
+- No macOS artifacts were produced because the current environment is Linux.
+
+  1. Linux Strategy/Artifacts
+
+- Produced and verified Debian amd64 package.
+- Package: enterprise-local-agent-desktop version 0.1.0.
+- Runtime dependencies: libwebkit2gtk-4.1-0, libgtk-3-0.
+- Desktop entry, application icons, install/uninstall, dynamic linkage, package hygiene, and service-unavailable startup were verified.
+- AppImage was intentionally deferred.
+
+  1. Version/Build Metadata
+
+- Root workspace Cargo version is authoritative.
+- package.json and lockfile are validated mirrors.
+- Tauri inherits the Cargo package version.
+- Added bounded desktop_build_info exposing version, optional 40-character git revision, build profile, service API v1, and ServiceEventV2.
+- No environment dump or sensitive metadata is exposed.
+
+  1. Signing/Notarization Strategy
+
+  Production macOS flow is documented as:
+
+  build → codesign → notarize → staple → codesign/Gatekeeper/stapler verification
+
+  Developer ID certificates, Apple credentials, passwords, and private keys remain external to the repository. Normal CI uses unsigned packaging and requires no Apple credentials.
+
+  1. Release Manifest/Checksums
+
+  Produced deterministic manifest:
+
+  /tmp/ela-tauri-target-m169/release/enterprise-local-agent-desktop-linux-x86_64-m169.json
+
+- Debian SHA-256: a418a3737baa205f0644707146a2f079f51b398cd9aee46775abbf47f7cc27fb
+- Manifest SHA-256: 141663253f1fe488c4b6688229a22b657ec4e7ed5b909d90d693819b079d8555
+
+  The manifest verifier passed. This development manifest correctly records source_dirty: true, so it is not publishable.
+
+  1. Service Deployment Assumption
+
+  The desktop remains a thin client. It does not embed, install, launch, or update:
+
+- agent-service-daemon
+- Bubblewrap or the containment worker
+- model servers
+  Packaged Unix startup now has fixed service-socket fallbacks when XDG_RUNTIME_DIR is unavailable.
+
+  1. Tests
+
+  Passed:
+
+- TypeScript typecheck and ESLint
+- 36 frontend tests
+- production frontend build
+- 3 release-tool tests
+- release configuration and manifest verification
+- Rust formatting
+- strict workspace Clippy
+- desktop Rust tests: 11 passed
+- complete workspace suite with known M11 test excluded
+- Debian package install/uninstall and packaged startup
+- capability and package leakage scans
+
+  The unfiltered suite still reproduces the pre-existing M11 termination_reaps_process_group_descendant failure.
+
+  1. Produced Artifacts
+
+  /tmp/ela-tauri-target-m169/release/bundle/deb/Enterprise Local Agent Desktop_0.1.0_amd64.deb
+
+  The artifact contains no source maps, credentials, service daemon, containment worker, Bubblewrap binary, sidecars, or debug-key material.
+
+  1. Remaining Release Blockers/Debt
+
+- Produce and verify .app and DMG on a real Apple Silicon macOS runner.
+- Exercise production codesigning and notarization with release credentials.
+- Commit the implementation and generate a clean source_dirty: false manifest.
+- Resolve the separately tracked M11 process-reaping test failure before requiring a completely green unfiltered workspace gate.
+- Main frontend chunk remains approximately 562 kB; this is an existing non-blocking warning.
+- Automatic updates, AppImage, and Windows packaging remain deferred.
+
+  1. Deviations
+
+- Added the fixed packaged Unix socket fallback after release startup testing exposed missing XDG_RUNTIME_DIR.
+- No product capability or execution authority was added.
+- No commit was created.
+
+5h interruption :
+
+• No. The interruption did not affect the M16.9 implementation or generated Linux artifact.
+
+  After resuming, I revalidated:
+
+- formatting and strict workspace Clippy
+- frontend typecheck, lint, 36 tests, and production build
+- release configuration and 3 release-tool tests
+- full workspace tests, excluding the already-known unrelated M11 process-reaping test
+- Debian package and manifest checksums
+- capability and package leakage scans
+
+  The remaining limitations are unchanged: macOS packaging/signing requires an Apple Silicon environment, and the current Linux manifest is marked source_dirty: true because the changes are uncommitted. No
+  commit was made.

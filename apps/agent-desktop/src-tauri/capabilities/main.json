@@ -5,6 +5,7 @@
   "windows": ["main"],
   "platforms": ["linux", "macOS", "windows"],
   "permissions": [
+    "allow-desktop-build-info",
     "allow-service-health",
     "allow-service-readiness",
     "allow-service-version",

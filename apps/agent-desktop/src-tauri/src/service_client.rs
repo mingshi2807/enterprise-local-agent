@@ -823,10 +823,7 @@ impl LocalServiceClient {
 
         #[cfg(unix)]
         {
-            let runtime_directory = env::var_os("XDG_RUNTIME_DIR")
-                .map(PathBuf::from)
-                .ok_or(LocalServiceError::InvalidConfiguration)?;
-            Self::unix_socket(runtime_directory.join("enterprise-local-agent.sock"))
+            Self::unix_socket(default_unix_socket_path(env::var_os("XDG_RUNTIME_DIR")))
         }
 
         #[cfg(not(unix))]
@@ -1263,6 +1260,21 @@ impl LocalServiceClient {
     }
 }
 
+#[cfg(unix)]
+fn default_unix_socket_path(runtime_directory: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(runtime_directory) = runtime_directory {
+        return PathBuf::from(runtime_directory).join("enterprise-local-agent.sock");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/var/run/enterprise-local-agent/agent.sock")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        PathBuf::from("/run/enterprise-local-agent/agent.sock")
+    }
+}
+
 fn validate_run_key(session_id: &str, run_id: &str) -> Result<(), LocalServiceError> {
     if !valid_uuid(session_id) || !valid_uuid(run_id) {
         return Err(LocalServiceError::InvalidRequest);
@@ -1378,6 +1390,25 @@ mod tests {
     use super::*;
 
     const HEALTH: &str = r#"{"version":1,"lifecycle":"serving"}"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_defaults_allow_packaged_startup_without_shell_environment() {
+        assert_eq!(
+            default_unix_socket_path(Some("/run/user/1000".into())),
+            PathBuf::from("/run/user/1000/enterprise-local-agent.sock")
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            default_unix_socket_path(None),
+            PathBuf::from("/var/run/enterprise-local-agent/agent.sock")
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            default_unix_socket_path(None),
+            PathBuf::from("/run/enterprise-local-agent/agent.sock")
+        );
+    }
 
     #[tokio::test]
     async fn loopback_request_keeps_bearer_in_rust_and_sets_required_headers() {

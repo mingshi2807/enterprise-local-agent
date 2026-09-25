@@ -8,6 +8,32 @@ use service_client::{
 };
 use tauri::State;
 
+const SERVICE_API_VERSION: u16 = 1;
+const SERVICE_EVENT_VERSION: u16 = 2;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DesktopBuildInfoV1 {
+    application: &'static str,
+    version: &'static str,
+    git_revision: Option<&'static str>,
+    build_profile: &'static str,
+    service_api_version: u16,
+    service_event_version: u16,
+}
+
+#[tauri::command]
+fn desktop_build_info() -> DesktopBuildInfoV1 {
+    DesktopBuildInfoV1 {
+        application: "enterprise-local-agent-desktop",
+        version: env!("CARGO_PKG_VERSION"),
+        git_revision: option_env!("ELA_DESKTOP_GIT_REVISION"),
+        build_profile: env!("ELA_DESKTOP_BUILD_PROFILE"),
+        service_api_version: SERVICE_API_VERSION,
+        service_event_version: SERVICE_EVENT_VERSION,
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct DesktopCommandError {
     code: &'static str,
@@ -206,6 +232,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     tauri::Builder::default()
         .manage(client)
         .invoke_handler(tauri::generate_handler![
+            desktop_build_info,
             service_health,
             service_readiness,
             service_version,
@@ -225,4 +252,25 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         ])
         .run(tauri::generate_context!())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_build_metadata_is_bounded_and_contract_specific() {
+        let info = desktop_build_info();
+        assert_eq!(info.application, "enterprise-local-agent-desktop");
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+        assert!(matches!(
+            info.build_profile,
+            "debug" | "release" | "unknown"
+        ));
+        assert_eq!(info.service_api_version, 1);
+        assert_eq!(info.service_event_version, 2);
+        assert!(info.git_revision.is_none_or(|revision| {
+            revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }));
+    }
 }
