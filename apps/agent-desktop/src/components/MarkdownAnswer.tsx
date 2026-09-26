@@ -47,6 +47,7 @@ export const MarkdownAnswer = memo(function MarkdownAnswer({ answer }: { answer:
         remarkPlugins={[remarkGfm]}
         components={{
           a: ({ children }) => <span className="font-medium text-accent">{children}</span>,
+          img: ({ alt }) => <span className="text-muted">[Image omitted{alt === undefined || alt === "" ? "" : `: ${alt}`}]</span>,
           pre: ({ children }) => {
             const code = nodeText(children).replace(/\n$/, "");
             return (

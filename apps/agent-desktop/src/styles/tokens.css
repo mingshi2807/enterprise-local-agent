@@ -125,6 +125,8 @@
   .status-dot-degraded,
   .status-dot-draining { background: var(--warning); }
   .status-dot-unavailable { background: var(--danger); }
+  .status-dot-upgrade_required,
+  .status-dot-incompatible { background: var(--danger); }
 
   .message-row {
     position: relative;

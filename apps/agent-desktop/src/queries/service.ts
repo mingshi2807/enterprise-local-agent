@@ -6,12 +6,13 @@ export const serviceQueryKeys = {
   all: ["local-service"] as const,
   desktopBuildInfo: () => [...serviceQueryKeys.all, "desktop-build-info"] as const,
   health: () => [...serviceQueryKeys.all, "health"] as const,
+  compatibility: () => [...serviceQueryKeys.all, "compatibility"] as const,
   readiness: () => [...serviceQueryKeys.all, "readiness"] as const,
   version: () => [...serviceQueryKeys.all, "version"] as const,
 };
 
 export function useServiceState() {
-  const [desktopBuildInfo, health, readiness, version] = useQueries({
+  const [desktopBuildInfo, health, compatibility, readiness, version] = useQueries({
     queries: [
       queryOptions({
         queryKey: serviceQueryKeys.desktopBuildInfo(),
@@ -21,6 +22,11 @@ export function useServiceState() {
       queryOptions({
         queryKey: serviceQueryKeys.health(),
         queryFn: localService.health,
+        refetchInterval: 5_000,
+      }),
+      queryOptions({
+        queryKey: serviceQueryKeys.compatibility(),
+        queryFn: localService.compatibility,
         refetchInterval: 5_000,
       }),
       queryOptions({
@@ -36,5 +42,5 @@ export function useServiceState() {
     ],
   });
 
-  return { desktopBuildInfo, health, readiness, version };
+  return { desktopBuildInfo, health, compatibility, readiness, version };
 }

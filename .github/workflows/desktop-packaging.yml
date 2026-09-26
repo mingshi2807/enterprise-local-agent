@@ -26,9 +26,15 @@ jobs:
       - name: Install frontend dependencies
         working-directory: apps/agent-desktop
         run: npm ci
+      - name: Validate Rust workspace
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features
       - name: Validate and test desktop
         working-directory: apps/agent-desktop
         run: |
+          npm audit --omit=dev --audit-level=high
           npm run release:validate
           npm run release:test
           npm run typecheck

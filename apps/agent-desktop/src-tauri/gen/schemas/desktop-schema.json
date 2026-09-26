@@ -261,6 +261,12 @@
           "markdownDescription": "Enables the desktop_build_info command without any pre-configured scope."
         },
         {
+          "description": "Enables the service_compatibility command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-service-compatibility",
+          "markdownDescription": "Enables the service_compatibility command without any pre-configured scope."
+        },
+        {
           "description": "Enables the service_health command without any pre-configured scope.",
           "type": "string",
           "const": "allow-service-health",
@@ -361,6 +367,12 @@
           "type": "string",
           "const": "deny-desktop-build-info",
           "markdownDescription": "Denies the desktop_build_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the service_compatibility command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-service-compatibility",
+          "markdownDescription": "Denies the service_compatibility command without any pre-configured scope."
         },
         {
           "description": "Denies the service_health command without any pre-configured scope.",

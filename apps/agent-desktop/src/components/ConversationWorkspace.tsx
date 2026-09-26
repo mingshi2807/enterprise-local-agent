@@ -3,6 +3,7 @@ import { ArrowDown, ArrowUp, CircleAlert, LoaderCircle, RefreshCw, Square, Spark
 import { useReducedMotion } from "motion/react";
 
 import { Button } from "@/components/ui/button";
+import type { ServiceConnectionState } from "@/bridge/contracts";
 import { formatDuration, runDetails } from "@/features/runActivity";
 import type { ApprovalUiState, Conversation, WorkflowMode } from "@/queries/conversation";
 
@@ -13,12 +14,11 @@ const ApprovalPanel = lazy(() =>
   import("@/components/ApprovalPanel").then(({ ApprovalPanel: component }) => ({ default: component })),
 );
 
-type ServiceState = "ready" | "degraded" | "unavailable" | "draining";
 const MAX_INPUT_BYTES = 8 * 1024;
 
 interface Props {
   conversation: Conversation | null;
-  serviceState: ServiceState;
+  serviceState: ServiceConnectionState;
   readonlyReady: boolean;
   localWriteReady: boolean;
   sending: boolean;
@@ -148,6 +148,7 @@ export function ConversationWorkspace(props: Props) {
   const reduceMotion = useReducedMotion();
   const active = conversation?.activeRun ?? null;
   const unavailable = serviceState === "unavailable";
+  const unsupported = serviceState === "upgrade_required" || serviceState === "incompatible";
 
   const status = conversation?.lastRun ?? null;
   const events = active?.events ?? conversation?.lastRunEvents ?? [];
@@ -199,12 +200,18 @@ export function ConversationWorkspace(props: Props) {
           setAtTail(nextAtTail);
         }}
       >
-        {unavailable && conversation === null ? (
+        {(unavailable || unsupported) && conversation === null ? (
           <div className="grid min-h-full place-items-center px-6 py-10">
             <div className="max-w-sm text-center">
               <CircleAlert aria-hidden="true" className="mx-auto mb-3 size-6 text-danger" />
-              <h3 className="text-base font-semibold">Local service unavailable</h3>
-              <p className="mt-1.5 text-sm leading-6 text-secondary">Tasks stay disabled until the trusted local service can be reached.</p>
+              <h3 className="text-base font-semibold">
+                {unsupported ? "Service upgrade required" : "Local service unavailable"}
+              </h3>
+              <p className="mt-1.5 text-sm leading-6 text-secondary">
+                {unsupported
+                  ? "This desktop cannot safely use the installed service. Health and version diagnostics remain available."
+                  : "Tasks stay disabled until the trusted local service can be reached."}
+              </p>
               <Button className="mt-4" onClick={onRetryConnection}><RefreshCw aria-hidden="true" className="size-3.5" />Retry connection</Button>
             </div>
           </div>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import type {
@@ -70,6 +70,29 @@ export interface ApprovalUiState {
 
 const conversationsKey = ["conversations"] as const;
 const historyKey = ["conversation-history"] as const;
+
+export function pollingInterval(
+  disposition: RunView["disposition"] | undefined,
+  foreground: boolean,
+): number | false {
+  if (
+    disposition === "completed"
+    || disposition === "failed"
+    || disposition === "manual_reconciliation_required"
+  ) return false;
+  if (!foreground) return 3_000;
+  if (disposition === "waiting") return 2_000;
+  return 400;
+}
+
+export function validatedCursor(
+  cursor: number | null,
+  authoritativeLastSequence: number | null,
+): { cursor: number | null; stale: boolean } {
+  const stale = cursor !== null
+    && (authoritativeLastSequence === null || cursor > authoritativeLastSequence);
+  return { cursor: stale ? null : cursor, stale };
+}
 
 function titleFor(prompt: string) {
   const firstLine = prompt.split(/\r?\n/, 1)[0]?.trim() ?? "New conversation";
@@ -153,12 +176,13 @@ function conversationFromSummary(summary: ConversationSummary): Conversation {
 
 export function useConversationController(
   selectedSessionId: string | null,
-  onSelectSession: (sessionId: string) => void,
+  onSelectSession: (sessionId: string | null) => void,
   serviceAvailable: boolean,
+  serviceGeneration: string | null,
 ) {
   const queryClient = useQueryClient();
   const history = useQuery({
-    queryKey: historyKey,
+    queryKey: [...historyKey, serviceGeneration],
     enabled: serviceAvailable,
     retry: false,
     queryFn: async () => {
@@ -183,10 +207,23 @@ export function useConversationController(
     () => conversations.find(({ sessionId }) => sessionId === selectedSessionId) ?? null,
     [conversations, selectedSessionId],
   );
+  const observedGeneration = useRef<string | null>(null);
 
   const setConversations = useCallback((update: (current: Conversation[]) => Conversation[]) => {
     queryClient.setQueryData<Conversation[]>(conversationsKey, (current = []) => update(current));
   }, [queryClient]);
+
+  useEffect(() => {
+    if (serviceGeneration === null) return;
+    if (
+      observedGeneration.current !== null
+      && observedGeneration.current !== serviceGeneration
+    ) {
+      queryClient.setQueryData<Conversation[]>(conversationsKey, []);
+      onSelectSession(null);
+    }
+    observedGeneration.current = serviceGeneration;
+  }, [onSelectSession, queryClient, serviceGeneration]);
 
   useEffect(() => {
     if (history.data === undefined) return;
@@ -218,7 +255,7 @@ export function useConversationController(
   }, [history.data, onSelectSession, selectedSessionId, setConversations]);
 
   const selectedHistory = useQuery({
-    queryKey: ["conversation-runs", selectedSessionId],
+    queryKey: ["conversation-runs", serviceGeneration, selectedSessionId],
     enabled: serviceAvailable && selectedSessionId !== null,
     retry: false,
     queryFn: async () => {
@@ -374,10 +411,10 @@ export function useConversationController(
   });
 
   const waiting = useQuery({
-    queryKey: ["waiting-approvals"],
+    queryKey: ["waiting-approvals", serviceGeneration],
     queryFn: () => localService.listWaiting(),
     enabled: serviceAvailable,
-    refetchInterval: 750,
+    refetchInterval: () => document.visibilityState === "visible" ? 1_500 : 5_000,
     retry: false,
   });
 
@@ -431,39 +468,52 @@ export function useConversationController(
   const active = selected?.activeRun ?? null;
   const activeRunId = active?.runId ?? null;
   const poll = useQuery({
-    queryKey: ["conversation-poll", selectedSessionId, active?.runId],
+    queryKey: ["conversation-poll", serviceGeneration, selectedSessionId, active?.runId],
     enabled: selectedSessionId !== null && active !== null,
     queryFn: async () => {
       if (selectedSessionId === null || active === null) throw new Error("inactive_run");
-      const events = await localService.readEvents(selectedSessionId, active.runId, active.cursor);
       const status = await localService.runStatus(selectedSessionId, active.runId);
-      return { events, status };
+      const checkedCursor = validatedCursor(active.cursor, status.last_sequence);
+      const events = await localService.readEvents(
+        selectedSessionId,
+        active.runId,
+        checkedCursor.cursor,
+      );
+      return { events, status, staleCursor: checkedCursor.stale };
     },
-    refetchInterval: 400,
+    refetchInterval: (query) => pollingInterval(
+      query.state.data?.status.disposition,
+      document.visibilityState === "visible",
+    ),
     retry: 2,
   });
 
   useEffect(() => {
     if (selectedSessionId === null || activeRunId === null || poll.data === undefined) return;
-    const { events: page, status } = poll.data;
+    const { events: page, status, staleCursor } = poll.data;
     setConversations((current) =>
       replaceConversation(current, selectedSessionId, (conversation) => {
         if (conversation.activeRun?.runId !== activeRunId) return conversation;
         const merged = mergeEventPage(
-          conversation.activeRun.events,
-          conversation.activeRun.cursor,
+          staleCursor ? [] : conversation.activeRun.events,
+          staleCursor ? null : conversation.activeRun.cursor,
           page,
           activeRunId,
         );
         if (!merged.valid) {
           return {
             ...conversation,
-            activeRun: { ...conversation.activeRun, activity: "Reconnecting…" },
+            activeRun: {
+              ...conversation.activeRun,
+              cursor: null,
+              events: [],
+              activity: "Reconnecting…",
+            },
           };
         }
         const events = merged.events;
         const cursor = merged.cursor;
-        const freshPage = events.slice(conversation.activeRun.events.length);
+        const freshPage = events.slice(staleCursor ? 0 : conversation.activeRun.events.length);
         const terminal = status.disposition === "completed"
           || status.disposition === "failed"
           || status.disposition === "manual_reconciliation_required";

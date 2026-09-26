@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { RunView, ServiceEvent } from "@/bridge/contracts";
 import { mergeEventPage, runDetails } from "@/features/runActivity";
+import { pollingInterval, validatedCursor } from "@/queries/conversation";
 
 const runId = "22222222-2222-4222-8222-222222222222";
 const workflow = "enterprise-engineering-readonly-v1" as const;
@@ -38,6 +39,21 @@ function status(overrides: Partial<RunView> = {}): RunView {
 }
 
 describe("run activity metadata", () => {
+  it("uses bounded adaptive polling and stops after terminal state", () => {
+    expect(pollingInterval("running", true)).toBe(400);
+    expect(pollingInterval("waiting", true)).toBe(2_000);
+    expect(pollingInterval("running", false)).toBe(3_000);
+    expect(pollingInterval("completed", true)).toBe(false);
+    expect(pollingInterval("manual_reconciliation_required", true)).toBe(false);
+  });
+
+  it("invalidates a cursor ahead of the authoritative service sequence", () => {
+    expect(validatedCursor(9, 4)).toEqual({ cursor: null, stale: true });
+    expect(validatedCursor(0, null)).toEqual({ cursor: null, stale: true });
+    expect(validatedCursor(4, 4)).toEqual({ cursor: 4, stale: false });
+    expect(validatedCursor(null, 4)).toEqual({ cursor: null, stale: false });
+  });
+
   it("accepts sequence zero, ignores duplicates, and advances contiguously", () => {
     const first = mergeEventPage([], null, [event(0), event(0)], runId);
     expect(first).toMatchObject({ valid: true, cursor: 0 });

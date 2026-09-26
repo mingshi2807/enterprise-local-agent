@@ -3,8 +3,8 @@ mod service_client;
 use serde::Serialize;
 use service_client::{
     ApprovalDecisionV1, BuildInfoV1, ConversationPageV1, DesktopApprovalPreviewV1,
-    DesktopReadinessSnapshotV1, HealthV1, LocalServiceClient, RunHistoryPageV1, RunViewV1,
-    ServiceEventV2, SessionV1, WaitingPageV1,
+    DesktopCompatibilityV1, DesktopReadinessSnapshotV1, HealthV1, LocalServiceClient,
+    RunHistoryPageV1, RunViewV1, ServiceEventV2, SessionV1, WaitingPageV1,
 };
 use tauri::State;
 
@@ -53,9 +53,17 @@ async fn service_health(
 }
 
 #[tauri::command]
+async fn service_compatibility(
+    client: State<'_, LocalServiceClient>,
+) -> Result<DesktopCompatibilityV1, DesktopCommandError> {
+    client.compatibility().await.map_err(Into::into)
+}
+
+#[tauri::command]
 async fn service_readiness(
     client: State<'_, LocalServiceClient>,
 ) -> Result<DesktopReadinessSnapshotV1, DesktopCommandError> {
+    client.require_compatible().await?;
     client.readiness().await.map_err(Into::into)
 }
 
@@ -70,6 +78,7 @@ async fn service_version(
 async fn conversation_create_session(
     client: State<'_, LocalServiceClient>,
 ) -> Result<SessionV1, DesktopCommandError> {
+    client.require_compatible().await?;
     client.create_session().await.map_err(Into::into)
 }
 
@@ -78,6 +87,7 @@ async fn conversation_list_sessions(
     client: State<'_, LocalServiceClient>,
     after_session_id: Option<String>,
 ) -> Result<ConversationPageV1, DesktopCommandError> {
+    client.require_compatible().await?;
     client
         .list_sessions(after_session_id.as_deref())
         .await
@@ -90,6 +100,7 @@ async fn conversation_list_runs(
     session_id: String,
     after_run_id: Option<String>,
 ) -> Result<RunHistoryPageV1, DesktopCommandError> {
+    client.require_compatible().await?;
     client
         .list_session_runs(&session_id, after_run_id.as_deref())
         .await
@@ -103,6 +114,7 @@ async fn conversation_start_readonly_run(
     start_request_id: String,
     input: String,
 ) -> Result<RunViewV1, DesktopCommandError> {
+    client.require_compatible().await?;
     client
         .start_readonly_run(&session_id, &start_request_id, &input)
         .await
@@ -116,6 +128,7 @@ async fn conversation_start_localwrite_run(
     start_request_id: String,
     input: String,
 ) -> Result<RunViewV1, DesktopCommandError> {
+    client.require_compatible().await?;
     client
         .start_localwrite_run(&session_id, &start_request_id, &input)
         .await
@@ -128,6 +141,7 @@ async fn conversation_run_status(
     session_id: String,
     run_id: String,
 ) -> Result<RunViewV1, DesktopCommandError> {
+    client.require_compatible().await?;
     client
         .run_status(&session_id, &run_id)
         .await
@@ -140,6 +154,7 @@ async fn conversation_cancel_run(
     session_id: String,
     run_id: String,
 ) -> Result<(), DesktopCommandError> {
+    client.require_compatible().await?;
     client
         .cancel_run(&session_id, &run_id)
         .await
@@ -153,6 +168,7 @@ async fn conversation_read_events(
     run_id: String,
     after_sequence: Option<u64>,
 ) -> Result<Vec<ServiceEventV2>, DesktopCommandError> {
+    client.require_compatible().await?;
     client
         .read_events(&session_id, &run_id, after_sequence)
         .await
@@ -163,6 +179,7 @@ async fn conversation_read_events(
 async fn approval_list_waiting(
     client: State<'_, LocalServiceClient>,
 ) -> Result<WaitingPageV1, DesktopCommandError> {
+    client.require_compatible().await?;
     client.list_waiting().await.map_err(Into::into)
 }
 
@@ -173,6 +190,7 @@ async fn approval_get_preview(
     run_id: String,
     wait_id: String,
 ) -> Result<DesktopApprovalPreviewV1, DesktopCommandError> {
+    client.require_compatible().await?;
     client
         .approval_preview(&session_id, &run_id, &wait_id)
         .await
@@ -188,6 +206,7 @@ async fn approval_submit_decision(
     expected_row_version: u64,
     decision: ApprovalDecisionV1,
 ) -> Result<(), DesktopCommandError> {
+    client.require_compatible().await?;
     client
         .submit_decision(
             &session_id,
@@ -207,6 +226,7 @@ async fn approval_resume_run(
     run_id: String,
     wait_id: String,
 ) -> Result<(), DesktopCommandError> {
+    client.require_compatible().await?;
     client
         .resume_waiting(&session_id, &run_id, &wait_id)
         .await
@@ -221,6 +241,7 @@ async fn approval_abort_waiting(
     wait_id: String,
     expected_row_version: u64,
 ) -> Result<(), DesktopCommandError> {
+    client.require_compatible().await?;
     client
         .abort_waiting(&session_id, &run_id, &wait_id, expected_row_version)
         .await
@@ -234,6 +255,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .invoke_handler(tauri::generate_handler![
             desktop_build_info,
             service_health,
+            service_compatibility,
             service_readiness,
             service_version,
             conversation_create_session,

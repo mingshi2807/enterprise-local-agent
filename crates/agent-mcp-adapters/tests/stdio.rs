@@ -488,45 +488,99 @@ async fn recovery_replay_performs_zero_mcp_operations() {
 #[tokio::test]
 async fn termination_reaps_process_group_descendant() {
     let temp = TempDir::new().expect("tempdir");
-    let pid_file = temp.path().join("descendant.pid");
-    let tool = discover_tool(
-        config(
-            "descendant",
-            vec![(
-                OsString::from("MCP_FIXTURE_DESCENDANT_PID"),
-                pid_file.as_os_str().to_owned(),
-            )],
-        ),
-        mapping(CapabilityKind::ReadOnly),
-    )
-    .await
-    .expect("discovery succeeds");
-    let mut invocation = tool.start_managed(call()).expect("start succeeds");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(300), invocation.wait())
-            .await
-            .is_err()
-    );
-    invocation
-        .terminate_and_reap()
+    for cycle in 0..8 {
+        let pid_file = temp.path().join(format!("descendant-{cycle}.pid"));
+        let tool = discover_tool(
+            config(
+                "descendant",
+                vec![(
+                    OsString::from("MCP_FIXTURE_DESCENDANT_PID"),
+                    pid_file.as_os_str().to_owned(),
+                )],
+            ),
+            mapping(CapabilityKind::ReadOnly),
+        )
         .await
-        .expect("process group reaped");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !pid_file.exists() && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        .expect("discovery succeeds");
+        let mut invocation = tool.start_managed(call()).expect("start succeeds");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), invocation.wait())
+                .await
+                .is_err()
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pid_file.exists() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let pid = fs::read_to_string(&pid_file)
+            .expect("fixture wrote descendant pid")
+            .trim()
+            .to_owned();
+        let proc_path = PathBuf::from(format!("/proc/{pid}"));
+        let before = read_process_stat(&pid).expect("live descendant process stat");
+        eprintln!(
+            "descendant before cleanup: cycle={cycle} pid={pid} ppid={} pgid={} session={} state={} start_time={}",
+            before.parent_pid,
+            before.process_group,
+            before.session,
+            before.state,
+            before.start_time
+        );
+
+        invocation
+            .terminate_and_reap()
+            .await
+            .expect("process group reaped");
+        while process_is_live(&pid, before.start_time) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if proc_path.exists()
+            && let Some(after) = read_process_stat(&pid)
+        {
+            eprintln!(
+                "descendant after cleanup: cycle={cycle} pid={pid} ppid={} pgid={} session={} state={} start_time={}",
+                after.parent_pid, after.process_group, after.session, after.state, after.start_time
+            );
+            assert_eq!(
+                after.start_time, before.start_time,
+                "descendant PID was reused"
+            );
+            assert_eq!(
+                after.state, 'Z',
+                "a live managed descendant survived process-group cleanup"
+            );
+        }
     }
-    let pid = fs::read_to_string(&pid_file)
-        .expect("fixture wrote descendant pid")
-        .trim()
-        .to_owned();
-    let proc_path = PathBuf::from(format!("/proc/{pid}"));
-    while proc_path.exists() && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(
-        !proc_path.exists(),
-        "managed descendant must not survive cleanup"
-    );
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProcessStat {
+    state: char,
+    parent_pid: u32,
+    process_group: u32,
+    session: u32,
+    start_time: u64,
+}
+
+fn read_process_stat(pid: &str) -> Option<ProcessStat> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    Some(ProcessStat {
+        state: fields.first()?.chars().next()?,
+        parent_pid: fields.get(1)?.parse().ok()?,
+        process_group: fields.get(2)?.parse().ok()?,
+        session: fields.get(3)?.parse().ok()?,
+        start_time: fields.get(19)?.parse().ok()?,
+    })
+}
+
+fn process_is_live(pid: &str, expected_start_time: u64) -> bool {
+    read_process_stat(pid)
+        .is_some_and(|stat| stat.start_time == expected_start_time && stat.state != 'Z')
 }
 
 #[test]

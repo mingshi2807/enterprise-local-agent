@@ -2,15 +2,14 @@ import { Monitor, Moon, Sun, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import { useTheme, type ThemePreference } from "@/app/ThemeContext";
-import type { BuildInfo, DesktopBuildInfo, Readiness } from "@/bridge/contracts";
+import type { BuildInfo, DesktopBuildInfo, Readiness, ServiceConnectionState } from "@/bridge/contracts";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 
-type ServiceState = "ready" | "degraded" | "unavailable" | "draining";
 type DisplayStatus = "Ready" | "Degraded" | "Unavailable";
 
 interface SettingsViewProps {
-  state: ServiceState;
+  state: ServiceConnectionState;
   desktopBuildInfo?: DesktopBuildInfo;
   readiness?: Readiness;
   version?: BuildInfo;
@@ -23,7 +22,7 @@ const themes: Array<{ value: ThemePreference; label: string; icon: typeof Monito
   { value: "dark", label: "Dark", icon: Moon },
 ];
 
-function statusLabel(status: ServiceState | "ready" | "degraded" | "unavailable"): DisplayStatus {
+function statusLabel(status: ServiceConnectionState | "ready" | "degraded" | "unavailable"): DisplayStatus {
   if (status === "ready") return "Ready";
   if (status === "unavailable") return "Unavailable";
   return "Degraded";

@@ -1,16 +1,14 @@
 import { Check, Circle, CircleAlert, Copy, LoaderCircle, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import type { BuildInfo, Readiness } from "@/bridge/contracts";
+import type { BuildInfo, Readiness, ServiceConnectionState } from "@/bridge/contracts";
 import { Button } from "@/components/ui/button";
 import { formatDuration, runDetails, type TimelineItem } from "@/features/runActivity";
 import { cn } from "@/lib/cn";
 import type { Conversation } from "@/queries/conversation";
 
-type ServiceState = "ready" | "degraded" | "unavailable" | "draining";
-
 interface RunInspectorProps {
-  state: ServiceState;
+  state: ServiceConnectionState;
   readiness?: Readiness;
   version?: BuildInfo;
   conversation: Conversation | null;

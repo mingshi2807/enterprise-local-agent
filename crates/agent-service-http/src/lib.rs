@@ -13,9 +13,10 @@ use agent_deployment::{
 };
 use agent_identity::{SessionPageCursor, VerifiedPrincipal};
 use agent_service::{
-    AgentService, ApprovalDecisionV1, DurableApprovalWaitId, EventSequence, MAX_ACTIVE_RUNS,
-    MAX_COMMAND_QUEUE, OperationalRunPageV1, OperationalRunViewV1, RunId, RunInput, RunKey,
-    ServiceError, ServiceEventV2, SessionId, WaitingPageCursor, WorkflowId,
+    AgentService, ApprovalDecisionV1, CompatibilityHandshakeV1, DurableApprovalWaitId,
+    EventSequence, MAX_ACTIVE_RUNS, MAX_COMMAND_QUEUE, OperationalRunPageV1, OperationalRunViewV1,
+    RunId, RunInput, RunKey, ServiceError, ServiceEventV2, SessionId, WaitingPageCursor,
+    WorkflowId,
 };
 use axum::extract::connect_info::Connected;
 use axum::{
@@ -158,6 +159,7 @@ struct HttpState {
     streams: StreamLimits,
     commands: Arc<Semaphore>,
     operations: OperationsState,
+    compatibility: CompatibilityHandshakeV1,
 }
 
 impl HttpState {
@@ -248,9 +250,11 @@ pub fn router_with_operations(
         streams: StreamLimits::new(),
         commands: Arc::new(Semaphore::new(MAX_COMMAND_QUEUE)),
         operations,
+        compatibility: CompatibilityHandshakeV1::current(Uuid::new_v4()),
     };
     Router::new()
         .route("/healthz", get(health))
+        .route("/v1/compatibility", get(compatibility))
         .route("/v1/operations/readiness", get(readiness))
         .route("/v1/operations/metrics", get(metrics))
         .route("/v1/operations/version", get(version))
@@ -312,6 +316,10 @@ async fn health(State(state): State<HttpState>) -> Json<HealthResponse> {
         version: 1,
         lifecycle: state.service.lifecycle(),
     })
+}
+
+async fn compatibility(State(state): State<HttpState>) -> Json<CompatibilityHandshakeV1> {
+    Json(state.compatibility)
 }
 
 async fn readiness(State(state): State<HttpState>) -> Result<Json<ReadinessSnapshotV1>, ApiError> {
@@ -949,6 +957,37 @@ mod tests {
             .layer(Extension(ConnectInfo(UnixPeerCredentials::new(1000, 1000))))
     }
 
+    #[tokio::test]
+    async fn compatibility_endpoint_exposes_only_the_strict_current_contract() {
+        let (_directory, service) = service().await;
+        let response = unix_app(service)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/compatibility")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let handshake: CompatibilityHandshakeV1 =
+            serde_json::from_slice(&body).expect("strict handshake");
+        assert_eq!(handshake.handshake_version, 1);
+        assert_eq!(handshake.service_api_version, 1);
+        assert_eq!(handshake.supported_service_event_versions, [2]);
+        assert_eq!(handshake.service_generation.len(), 36);
+        let text = std::str::from_utf8(&body).expect("UTF-8 JSON");
+        for forbidden in ["git", "build", "prompt", "credential", "capsule"] {
+            assert!(!text.contains(forbidden), "handshake leaked {forbidden}");
+        }
+    }
+
     struct CompleteWorkflow {
         id: WorkflowId,
     }
@@ -1130,6 +1169,7 @@ mod tests {
                     checkpoint_schema_version: agent_harness::CURRENT_CHECKPOINT_SCHEMA_VERSION,
                 },
             ),
+            compatibility: CompatibilityHandshakeV1::current(Uuid::new_v4()),
         };
         let permits = (0..MAX_COMMAND_QUEUE)
             .map(|_| state.acquire_command().expect("command permit"))

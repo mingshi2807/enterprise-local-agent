@@ -7,6 +7,7 @@ use std::{
 
 use reqwest::{Client, Method, StatusCode, header};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 use url::{Host, Url};
 use zeroize::Zeroize;
 
@@ -21,6 +22,12 @@ const MAX_KNOWLEDGE_BACKENDS: usize = 8;
 const READONLY_WORKFLOW_ID: &str = "enterprise-engineering-readonly-v1";
 const LOCALWRITE_WORKFLOW_ID: &str = "enterprise-engineering-localwrite-v1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const COMPATIBILITY_HANDSHAKE_VERSION: u16 = 1;
+const SERVICE_API_VERSION: u16 = 1;
+const SERVICE_EVENT_VERSION: u16 = 2;
+const COMPATIBILITY_DOMAIN: &[u8] = b"enterprise-local-agent/service-compatibility/v1\0";
+const REQUIRED_COMPATIBILITY_CONTRACTS: [(&str, u16); 2] =
+    [("durable-waiting", 1), ("owner-authorized-history", 1)];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +49,39 @@ pub enum ReadinessStatusV1 {
 pub struct HealthV1 {
     version: u16,
     lifecycle: ServiceLifecycleV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityContractV1 {
+    name: String,
+    version: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityHandshakeV1 {
+    handshake_version: u16,
+    service_api_version: u16,
+    supported_service_event_versions: Vec<u16>,
+    required_contracts: Vec<CompatibilityContractV1>,
+    compatibility_contract_fingerprint: String,
+    service_generation: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibilityStateV1 {
+    Compatible,
+    LegacyUnsupported,
+    Incompatible,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopCompatibilityV1 {
+    state: CompatibilityStateV1,
+    service_generation: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -464,6 +504,31 @@ impl BoundedResponse for HealthV1 {
         (self.version == 1)
             .then_some(())
             .ok_or(LocalServiceError::InvalidResponse)
+    }
+}
+
+impl BoundedResponse for CompatibilityHandshakeV1 {
+    fn validate(&self) -> Result<(), LocalServiceError> {
+        if self.supported_service_event_versions.is_empty()
+            || self.supported_service_event_versions.len() > 8
+            || self.required_contracts.len() > 16
+            || !valid_uuid(&self.service_generation)
+            || self.compatibility_contract_fingerprint.len() != 64
+            || !self
+                .compatibility_contract_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || self.required_contracts.iter().any(|contract| {
+                contract.name.is_empty()
+                    || contract.name.len() > 64
+                    || !contract.name.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+            })
+        {
+            return Err(LocalServiceError::InvalidResponse);
+        }
+        Ok(())
     }
 }
 
@@ -890,6 +955,44 @@ impl LocalServiceClient {
 
     pub async fn health(&self) -> Result<HealthV1, LocalServiceError> {
         self.get("healthz").await
+    }
+
+    pub async fn compatibility(&self) -> Result<DesktopCompatibilityV1, LocalServiceError> {
+        match self
+            .get::<CompatibilityHandshakeV1>("v1/compatibility")
+            .await
+        {
+            Ok(handshake) if compatible_handshake(&handshake) => Ok(DesktopCompatibilityV1 {
+                state: CompatibilityStateV1::Compatible,
+                service_generation: Some(handshake.service_generation),
+            }),
+            Ok(_) => Ok(DesktopCompatibilityV1 {
+                state: CompatibilityStateV1::Incompatible,
+                service_generation: None,
+            }),
+            Err(LocalServiceError::NotFound) => Ok(DesktopCompatibilityV1 {
+                state: CompatibilityStateV1::LegacyUnsupported,
+                service_generation: None,
+            }),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn require_compatible(&self) -> Result<(), LocalServiceError> {
+        match self.compatibility().await? {
+            DesktopCompatibilityV1 {
+                state: CompatibilityStateV1::Compatible,
+                ..
+            } => Ok(()),
+            DesktopCompatibilityV1 {
+                state: CompatibilityStateV1::LegacyUnsupported,
+                ..
+            } => Err(LocalServiceError::LegacyUnsupported),
+            DesktopCompatibilityV1 {
+                state: CompatibilityStateV1::Incompatible,
+                ..
+            } => Err(LocalServiceError::IncompatibleService),
+        }
     }
 
     pub async fn readiness(&self) -> Result<DesktopReadinessSnapshotV1, LocalServiceError> {
@@ -1328,6 +1431,37 @@ fn validate_event_page(
     Ok(())
 }
 
+fn compatible_handshake(handshake: &CompatibilityHandshakeV1) -> bool {
+    handshake.handshake_version == COMPATIBILITY_HANDSHAKE_VERSION
+        && handshake.service_api_version == SERVICE_API_VERSION
+        && handshake.supported_service_event_versions == [SERVICE_EVENT_VERSION]
+        && handshake.required_contracts.len() == REQUIRED_COMPATIBILITY_CONTRACTS.len()
+        && handshake
+            .required_contracts
+            .iter()
+            .zip(REQUIRED_COMPATIBILITY_CONTRACTS)
+            .all(|(actual, (name, version))| actual.name == name && actual.version == version)
+        && handshake.compatibility_contract_fingerprint == compatibility_contract_fingerprint()
+}
+
+fn compatibility_contract_fingerprint() -> String {
+    let mut digest = Sha256::new();
+    digest.update(COMPATIBILITY_DOMAIN);
+    digest.update(format!("api={SERVICE_API_VERSION}\0"));
+    digest.update(format!("event={SERVICE_EVENT_VERSION}\0"));
+    for (name, version) in REQUIRED_COMPATIBILITY_CONTRACTS {
+        digest.update(format!("{name}={version}\0"));
+    }
+    digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(output, "{byte:02x}");
+            output
+        })
+}
+
 fn error_for_status(status: StatusCode) -> LocalServiceError {
     match status {
         StatusCode::BAD_REQUEST => LocalServiceError::InvalidRequest,
@@ -1362,6 +1496,10 @@ pub enum LocalServiceError {
     Capacity,
     #[error("local service is draining")]
     Draining,
+    #[error("local service requires a desktop upgrade")]
+    LegacyUnsupported,
+    #[error("local service is incompatible with this desktop")]
+    IncompatibleService,
 }
 
 impl LocalServiceError {
@@ -1377,6 +1515,8 @@ impl LocalServiceError {
             Self::Conflict => "state_conflict",
             Self::Capacity => "capacity_exhausted",
             Self::Draining => "service_draining",
+            Self::LegacyUnsupported => "service_upgrade_required",
+            Self::IncompatibleService => "service_incompatible",
         }
     }
 }
@@ -1390,6 +1530,60 @@ mod tests {
     use super::*;
 
     const HEALTH: &str = r#"{"version":1,"lifecycle":"serving"}"#;
+
+    fn current_handshake() -> CompatibilityHandshakeV1 {
+        CompatibilityHandshakeV1 {
+            handshake_version: COMPATIBILITY_HANDSHAKE_VERSION,
+            service_api_version: SERVICE_API_VERSION,
+            supported_service_event_versions: vec![SERVICE_EVENT_VERSION],
+            required_contracts: REQUIRED_COMPATIBILITY_CONTRACTS
+                .iter()
+                .map(|(name, version)| CompatibilityContractV1 {
+                    name: (*name).to_owned(),
+                    version: *version,
+                })
+                .collect(),
+            compatibility_contract_fingerprint: compatibility_contract_fingerprint(),
+            service_generation: "11111111-1111-4111-8111-111111111111".to_owned(),
+        }
+    }
+
+    #[test]
+    fn strict_compatibility_contract_rejects_every_mismatch() {
+        let current = current_handshake();
+        assert!(compatible_handshake(&current));
+
+        let mut mismatches = Vec::new();
+        let mut handshake = current.clone();
+        handshake.handshake_version += 1;
+        mismatches.push(handshake);
+        let mut handshake = current.clone();
+        handshake.service_api_version += 1;
+        mismatches.push(handshake);
+        let mut handshake = current.clone();
+        handshake.supported_service_event_versions = vec![1];
+        mismatches.push(handshake);
+        let mut handshake = current.clone();
+        handshake.required_contracts[0].version += 1;
+        mismatches.push(handshake);
+        let mut handshake = current;
+        handshake.compatibility_contract_fingerprint = "0".repeat(64);
+        mismatches.push(handshake);
+
+        assert!(mismatches.iter().all(|value| !compatible_handshake(value)));
+    }
+
+    #[test]
+    fn compatibility_response_is_bounded_and_rejects_unknown_fields() {
+        let handshake = current_handshake();
+        assert!(handshake.validate().is_ok());
+        assert!(
+            serde_json::from_str::<CompatibilityHandshakeV1>(
+                r#"{"handshake_version":1,"service_api_version":1,"supported_service_event_versions":[2],"required_contracts":[{"name":"durable-waiting","version":1},{"name":"owner-authorized-history","version":1}],"compatibility_contract_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","service_generation":"11111111-1111-4111-8111-111111111111","prompt":"secret"}"#,
+            )
+            .is_err()
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1462,6 +1656,53 @@ mod tests {
         assert!(request.contains(&format!("authorization: Bearer {secret}")));
         assert!(request.contains("origin: tauri://localhost"));
         assert!(!format!("{client:?}").contains(&secret));
+    }
+
+    #[tokio::test]
+    async fn missing_handshake_is_classified_as_legacy_unsupported() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("bind test listener: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("read listener address: {error}"));
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .unwrap_or_else(|error| panic!("accept request: {error}"));
+            let mut request = vec![0_u8; 2_048];
+            let read = socket
+                .read(&mut request)
+                .await
+                .unwrap_or_else(|error| panic!("read request: {error}"));
+            assert!(
+                String::from_utf8_lossy(&request[..read])
+                    .contains("GET /v1/compatibility HTTP/1.1")
+            );
+            socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                )
+                .await
+                .unwrap_or_else(|error| panic!("write response: {error}"));
+        });
+        let client = LocalServiceClient::loopback(
+            &format!("http://{address}/"),
+            "a".repeat(32),
+            "tauri://localhost",
+        )
+        .unwrap_or_else(|error| panic!("create client: {error}"));
+
+        let compatibility = client
+            .compatibility()
+            .await
+            .unwrap_or_else(|error| panic!("read compatibility: {error}"));
+        assert_eq!(compatibility.state, CompatibilityStateV1::LegacyUnsupported);
+        assert_eq!(compatibility.service_generation, None);
+        server
+            .await
+            .unwrap_or_else(|error| panic!("join server: {error}"));
     }
 
     #[cfg(unix)]

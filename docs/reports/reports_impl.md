@@ -2409,3 +2409,184 @@
 
   The remaining limitations are unchanged: macOS packaging/signing requires an Apple Silicon environment, and the current Linux manifest is marked source_dirty: true because the changes are uncommitted. No
   commit was made.
+
+# M17 Implementation
+
+• 1. Changed Tree
+
+- Service handshake: agent-service (crates/agent-service/src/lib.rs), agent-service-http (crates/agent-service-http/src/lib.rs)
+- Desktop bridge and ACL: apps/agent-desktop/src-tauri/src/service_client.rs, apps/agent-desktop/src-tauri/src/lib.rs, capability schemas
+- Desktop lifecycle/security UX: App, queries, contracts, Markdown rendering, status components
+- Hardening tests: crates/agent-mcp-adapters/tests/stdio.rs, desktop tests, service soak tests
+- Release gates: .github/workflows/desktop-packaging.yml, release validation script
+- Supply-chain fix: rustls 0.23.43 → 0.23.45
+
+  1. Compatibility
+
+- Added strict CompatibilityHandshakeV1.
+- Fingerprint covers API v1, ServiceEvent v2, durable-waiting v1, and owner-authorized-history v1.
+- Build identity and service generation do not affect the fingerprint.
+- Missing handshake maps to LegacyUnsupported; only health/version/compatibility remain available.
+- Every runtime Tauri command performs Rust-side compatibility validation.
+
+  1. Lifecycle / Sleep-Wake
+
+- Wake/focus/online recovery refreshes compatibility, generation, health, readiness, durable history, run status, and event cursor.
+- A changed service generation clears volatile desktop run assumptions and reloads durable service state.
+- Polling is adaptive: 400 ms active, 2 seconds Waiting, 3 seconds background, stopped after terminal state.
+- Stale cursors reset to authoritative catch-up without dispatching effects.
+- Covered unavailable/restarting service, durable Waiting, cancellation, failures, reconciliation, and result loss.
+- Physical machine sleep/wake remains untested on native hardware.
+
+  1. Security
+
+- CSP remains local-only with no remote WebView, generic HTTP, filesystem, shell, opener, or updater authority.
+- Hostile JavaScript/file/data links remain inert; images are omitted; raw HTML is escaped.
+- Strict bounded handshake and service response decoding rejects unknown fields.
+- npm audit --omit=dev: zero vulnerabilities.
+- RustSec: zero known vulnerabilities after upgrading rustls; seven transitive maintenance/unsoundness warnings remain documented.
+- Dependency license inventories contained no missing license metadata.
+
+  1. Multi-Instance
+
+- Multiple desktop observers remain supported.
+- Run idempotency, single active run/session, approval CAS, and resume ownership remain service-authoritative.
+- Closing a desktop does not cancel a run.
+- Conflicts trigger authoritative refresh rather than optimistic mutation.
+
+  1. Performance Results
+
+- Production build: main JS 563.67 kB, 173.36 kB gzip; Markdown remains independently lazy-loaded.
+- Build time: approximately 0.7 seconds with warm dependencies.
+- 100-session desktop summary render: 253 ms under jsdom.
+- 256-session service-side bounded history exercise: 1.945 seconds in debug mode.
+- Native container sample: approximately 151 MiB process RSS, stable 20 FDs across seven samples.
+- Repeatable cold-start, PSS, idle CPU, and wakeup baselines are not yet established.
+
+  1. History Stress
+
+- Exercised 0, 1, 100, and configured maximum 256 sessions.
+- Pagination remains bounded to 64 records and four pages.
+- The desktop loads run details only for the selected session and does not preload events/results.
+- Current measurements do not justify virtualization.
+
+• No. The interruption occurred during the containerized Tauri test build and did not corrupt or lose implementation work.
+
+  After resuming, the interrupted command completed successfully, and the final state was revalidated with:
+
+- strict workspace Clippy
+- 333 workspace tests plus four compile-fail doctests
+- 42 frontend tests, typecheck, ESLint, and production build
+- 14 desktop Rust tests
+- rebuilt and verified Linux .deb
+- M6.1 certification
+- M11 cleanup tests on host, container, and container with --init
+- git diff --check and Rust formatting
+
+  Remaining limitations are environmental, not interruption-related: native macOS validation, physical sleep/wake testing, and a clean-source release manifest after a future commit.
+
+• The M11 runtime was not defective. Investigation confirmed:
+
+- No live owned descendant survives terminate_and_reap.
+- The failure came from test classification: zombie processes under container PID 1 were mistaken for live processes.
+- A /proc disappearance race in the test was also corrected.
+- The test now distinguishes live processes, zombies, PID reuse, and process disappearance using PID/start-time/state evidence.
+- The repeated 8-cycle test passes on host, container without --init, and container with --init.
+
+  So the tracked M11 regression is fixed at the test/evidence layer; MCP runtime cleanup code was intentionally unchanged.
+
+─ Conversation recap
+M11 is resolved: the runtime was not defective; tests had misclassified PID 1–owned zombies as live processes, and a /proc disappearance race was corrected. No further work is currently identified.
+
+# M17 review reporting
+
+• 8. M11 Process Cleanup
+
+- Classification: no live owned descendant survived. No PID reuse was observed; start-time checks would fail on reuse.
+- Host example before cleanup: PID 2175067, PPID/PGID 2175066, session 2174860, state S. Remaining entries transitioned to Z, not live.
+- Container without init: PID 385, PPID/PGID 384, session 1, state S; afterward PPID 1, state Z, same start time.
+- Container with --init: descendants disappeared from /proc after cleanup.
+- Baseline runtime behavior was identical. The old test incorrectly required /proc/<pid> disappearance, causing failures when container PID 1 retained zombies.
+- Runtime code was unchanged. The test now distinguishes live, zombie, disappeared, and reused PID states and handles /proc observation races.
+- Repeated result: 8/8 host, 8/8 container PID1, 8/8 container with --init passed.
+- Required invariant: PASS. terminate_and_reap leaves no live owned descendant.
+
+  1. Soak Results
+
+- Start/cancel: 24 seeded cycles.
+- Reconnect/wake/cursor catch-up: 5 rounds, 10 focused frontend cases.
+- Approval: 5 approve/restart/resume, 5 deny, 5 abort/stale-decision cycles.
+- Restart: 5 completed/idle recovery, 5 unresolved-running recovery classifications, 5 durable-Waiting recoveries.
+- Failure injection: 5 rounds each for model unavailable, knowledge unavailable, and invalid citations.
+- MCP cleanup: 24 environment cycles total.
+- Duplicate dispatches: 0.
+- Unauthorized mutations: 0 across five repeated cross-principal tests.
+- Event-continuity failures: 0.
+- Live surviving owned processes: 0.
+- Packaged close/reopen: 5/5; process disappeared after each close.
+- FD trend: constant at 20 across all five packaged runs.
+- RSS samples: 154344, 159772, 159592, 159220, 160132 KiB. Warm cycles varied by less than 1 MiB.
+- SQLite: all 10 integrity/fault/recovery tests passed after soak; no partial transaction or corruption detected.
+
+  1. Platform Validation
+
+- Linux .deb build and package validation: PASS.
+- X11/Xvfb unavailable-service startup: PASS.
+- Five packaged close/reopen cycles: PASS.
+- Unix-socket defaults and authenticated loopback fallback permission tests: PASS.
+- Native Wayland startup: PENDING, unavailable in the reference environment.
+- Synthetic wake/generation refresh: PASS, five rounds.
+- Physical Linux suspend/wake: PENDING.
+- Artifact SHA-256: fa4b2347abd740c0444144b0b60f98bc392c573988e5392af35a71ff324f3186.
+- macOS Apple Silicon .app/DMG, native service connection, close/reopen, and sleep/wake: PENDING, not tested or claimed.
+
+  1. Release Gates
+
+   Gate                                                               Result
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Frontend typecheck, ESLint, 42 tests, build                        PASS
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   Rust formatting and strict workspace Clippy                        PASS
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   Unfiltered workspace suite: 333 tests + 4 compile-fail doctests    PASS
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   Compatibility handshake and legacy blocking                        PASS
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   Hostile-content, CSP, capability and leakage scans                 PASS
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   Dependency vulnerability scan                                      PASS
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   Dependency license inventory                                       PASS with transitive license inventory recorded
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   Automated lifecycle matrix                                         PASS
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   Physical suspend/wake lifecycle                                    PENDING
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   Bounded offline soak suite                                         PASS
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   Packaged Linux X11 startup                                         PASS
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   M11 live-descendant cleanup                                        PASS
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   M6.1 non-skipping certification                                    PASS
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   Artifact checksum and dirty-source manifest verification           PASS
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   Clean-source release manifest                                      PENDING until committed source exists
+  ─────────────────────────────────────────────────────────────────  ─────────────────────────────────────────────────
+   macOS native validation                                            PENDING
+
+  The four intentionally ignored workspace tests were the separately executed M6.1 certification and three explicit real-environment M13 smoke tests.
+
+  1. Remaining Debt / Blockers
+
+- M17 blocker: none in the implementation or automated Linux safety gates.
+- M18 RC validation: produce a clean-source manifest after commit; validate native Wayland and physical suspend/wake; run Apple Silicon package/service/lifecycle validation; obtain organizational approval for
+    the recorded dependency-license inventory.
+
+- Post-v1 optimization: establish repeatable cold-start, PSS, idle CPU/wakeup budgets; consider further main-chunk splitting or history virtualization only if native measurements justify them.
+
+  1. Final Verdict
+  M17 PASS WITH RC ITEMS
+
+  No commit was created.

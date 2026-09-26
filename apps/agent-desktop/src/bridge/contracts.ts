@@ -109,6 +109,18 @@ export const desktopBuildInfoSchema = z
   })
   .strict();
 
+export const compatibilitySchema = z
+  .object({
+    state: z.enum(["compatible", "legacy_unsupported", "incompatible"]),
+    service_generation: uuid.nullable(),
+  })
+  .strict()
+  .refine(
+    ({ state, service_generation }) =>
+      (state === "compatible" && service_generation !== null) ||
+      (state !== "compatible" && service_generation === null),
+  );
+
 export const sessionSchema = z.object({ session_id: uuid }).strict();
 
 const applicationCitationSchema = z
@@ -264,6 +276,14 @@ export type Health = z.infer<typeof healthSchema>;
 export type Readiness = z.infer<typeof readinessSchema>;
 export type BuildInfo = z.infer<typeof buildInfoSchema>;
 export type DesktopBuildInfo = z.infer<typeof desktopBuildInfoSchema>;
+export type DesktopCompatibility = z.infer<typeof compatibilitySchema>;
+export type ServiceConnectionState =
+  | "ready"
+  | "degraded"
+  | "unavailable"
+  | "draining"
+  | "upgrade_required"
+  | "incompatible";
 export type Session = z.infer<typeof sessionSchema>;
 export type RunView = z.infer<typeof runViewSchema>;
 export type RunHistoryItem = z.infer<typeof runHistoryItemSchema>;

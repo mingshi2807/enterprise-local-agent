@@ -69,7 +69,7 @@ function ThemeButton() {
 export function App() {
   const queryClient = useQueryClient();
   const reduceMotion = useReducedMotion();
-  const { desktopBuildInfo, health, readiness, version } = useServiceState();
+  const { desktopBuildInfo, health, compatibility, readiness, version } = useServiceState();
   const [sidebarOpen, setSidebarOpen] = useState(() => window.matchMedia("(min-width: 821px)").matches);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -78,8 +78,17 @@ export function App() {
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
   const settingsTrigger = useRef<HTMLButtonElement>(null);
   const inspectorTrigger = useRef<HTMLButtonElement>(null);
-  const connected = health.isSuccess && !health.isRefetchError;
-  const conversation = useConversationController(selectedSessionId, setSelectedSessionId, connected);
+  const serviceGeneration = compatibility.data?.state === "compatible"
+    ? compatibility.data.service_generation
+    : null;
+  const compatible = serviceGeneration !== null;
+  const connected = health.isSuccess && !health.isRefetchError && compatible;
+  const conversation = useConversationController(
+    selectedSessionId,
+    setSelectedSessionId,
+    connected,
+    serviceGeneration,
+  );
   const [nowMillis, setNowMillis] = useState(Date.now);
   const selectedActiveRunId = conversation.selected?.activeRun?.runId ?? null;
 
@@ -91,7 +100,17 @@ export function App() {
 
   const draining = health.data?.lifecycle === "draining";
   const readinessStatus = readiness.data?.overall ?? "unavailable";
-  const serviceState = !connected ? "unavailable" : draining ? "draining" : readinessStatus;
+  const serviceState = health.isError
+    ? "unavailable"
+    : compatibility.data?.state === "legacy_unsupported"
+      ? "upgrade_required"
+      : compatibility.data?.state === "incompatible"
+        ? "incompatible"
+        : !connected
+          ? "unavailable"
+          : draining
+            ? "draining"
+            : readinessStatus;
   const readonlyReady = connected && !draining && readiness.data?.workflows.some(
     (workflow) => workflow.workflow === "enterprise-engineering-readonly-v1" && workflow.enabled && workflow.status === "ready",
   ) === true;
@@ -124,6 +143,21 @@ export function App() {
   const refresh = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: serviceQueryKeys.all });
   }, [queryClient]);
+
+  useEffect(() => {
+    const refreshAfterWake = () => {
+      if (document.visibilityState !== "visible") return;
+      void compatibility.refetch().then(() => refresh());
+    };
+    window.addEventListener("focus", refreshAfterWake);
+    window.addEventListener("online", refreshAfterWake);
+    document.addEventListener("visibilitychange", refreshAfterWake);
+    return () => {
+      window.removeEventListener("focus", refreshAfterWake);
+      window.removeEventListener("online", refreshAfterWake);
+      document.removeEventListener("visibilitychange", refreshAfterWake);
+    };
+  }, [compatibility, refresh]);
 
   const commands = useMemo<PaletteCommand[]>(
     () => [
@@ -322,6 +356,8 @@ export function App() {
             {serviceState === "degraded" && "Local service degraded"}
             {serviceState === "unavailable" && "Local service unavailable"}
             {serviceState === "draining" && "Local service draining"}
+            {serviceState === "upgrade_required" && "Service upgrade required"}
+            {serviceState === "incompatible" && "Service version incompatible"}
           </span>
         </div>
         <div className="flex items-center gap-3">

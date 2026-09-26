@@ -64,6 +64,7 @@ function installServiceMock(handler?: (command: string, args?: Record<string, un
     if (custom !== undefined) return Promise.resolve(custom);
     if (command === "desktop_build_info") return Promise.resolve({ application: "enterprise-local-agent-desktop", version: "0.1.0", git_revision: "b396a10028cb8bcc6d9420f12e93ec422351dd61", build_profile: "release", service_api_version: 1, service_event_version: 2 });
     if (command === "service_health") return Promise.resolve({ version: 1, lifecycle: "serving" });
+    if (command === "service_compatibility") return Promise.resolve({ state: "compatible", service_generation: "77777777-7777-4777-8777-777777777777" });
     if (command === "service_readiness") return Promise.resolve(readiness());
     if (command === "service_version") return Promise.resolve({ application: "enterprise-local-agent", version: "0.1.0", config_schema_version: 2, store_schema_version: 2, event_schema_version: 9, checkpoint_schema_version: 4 });
     if (command === "conversation_create_session") return Promise.resolve({ session_id: sessionId });
@@ -144,7 +145,7 @@ describe("App conversation", () => {
         outcome: "completed",
         result: {
           kind: "final_answer",
-          answer: "| State | Meaning |\n| --- | --- |\n| Ready | Safe |\n\n[External reference](https://example.invalid)",
+          answer: "| State | Meaning |\n| --- | --- |\n| Ready | Safe |\n\n[External reference](javascript:alert(1))\n\n![Remote image](file:///etc/passwd)\n\n<img src=x onerror=alert(1)>",
           citations: [],
         },
       });
@@ -154,7 +155,26 @@ describe("App conversation", () => {
     await submit("Render structured answer");
     expect(await screen.findByRole("table")).toBeInTheDocument();
     expect(screen.getByText("External reference")).toBeInTheDocument();
+    expect(screen.getByText("[Image omitted: Remote image]")).toBeInTheDocument();
     expect(document.querySelector("a[href]")).toBeNull();
+    expect(document.querySelector("img")).toBeNull();
+    expect(document.querySelector("script")).toBeNull();
+    expect(screen.getByText("<img src=x onerror=alert(1)>")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["legacy_unsupported", "Service upgrade required"],
+    ["incompatible", "Service upgrade required"],
+  ] as const)("blocks runtime commands for %s compatibility", async (state, message) => {
+    installServiceMock((command) => command === "service_compatibility"
+      ? { state, service_generation: null }
+      : undefined);
+    renderApp();
+
+    expect(await screen.findByRole("heading", { name: message })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Task composer" })).toBeDisabled();
+    expect(invoke.mock.calls.some(([command]) => command === "conversation_list_sessions")).toBe(false);
+    expect(invoke.mock.calls.some(([command]) => command === "conversation_start_readonly_run")).toBe(false);
   });
 
   it("starts only the fixed LocalWrite workflow when explicitly selected", async () => {
@@ -231,7 +251,7 @@ describe("App conversation", () => {
         return [event(1, "graph", "completed", "verify-answer")];
       }
       if (command === "conversation_run_status") {
-        if (reads < 3) return runView();
+        if (reads < 2) return runView();
         return runView({ disposition: "completed", last_sequence: 1, outcome: "completed", result: { kind: "final_answer", answer: "Recovered answer", citations: [] } });
       }
       return undefined;
@@ -305,6 +325,33 @@ describe("App conversation", () => {
       sessionId: secondSessionId,
       afterRunId: null,
     }));
+  });
+
+  it("loads 100 session summaries without eagerly loading run payloads", async () => {
+    const summaries = Array.from({ length: 100 }, (_, index) => ({
+      session_id: `00000000-0000-4000-8000-${index.toString().padStart(12, "0")}`,
+      title: `History ${index.toString().padStart(3, "0")}`,
+      last_activity_unix_millis: index,
+      latest_run: null,
+    }));
+    const started = performance.now();
+    installServiceMock((command, args) => {
+      if (command === "conversation_list_sessions") {
+        return args?.afterSessionId === null
+          ? { items: summaries.slice(0, 64), next_session_id: summaries[63]?.session_id }
+          : { items: summaries.slice(64), next_session_id: null };
+      }
+      if (command === "conversation_list_runs") return { items: [], next_run_id: null };
+      return undefined;
+    });
+
+    renderApp();
+    expect((await screen.findAllByText("History 000")).length).toBeGreaterThanOrEqual(1);
+    expect((await screen.findAllByText("History 099")).length).toBeGreaterThanOrEqual(1);
+    expect(invoke.mock.calls.filter(([command]) => command === "conversation_list_sessions")).toHaveLength(2);
+    expect(invoke.mock.calls.filter(([command]) => command === "conversation_list_runs")).toHaveLength(1);
+    expect(invoke.mock.calls.some(([command]) => command === "conversation_read_events")).toBe(false);
+    console.info(`100-session render elapsed_ms=${Math.round(performance.now() - started)}`);
   });
 
   it("restores a completed run without a volatile answer as Result unavailable", async () => {
@@ -541,6 +588,29 @@ describe("App shell states", () => {
     fireEvent.click(screen.getByRole("option", { name: /Refresh service status/ }));
 
     expect(await screen.findByRole("heading", { name: "Local service unavailable" })).toBeInTheDocument();
+  });
+
+  it("refreshes compatibility and durable state after wake or service generation change", async () => {
+    let generation = "77777777-7777-4777-8777-777777777777";
+    let historyReads = 0;
+    installServiceMock((command) => {
+      if (command === "service_compatibility") {
+        return { state: "compatible", service_generation: generation };
+      }
+      if (command === "conversation_list_sessions") {
+        historyReads += 1;
+        return { items: [], next_session_id: null };
+      }
+      return undefined;
+    });
+    renderApp();
+    await waitFor(() => expect(historyReads).toBeGreaterThanOrEqual(1));
+
+    generation = "88888888-8888-4888-8888-888888888888";
+    fireEvent.focus(window);
+    await waitFor(() => expect(historyReads).toBeGreaterThanOrEqual(2));
+    expect(invoke.mock.calls.filter(([command]) => command === "service_compatibility").length).toBeGreaterThanOrEqual(2);
+    expect(invoke.mock.calls.filter(([command]) => command === "conversation_start_readonly_run")).toHaveLength(0);
   });
 
   it("keeps the task workspace visible in a compact window", async () => {

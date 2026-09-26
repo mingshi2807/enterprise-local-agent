@@ -40,7 +40,71 @@ pub const MAX_APPLICATION_RESULTS: usize = 256;
 pub const MAX_FINAL_ANSWER_BYTES: usize = 8 * 1024;
 pub const MAX_RESULT_CITATIONS: usize = 8;
 pub const MAX_CITATION_FIELD_BYTES: usize = 512;
+pub const SERVICE_API_VERSION: u16 = 1;
 pub const SERVICE_EVENT_VERSION: u16 = 2;
+pub const COMPATIBILITY_HANDSHAKE_VERSION: u16 = 1;
+
+const COMPATIBILITY_DOMAIN: &[u8] = b"enterprise-local-agent/service-compatibility/v1\0";
+const REQUIRED_COMPATIBILITY_CONTRACTS: [(&str, u16); 2] =
+    [("durable-waiting", 1), ("owner-authorized-history", 1)];
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompatibilityContractV1 {
+    pub name: String,
+    pub version: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompatibilityHandshakeV1 {
+    pub handshake_version: u16,
+    pub service_api_version: u16,
+    pub supported_service_event_versions: Vec<u16>,
+    pub required_contracts: Vec<CompatibilityContractV1>,
+    pub compatibility_contract_fingerprint: String,
+    pub service_generation: String,
+}
+
+impl CompatibilityHandshakeV1 {
+    #[must_use]
+    pub fn current(service_generation: Uuid) -> Self {
+        let required_contracts = REQUIRED_COMPATIBILITY_CONTRACTS
+            .iter()
+            .map(|(name, version)| CompatibilityContractV1 {
+                name: (*name).to_owned(),
+                version: *version,
+            })
+            .collect();
+        Self {
+            handshake_version: COMPATIBILITY_HANDSHAKE_VERSION,
+            service_api_version: SERVICE_API_VERSION,
+            supported_service_event_versions: vec![SERVICE_EVENT_VERSION],
+            required_contracts,
+            compatibility_contract_fingerprint: compatibility_contract_fingerprint(),
+            service_generation: service_generation.to_string(),
+        }
+    }
+}
+
+#[must_use]
+pub fn compatibility_contract_fingerprint() -> String {
+    let mut digest = Sha256::new();
+    digest.update(COMPATIBILITY_DOMAIN);
+    digest.update(format!("api={SERVICE_API_VERSION}\0"));
+    digest.update(format!("event={SERVICE_EVENT_VERSION}\0"));
+    for (name, version) in REQUIRED_COMPATIBILITY_CONTRACTS {
+        digest.update(format!("{name}={version}\0"));
+    }
+    digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(output, "{byte:02x}");
+            output
+        })
+}
 
 pub trait ServiceObserver: Send + Sync {
     fn run_started(&self) {}
@@ -1858,7 +1922,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use agent_core::{ModelResponse, RunBudget};
@@ -1873,6 +1937,42 @@ mod tests {
     use agent_persistence_sqlite::SqliteRunPersistence;
 
     use super::*;
+
+    #[test]
+    fn compatibility_fingerprint_excludes_generation_and_build_identity() {
+        let first = CompatibilityHandshakeV1::current(Uuid::new_v4());
+        let second = CompatibilityHandshakeV1::current(Uuid::new_v4());
+
+        assert_ne!(first.service_generation, second.service_generation);
+        assert_eq!(
+            first.compatibility_contract_fingerprint,
+            second.compatibility_contract_fingerprint
+        );
+        assert_eq!(first.handshake_version, COMPATIBILITY_HANDSHAKE_VERSION);
+        assert_eq!(first.service_api_version, SERVICE_API_VERSION);
+        assert_eq!(
+            first.supported_service_event_versions,
+            [SERVICE_EVENT_VERSION]
+        );
+        assert_eq!(
+            first.required_contracts,
+            [
+                CompatibilityContractV1 {
+                    name: "durable-waiting".to_owned(),
+                    version: 1,
+                },
+                CompatibilityContractV1 {
+                    name: "owner-authorized-history".to_owned(),
+                    version: 1,
+                },
+            ]
+        );
+
+        let encoded = serde_json::to_string(&first).expect("serialize handshake");
+        for forbidden in ["git", "build", "prompt", "credential", "capsule"] {
+            assert!(!encoded.contains(forbidden), "handshake leaked {forbidden}");
+        }
+    }
 
     fn test_principal() -> VerifiedPrincipal {
         principal("test-user", &[PrincipalRole::User, PrincipalRole::Approver])
@@ -2331,6 +2431,83 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn history_stress_is_bounded_at_zero_one_hundred_and_configured_max() {
+        let (_directory, service, _) = fixture(Duration::from_millis(1)).await;
+        let owner = test_principal();
+        assert!(
+            service
+                .conversation_page(&owner, None, MAX_READ_PAGE_ITEMS)
+                .await
+                .expect("empty history")
+                .items
+                .is_empty()
+        );
+
+        let started = Instant::now();
+        for count in 1..=MAX_SESSIONS {
+            service.create_session(&owner).await.expect("session");
+            if count == 1 || count == 100 || count == MAX_SESSIONS {
+                let mut cursor = None;
+                let mut observed = 0;
+                loop {
+                    let page = service
+                        .conversation_page(&owner, cursor, MAX_READ_PAGE_ITEMS)
+                        .await
+                        .expect("bounded history page");
+                    assert!(page.items.len() <= usize::from(MAX_READ_PAGE_ITEMS));
+                    observed += page.items.len();
+                    cursor = page.next_session_id.map(SessionPageCursor::new);
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                assert_eq!(observed, count);
+            }
+        }
+        assert!(matches!(
+            service.create_session(&owner).await,
+            Err(ServiceError::Capacity)
+        ));
+        eprintln!(
+            "history stress: sessions={MAX_SESSIONS} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+    }
+
+    #[tokio::test]
+    async fn seeded_start_cancel_soak_has_no_duplicate_dispatch() {
+        const CYCLES: usize = 24;
+        let (_directory, service, invocations) = fixture(Duration::from_millis(100)).await;
+        let owner = test_principal();
+        let workflow = WorkflowId::new("test").expect("workflow");
+
+        for cycle in 0..CYCLES {
+            let session = service.create_session(&owner).await.expect("session");
+            let run = service
+                .start_run(
+                    &owner,
+                    session,
+                    Uuid::from_u128((cycle + 1) as u128),
+                    &workflow,
+                    RunInput::new(format!("cycle-{cycle}").into_bytes()).expect("input"),
+                )
+                .await
+                .expect("start");
+            service
+                .cancel_active_run(&owner, RunKey::new(run.run_id, session))
+                .await
+                .expect("cancel");
+        }
+
+        let report = service
+            .drain(Duration::from_secs(2))
+            .await
+            .expect("bounded drain");
+        assert_eq!(report.remaining_active_runs, 0);
+        assert_eq!(invocations.load(Ordering::SeqCst), CYCLES);
     }
 
     #[tokio::test]

@@ -1,0 +1,11 @@
+# Automatically generated from the `service_compatibility` Tauri command.
+
+[[permission]]
+identifier = "allow-service-compatibility"
+description = "Enables the service_compatibility command without any pre-configured scope."
+commands.allow = ["service_compatibility"]
+
+[[permission]]
+identifier = "deny-service-compatibility"
+description = "Denies the service_compatibility command without any pre-configured scope."
+commands.deny = ["service_compatibility"]

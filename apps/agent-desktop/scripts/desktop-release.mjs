@@ -13,9 +13,11 @@ export const desktopRoot = path.resolve(scriptDirectory, "..");
 export const repositoryRoot = path.resolve(desktopRoot, "../..");
 
 const TARGETS = new Set(["linux-x86_64", "macos-aarch64"]);
+const COMPATIBILITY_CONTRACT_FINGERPRINT = "9244db3dd8e2b578ac5b7424c9c5f3f9c29262310db183ccd5c92ba3c434c578";
 const REQUIRED_CAPABILITIES = new Set([
   "allow-desktop-build-info",
   "allow-service-health",
+  "allow-service-compatibility",
   "allow-service-readiness",
   "allow-service-version",
   "allow-conversation-create-session",
@@ -55,9 +57,10 @@ function assertRelease(condition, message) {
 export async function validateReleaseConfig(root = repositoryRoot) {
   const desktop = path.join(root, "apps/agent-desktop");
   const tauri = path.join(desktop, "src-tauri");
-  const [cargo, packageJson, packageLock, config, macConfig, linuxConfig, capabilities, viteConfig, entitlements] =
+  const [cargo, cargoLock, packageJson, packageLock, config, macConfig, linuxConfig, capabilities, viteConfig, entitlements] =
     await Promise.all([
       readFile(path.join(root, "Cargo.toml"), "utf8"),
+      readFile(path.join(root, "Cargo.lock"), "utf8"),
       readJson(path.join(desktop, "package.json")),
       readJson(path.join(desktop, "package-lock.json")),
       readJson(path.join(tauri, "tauri.conf.json")),
@@ -88,8 +91,28 @@ export async function validateReleaseConfig(root = repositoryRoot) {
   assertRelease(linuxConfig.bundle?.linux?.deb?.priority === "optional", "Debian priority must be optional");
   assertRelease(sameMembers(capabilities.permissions ?? [], REQUIRED_CAPABILITIES), "desktop capability allowlist drifted");
   assertRelease(!/(?:shell|http|filesystem|fs:|sql|updater)/i.test((capabilities.permissions ?? []).join("\n")), "desktop capabilities contain a prohibited generic permission");
+  const csp = config.app?.security?.csp ?? "";
+  assertRelease(csp.includes("default-src 'self'"), "WebView content must remain local");
+  assertRelease(csp.includes("connect-src 'none'"), "WebView network access must remain disabled");
+  assertRelease(csp.includes("object-src 'none'") && csp.includes("frame-src 'none'"), "active embedded content must remain disabled");
+  assertRelease(!/https?:|file:|javascript:/i.test(csp), "CSP must not authorize remote or active URL schemes");
   assertRelease(/sourcemap:\s*false/.test(viteConfig), "production source maps must be disabled");
   assertRelease(/<dict\s*\/>/.test(entitlements), "macOS entitlements must remain empty for M16.9");
+
+  for (const [name, specifier] of Object.entries({ ...packageJson.dependencies, ...packageJson.devDependencies })) {
+    assertRelease(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(specifier), `npm dependency is not exactly pinned: ${name}`);
+  }
+  for (const [name, locked] of Object.entries(packageLock.packages ?? {})) {
+    if (name === "" || locked.link === true) continue;
+    assertRelease(typeof locked.integrity === "string" && /^sha512-/.test(locked.integrity), `npm lock integrity is missing: ${name}`);
+    assertRelease(
+      typeof locked.resolved === "string" && /^https:\/\/registry\.npmjs\.org\//.test(locked.resolved),
+      `npm lock source is not the reviewed registry: ${name}`,
+    );
+  }
+  for (const source of cargoLock.matchAll(/^source = "([^"]+)"$/gm)) {
+    assertRelease(source[1] === "registry+https://github.com/rust-lang/crates.io-index", `Cargo.lock contains unsupported source: ${source[1]}`);
+  }
 
   for (const icon of config.bundle.icon ?? []) {
     const iconStat = await stat(path.join(tauri, icon));
@@ -206,8 +229,10 @@ export async function createManifest({
     service_deployment: "separate",
     automatic_updates: false,
     compatibility: {
+      handshake_version: 1,
       service_api_version: 1,
       service_event_version: 2,
+      contract_fingerprint: COMPATIBILITY_CONTRACT_FINGERPRINT,
       minimum_macos_version: "12.0",
     },
     artifacts,
@@ -227,7 +252,7 @@ function exactKeys(value, expected, label) {
 export async function verifyManifest({ manifestPath, artifactDirectory, root = repositoryRoot, allowDirty = process.env.ELA_RELEASE_ALLOW_DIRTY === "1" }) {
   const manifest = await readJson(manifestPath);
   exactKeys(manifest, ["manifest_version", "application", "application_version", "bundle_identifier", "target", "git_revision", "build_profile", "build_timestamp_utc", "source_dirty", "service_deployment", "automatic_updates", "compatibility", "artifacts"], "manifest");
-  exactKeys(manifest.compatibility, ["service_api_version", "service_event_version", "minimum_macos_version"], "compatibility");
+  exactKeys(manifest.compatibility, ["handshake_version", "service_api_version", "service_event_version", "contract_fingerprint", "minimum_macos_version"], "compatibility");
   assertRelease(manifest.manifest_version === 1, "unsupported release manifest version");
   assertRelease(manifest.application === "enterprise-local-agent-desktop", "unexpected manifest application");
   assertRelease(TARGETS.has(manifest.target), "unsupported manifest target");
@@ -235,7 +260,9 @@ export async function verifyManifest({ manifestPath, artifactDirectory, root = r
   assertRelease(manifest.service_deployment === "separate", "desktop package must not claim an embedded service");
   assertRelease(manifest.automatic_updates === false, "automatic updates are not approved");
   assertRelease(manifest.source_dirty === false || allowDirty, "dirty-source manifest is not releasable");
+  assertRelease(manifest.compatibility.handshake_version === 1, "unsupported compatibility handshake version");
   assertRelease(manifest.compatibility.service_api_version === 1 && manifest.compatibility.service_event_version === 2, "unsupported service compatibility metadata");
+  assertRelease(manifest.compatibility.contract_fingerprint === COMPATIBILITY_CONTRACT_FINGERPRINT, "unexpected compatibility contract fingerprint");
   assertRelease(manifest.compatibility.minimum_macos_version === "12.0", "unexpected macOS compatibility metadata");
   const releaseConfig = await validateReleaseConfig(root);
   assertRelease(manifest.application_version === releaseConfig.version, "manifest version differs from release configuration");
