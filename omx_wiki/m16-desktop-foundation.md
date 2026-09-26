@@ -278,12 +278,9 @@ service API v1, and `ServiceEventV2` compatibility. Production source maps,
 automatic updater artifacts, sidecars, and bundled runtime components remain
 disabled.
 
-The initial release targets are Apple Silicon macOS `.app` plus DMG and Linux
-x86_64 Debian packaging. macOS declares version 12.0 as its minimum, enables the
-hardened runtime, and uses an empty entitlements file. Normal CI builds unsigned
-artifacts without Apple credentials. Production signing follows explicit
-codesign, notarization, stapling, and verification under release-operator
-credentials stored outside the repository. Linux packaging declares its
+The validated v1 release target is Linux x86_64 Debian packaging. Apple Silicon
+macOS `.app` and DMG configuration remains prepared for post-v1 native
+acceptance; it is not advertised as a v1 platform. Linux packaging declares its
 GTK/WebKit runtime dependencies and was verified for desktop entry, icons,
 install/uninstall behavior, dynamic linkage, unavailable-service startup, and
 absence of credentials, debug assets, sidecars, service binaries, containment
@@ -326,8 +323,8 @@ install/uninstall, unavailable-service packaged startup, release-manifest
 rehashing, and package/capability leakage scans. The Linux package and manifest
 were produced from the uncommitted worktree and are correctly marked dirty,
 therefore they are verification artifacts rather than publishable releases.
-macOS artifact, signing, notarization, and stapling verification remain pending
-an Apple Silicon release environment.
+macOS artifact, signing, notarization, and stapling verification remain post-v1
+work requiring an Apple Silicon release environment.
 
 The M16.5 closure review confirmed the exact `approval_submit_decision` command
 and dedicated ACL. The pre-existing M11

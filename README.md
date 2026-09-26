@@ -515,9 +515,10 @@ Tauri, and the named command and capability boundary is unchanged. M16.8 passed
 36 frontend tests, 9 desktop Rust tests, strict Clippy, and the Tauri release
 build.
 
-M16.9 adds release packaging without embedding runtime authority. Tauri now
-produces an Apple Silicon `.app` and DMG with macOS 12 minimum and hardened
-runtime settings, plus an x86_64 Debian package. The desktop version inherits
+M16.9 adds release packaging without embedding runtime authority. Tauri has
+prepared Apple Silicon `.app` and DMG configuration, while the validated v1
+release scope is Linux x86_64 Debian only. macOS is post-v1 until native
+acceptance is completed. The desktop version inherits
 the workspace Cargo version; npm mirrors are checked, and bounded desktop build
 metadata reports the version, git revision, build profile, and supported service
 API/event contracts. Production source maps and automatic updater artifacts are
@@ -531,7 +532,7 @@ continues to require a separately installed trusted `agent-service-daemon`; it
 does not bundle or launch the service or containment artifacts. See
 [`docs/release/desktop.md`](docs/release/desktop.md) for commands and policy.
 
-The Linux release path produced and verified an installable x86_64 Debian
+The Linux-first v1 release path produced and verified an installable x86_64 Debian
 package, including desktop entry, icons, declared GTK/WebKit runtime closure,
 install/uninstall behavior, unavailable-service startup, and package leakage
 scans. Release configuration tests, frontend checks, desktop Rust tests, strict
@@ -581,9 +582,9 @@ M17 is committed as `7777c1f` and closes as **PASS WITH RC ITEMS**. The Linux
 x86_64 Debian package, X11 startup, full workspace suite, strict Clippy, M11
 cleanup, and non-skipping M6.1 certification pass. Release-candidate validation
 still requires a clean-source manifest, native Wayland and physical
-suspend/wake checks, organizational dependency-license approval, and native
-Apple Silicon package, service-connection, close/reopen, and sleep/wake
-validation. Untested macOS behavior is not claimed.
+suspend/wake checks, and organizational dependency-license approval. Apple
+Silicon package and lifecycle validation is a post-v1 item; untested macOS
+behavior is not claimed.
 
 ## Deterministic demonstration
 

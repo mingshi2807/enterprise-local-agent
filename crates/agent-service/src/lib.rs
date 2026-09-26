@@ -2075,6 +2075,27 @@ mod tests {
         (directory, service, invocations)
     }
 
+    async fn wait_for_disposition(
+        service: &AgentService,
+        key: RunKey,
+        expected: RunDispositionV1,
+    ) -> RunView {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let view = service
+                    .get_run_status(&test_principal(), key)
+                    .await
+                    .expect("status");
+                if view.disposition == expected {
+                    return view;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("run did not reach expected disposition")
+    }
+
     #[tokio::test]
     async fn duplicate_start_is_idempotent_and_distinct_concurrent_start_conflicts() {
         let (_directory, service, invocations) = fixture(Duration::from_millis(100)).await;
@@ -2112,13 +2133,14 @@ mod tests {
                 .await,
             Err(ServiceError::Conflict)
         ));
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        assert_eq!(invocations.load(Ordering::SeqCst), 1);
-        let status = service
-            .get_run_status(&test_principal(), RunKey::new(first.run_id, session))
-            .await
-            .expect("status");
+        let status = wait_for_disposition(
+            &service,
+            RunKey::new(first.run_id, session),
+            RunDispositionV1::Completed,
+        )
+        .await;
         assert_eq!(status.disposition, RunDispositionV1::Completed);
+        assert_eq!(invocations.load(Ordering::SeqCst), 1);
         let retry = service
             .start_run(
                 &test_principal(),

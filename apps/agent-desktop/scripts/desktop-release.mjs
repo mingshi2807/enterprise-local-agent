@@ -12,7 +12,8 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 export const desktopRoot = path.resolve(scriptDirectory, "..");
 export const repositoryRoot = path.resolve(desktopRoot, "../..");
 
-const TARGETS = new Set(["linux-x86_64", "macos-aarch64"]);
+const TARGETS = new Set(["linux-x86_64"]);
+const SUPPORTED_PLATFORMS = ["linux-x86_64"];
 const COMPATIBILITY_CONTRACT_FINGERPRINT = "9244db3dd8e2b578ac5b7424c9c5f3f9c29262310db183ccd5c92ba3c434c578";
 const REQUIRED_CAPABILITIES = new Set([
   "allow-desktop-build-info",
@@ -226,6 +227,7 @@ export async function createManifest({
     build_profile: "release",
     build_timestamp_utc: new Date(Number(sourceDateEpoch) * 1000).toISOString(),
     source_dirty: dirty,
+    supported_platforms: SUPPORTED_PLATFORMS,
     service_deployment: "separate",
     automatic_updates: false,
     compatibility: {
@@ -233,7 +235,6 @@ export async function createManifest({
       service_api_version: 1,
       service_event_version: 2,
       contract_fingerprint: COMPATIBILITY_CONTRACT_FINGERPRINT,
-      minimum_macos_version: "12.0",
     },
     artifacts,
   };
@@ -251,8 +252,8 @@ function exactKeys(value, expected, label) {
 
 export async function verifyManifest({ manifestPath, artifactDirectory, root = repositoryRoot, allowDirty = process.env.ELA_RELEASE_ALLOW_DIRTY === "1" }) {
   const manifest = await readJson(manifestPath);
-  exactKeys(manifest, ["manifest_version", "application", "application_version", "bundle_identifier", "target", "git_revision", "build_profile", "build_timestamp_utc", "source_dirty", "service_deployment", "automatic_updates", "compatibility", "artifacts"], "manifest");
-  exactKeys(manifest.compatibility, ["handshake_version", "service_api_version", "service_event_version", "contract_fingerprint", "minimum_macos_version"], "compatibility");
+  exactKeys(manifest, ["manifest_version", "application", "application_version", "bundle_identifier", "target", "git_revision", "build_profile", "build_timestamp_utc", "source_dirty", "supported_platforms", "service_deployment", "automatic_updates", "compatibility", "artifacts"], "manifest");
+  exactKeys(manifest.compatibility, ["handshake_version", "service_api_version", "service_event_version", "contract_fingerprint"], "compatibility");
   assertRelease(manifest.manifest_version === 1, "unsupported release manifest version");
   assertRelease(manifest.application === "enterprise-local-agent-desktop", "unexpected manifest application");
   assertRelease(TARGETS.has(manifest.target), "unsupported manifest target");
@@ -260,10 +261,13 @@ export async function verifyManifest({ manifestPath, artifactDirectory, root = r
   assertRelease(manifest.service_deployment === "separate", "desktop package must not claim an embedded service");
   assertRelease(manifest.automatic_updates === false, "automatic updates are not approved");
   assertRelease(manifest.source_dirty === false || allowDirty, "dirty-source manifest is not releasable");
+  assertRelease(
+    JSON.stringify(manifest.supported_platforms) === JSON.stringify(SUPPORTED_PLATFORMS),
+    "manifest platform scope is not Linux-first v1",
+  );
   assertRelease(manifest.compatibility.handshake_version === 1, "unsupported compatibility handshake version");
   assertRelease(manifest.compatibility.service_api_version === 1 && manifest.compatibility.service_event_version === 2, "unsupported service compatibility metadata");
   assertRelease(manifest.compatibility.contract_fingerprint === COMPATIBILITY_CONTRACT_FINGERPRINT, "unexpected compatibility contract fingerprint");
-  assertRelease(manifest.compatibility.minimum_macos_version === "12.0", "unexpected macOS compatibility metadata");
   const releaseConfig = await validateReleaseConfig(root);
   assertRelease(manifest.application_version === releaseConfig.version, "manifest version differs from release configuration");
   assertRelease(manifest.bundle_identifier === releaseConfig.identifier, "manifest bundle identifier differs from release configuration");

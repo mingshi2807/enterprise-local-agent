@@ -42,14 +42,13 @@ test("manifest is deterministic and verifies artifact integrity", async () => {
   );
 });
 
-test("directory artifacts use stable sorted tree hashing", async () => {
+test("macOS artifacts are rejected by the Linux-first v1 release scope", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "ela-release-app-"));
   const app = path.join(temporary, "Enterprise Local Agent.app");
   await mkdir(path.join(app, "Contents/MacOS"), { recursive: true });
   await writeFile(path.join(app, "Contents/MacOS/agent-desktop"), "binary");
   await writeFile(path.join(app, "Contents/Info.plist"), "plist");
   const first = path.join(temporary, "app-first.json");
-  const second = path.join(temporary, "app-second.json");
   const options = {
     artifactPaths: [app],
     root: repositoryRoot,
@@ -58,7 +57,5 @@ test("directory artifacts use stable sorted tree hashing", async () => {
     target: "macos-aarch64",
     allowDirty: true,
   };
-  await createManifest({ ...options, output: first });
-  await createManifest({ ...options, output: second });
-  assert.equal(await readFile(first, "utf8"), await readFile(second, "utf8"));
+  await assert.rejects(createManifest({ ...options, output: first }), /unsupported release target/);
 });

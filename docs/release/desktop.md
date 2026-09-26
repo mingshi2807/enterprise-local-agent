@@ -22,6 +22,8 @@ and Origin configuration.
 - Tauri version: inherited from the desktop Cargo package; `tauri.conf.json`
   must not contain a version.
 - Bundle identifier: `com.enterprise-local-agent.desktop`.
+- v1 platform scope: Linux x86_64 only. Apple Silicon macOS packaging remains
+  prepared but is post-v1 until native acceptance is completed.
 - Service compatibility: HTTP API v1 and `ServiceEventV2`.
 - Updates: manual installation only. Tauri updater artifacts and automatic
   update checks remain disabled.
@@ -68,24 +70,24 @@ closure without installing it:
 
 ```bash
 apps/agent-desktop/scripts/verify-linux-deb.sh \
-  "target/release/bundle/deb/Enterprise Local Agent Desktop_0.1.0_amd64.deb"
+  "target/release/bundle/deb/Enterprise Local Agent Desktop_0.1.0-rc.1_amd64.deb"
 ```
 
 Install/uninstall testing must run in a disposable Debian-compatible VM or
 container, never on a release operator's workstation:
 
 ```bash
-dpkg -i "/release/Enterprise Local Agent Desktop_0.1.0_amd64.deb"
+dpkg -i "/release/Enterprise Local Agent Desktop_0.1.0-rc.1_amd64.deb"
 test -x /usr/bin/agent-desktop
 dpkg -r enterprise-local-agent-desktop
 test ! -e /usr/bin/agent-desktop
 ```
 
-## macOS Apple Silicon
+## macOS Apple Silicon (Post-v1)
 
-The initial macOS target is `aarch64-apple-darwin`, with macOS 12.0 as the
-minimum system version. The bundle uses the hardened runtime and an empty
-entitlements file; no sandbox or hardened-runtime exception is granted.
+macOS is not an advertised or manifest-eligible v1 platform. The prepared
+`aarch64-apple-darwin` configuration retains macOS 12.0 as its minimum, the
+hardened runtime, and an empty entitlements file for later native validation.
 
 Unsigned development packaging requires no Apple credentials:
 
@@ -127,15 +129,16 @@ and file or `.app` tree SHA-256 values are deterministic for identical inputs:
 node apps/agent-desktop/scripts/desktop-release.mjs manifest \
   --target linux-x86_64 \
   --output target/release/enterprise-local-agent-desktop-linux-x86_64.json \
-  "target/release/bundle/deb/Enterprise Local Agent Desktop_0.1.0_amd64.deb"
+  "target/release/bundle/deb/Enterprise Local Agent Desktop_0.1.0-rc.1_amd64.deb"
 
 node apps/agent-desktop/scripts/desktop-release.mjs verify \
   --manifest target/release/enterprise-local-agent-desktop-linux-x86_64.json \
   --artifact-dir target/release/bundle/deb
 ```
 
-The manifest records application version, target, bundle identifier, exact git
-revision, release profile, deterministic UTC build timestamp, source cleanliness,
+The manifest records application version, Linux-first supported-platform scope,
+target, bundle identifier, exact git revision, release profile, deterministic
+UTC build timestamp, source cleanliness,
 separate-service assumption, update policy, service compatibility, artifact
 filenames, sizes, and SHA-256 values. It records no username, hostname,
 environment dump, endpoint, credential, path, or signing identity.
