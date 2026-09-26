@@ -2,9 +2,9 @@
 title: "M16 Desktop Foundation, Governed Conversation, Quality, and Packaging"
 tags: ["m16", "desktop", "tauri", "react", "design-system", "app-shell", "conversation", "readonly", "activity", "inspector", "hitl", "localwrite", "approval", "history", "recovery", "settings", "accessibility", "native-review", "packaging", "release-engineering"]
 created: 2026-09-21
-updated: 2026-09-25
+updated: 2026-09-26
 sources: ["apps/agent-desktop/src-tauri/src/service_client.rs", "apps/agent-desktop/src-tauri/src/lib.rs", "apps/agent-desktop/src-tauri/capabilities/main.json", "apps/agent-desktop/src-tauri/tauri.conf.json", "apps/agent-desktop/src-tauri/tauri.linux.conf.json", "apps/agent-desktop/src-tauri/tauri.macos.conf.json", "apps/agent-desktop/src/app/App.tsx", "apps/agent-desktop/src/app/CommandPalette.tsx", "apps/agent-desktop/src/bridge/contracts.ts", "apps/agent-desktop/src/bridge/service.ts", "apps/agent-desktop/src/queries/conversation.ts", "apps/agent-desktop/src/features/runActivity.ts", "apps/agent-desktop/src/components/ApprovalPanel.tsx", "apps/agent-desktop/src/components/ConversationWorkspace.tsx", "apps/agent-desktop/src/components/MarkdownAnswer.tsx", "apps/agent-desktop/src/components/RunInspector.tsx", "apps/agent-desktop/src/components/SessionSidebar.tsx", "apps/agent-desktop/src/components/SettingsView.tsx", "apps/agent-desktop/src/styles/tokens.css", "apps/agent-desktop/scripts/desktop-release.mjs", "docs/release/desktop.md", ".github/workflows/desktop-packaging.yml"]
-links: ["enterprise-local-agent-milestone-index.md", "m15-enterprise-identity-authorization.md", "m12-agent-service-api.md", "m14-deployment-operations-hardening.md"]
+links: ["enterprise-local-agent-milestone-index.md", "m15-enterprise-identity-authorization.md", "m12-agent-service-api.md", "m14-deployment-operations-hardening.md", "m17-production-desktop-hardening.md"]
 category: architecture
 confidence: high
 schemaVersion: 1
@@ -14,10 +14,10 @@ schemaVersion: 1
 
 ## Status
 
-M16.0 architecture was approved. M16.1 through M16.8 are implemented and
-committed. M16.9 release engineering is implemented and verified but remains
-uncommitted. M16.7 is `8584c1d`; the completed M16.8 native quality pass is
-`caf5204`. No M16 milestone tag has been created.
+M16.0 architecture was approved and M16.1 through M16.9 are implemented,
+verified, and committed. M16.7 is `8584c1d`; the completed M16.8 native quality
+pass is `caf5204`, and M16.9 release engineering is `e1b7d4e`. M16 closes at
+`0b35755` with tag `m16-desktop-app`.
 
 ## Boundary
 
@@ -331,11 +331,13 @@ an Apple Silicon release environment.
 
 The M16.5 closure review confirmed the exact `approval_submit_decision` command
 and dedicated ACL. The pre-existing M11
-`termination_reaps_process_group_descendant` regression reproduces in the
-established container and remains outside M16.6; MCP lifecycle code was not
-changed. Native host Clippy lacks the required GTK development libraries, so the
-established Tauri build container supplied those system dependencies for strict
-Clippy, Rust tests, and the final debug build.
+`termination_reaps_process_group_descendant` regression reproduced in the
+established container and remained outside M16. M17 later classified it as a
+zombie-versus-live test defect, strengthened the process evidence, and confirmed
+that runtime cleanup leaves no live owned descendant; MCP lifecycle code was not
+changed. Native host Clippy lacks the required GTK development libraries, so
+the established Tauri build container supplied those system dependencies for
+strict Clippy, Rust tests, and the final debug build.
 
 ## Guarantees and Limits
 

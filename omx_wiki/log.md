@@ -191,3 +191,7 @@
 ## [2026-09-25] update
 - **Pages:** enterprise-local-agent-milestone-index.md, m16-desktop-foundation.md, index.md
 - **Summary:** Added M16.9 desktop packaging, release manifests, signing policy, separate-service assumptions, and Linux verification evidence
+
+## [2026-09-26] update
+- **Pages:** enterprise-local-agent-milestone-index.md, m16-desktop-foundation.md, m17-production-desktop-hardening.md, index.md
+- **Summary:** Added M17 compatibility, lifecycle, security, process-cleanup, soak, Linux package evidence, release gates, and RC validation items

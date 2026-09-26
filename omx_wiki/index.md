@@ -1,6 +1,6 @@
 # Wiki Index
 
-> 19 pages | Last updated: 2026-09-25
+> 20 pages | Last updated: 2026-09-26
 
 ## architecture
 
@@ -13,6 +13,7 @@
 - [M14 Deployment and Operations Hardening](m14-deployment-operations-hardening.md) — # M14 Deployment and Operations Hardening
 - [M15 Enterprise Identity and Authorization](m15-enterprise-identity-authorization.md) — # M15 Enterprise Identity and Authorization
 - [M16 Desktop Foundation, Governed Conversation, Quality, and Packaging](m16-desktop-foundation.md) — # M16 Desktop Foundation, Governed Conversation, Quality, and Packaging
+- [M17 Production Desktop Hardening](m17-production-desktop-hardening.md) — # M17 Production Desktop Hardening
 - [M2 Deterministic Loop](m2-deterministic-loop.md) — # M2 Deterministic Loop
 - [M3 Rig Model Adapter](m3-rig-model-adapter.md) — # M3 Rig Model Adapter
 - [M4 OpenAI Compatible Gateway](m4-openai-compatible-gateway.md) — # M4 OpenAI-Compatible Gateway

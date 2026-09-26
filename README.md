@@ -535,10 +535,55 @@ The Linux release path produced and verified an installable x86_64 Debian
 package, including desktop entry, icons, declared GTK/WebKit runtime closure,
 install/uninstall behavior, unavailable-service startup, and package leakage
 scans. Release configuration tests, frontend checks, desktop Rust tests, strict
-workspace Clippy, and the workspace suite excluding the separately tracked M11
-process-reaping regression passed. macOS artifact production, Developer ID
-signing, notarization, and stapling still require an Apple Silicon release
-environment. Initial releases remain manual; automatic updates are disabled.
+workspace Clippy, and the workspace suite passed. macOS artifact production,
+Developer ID signing, notarization, and stapling still require an Apple Silicon
+release environment. Initial releases remain manual; automatic updates are
+disabled.
+
+## M17 production desktop hardening
+
+M17 hardens the packaged desktop and local-service boundary without adding
+agent capability or moving authority out of `ExecutionHarness`. The service now
+publishes a strict `CompatibilityHandshakeV1` containing only protocol and
+contract versions, a deterministic security-contract fingerprint, and an
+opaque service generation. The desktop validates that handshake in Rust before
+every runtime command. A pre-M17 service without the endpoint is
+`LegacyUnsupported`: health and version diagnostics remain available, while
+runtime reads and mutations are blocked with a sanitized upgrade-required
+state.
+
+Wake, reconnect, and service-generation changes trigger authoritative health,
+readiness, durable history, run-status, and cursor refresh. A generation change
+discards only volatile desktop assumptions and reloads durable service state;
+it never dispatches or replays an effect. Event polling is bounded and adaptive:
+active runs remain responsive, Waiting and background views poll more slowly,
+and terminal runs stop polling. Existing M7/M10 recovery and one-active-run,
+idempotent-start, approval-CAS, and resume ownership rules remain authoritative
+for multiple desktop observers.
+
+The WebView retains its local-only CSP and named-command ACL. Hostile Markdown
+tests keep JavaScript, data, and file links inert, omit model-supplied images,
+escape raw HTML, and bound large tables and code. Dependency checks upgraded
+`rustls` to `0.23.45`; npm and RustSec scans report no known vulnerabilities.
+M17 also resolves the tracked M11 cleanup regression as a test-classification
+defect: container PID 1 may retain an exited zombie, but repeated host,
+container, and `--init` evidence confirms that `terminate_and_reap` leaves no
+live owned descendant. Runtime MCP cleanup code did not require a change.
+
+Bounded offline soak covered 24 start/cancel cycles, five reconnect rounds,
+repeated Approve/Deny/abort/stale-decision and restart scenarios, model and
+knowledge failures, SQLite fault recovery, and 24 MCP cleanup environment
+cycles. It observed zero duplicate dispatches, unauthorized mutations, event
+continuity failures, or live surviving descendants. Five packaged Linux
+close/reopen cycles held 20 file descriptors and stable warm-run memory.
+
+M17 is committed as `7777c1f` and closes as **PASS WITH RC ITEMS**. The Linux
+x86_64 Debian package, X11 startup, full workspace suite, strict Clippy, M11
+cleanup, and non-skipping M6.1 certification pass. Release-candidate validation
+still requires a clean-source manifest, native Wayland and physical
+suspend/wake checks, organizational dependency-license approval, and native
+Apple Silicon package, service-connection, close/reopen, and sleep/wake
+validation. Untested macOS behavior is not claimed.
 
 ## Deterministic demonstration
 
