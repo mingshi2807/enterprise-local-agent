@@ -1529,6 +1529,13 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn approval_conflict_has_stable_stale_error_code() {
+        let error = error_for_status(StatusCode::CONFLICT);
+        assert!(matches!(error, LocalServiceError::Conflict));
+        assert_eq!(error.code(), "state_conflict");
+    }
+
     const HEALTH: &str = r#"{"version":1,"lifecycle":"serving"}"#;
 
     fn current_handshake() -> CompatibilityHandshakeV1 {

@@ -2590,3 +2590,89 @@ M11 is resolved: the runtime was not defective; tests had misclassified PID 1–
   M17 PASS WITH RC ITEMS
 
   No commit was created.
+
+# M18.2 reporting
+
+• 1. RC Identity
+
+- Version: 0.1.0-rc.1
+- Commit: 0c256b52ce6dfadd11e2c44ee02079cdca5026a5
+- Tag: m18.2-linux-rc1
+- Clean RC checkout restored; source_dirty=false
+- No additional source changes during closure
+
+  1. Artifacts
+
+- .deb: fb95bf1e185aaa4d1d27353abc44f43ed763fc7fc3d1e5372ccc2609a639dcac
+- Manifest: f0cff3ce7b0f33d44451ad23e7ef0a1356720bcc50758a2cf3aadbe5421eaf44
+- Compatibility fingerprint: 9244db3dd8e2b578ac5b7424c9c5f3f9c29262310db183ccd5c92ba3c434c578
+
+  1. Qwen Structured Output
+
+- Endpoint: loopback SSH tunnel to MTPLX Qwen 27B
+- Model: mtplx-qwen38-27b-optimized-speed-fp16
+- response_format=json_object: PASS
+- Strict M13 parsing remained unchanged
+
+  1. Real ReadOnly
+
+- Standards MCP retrieval: PASS
+- Strict FinalAnswer: PASS
+- Trusted citation validation: PASS
+- Run: 675713f8-577d-5731-b474-f0b589b2d9b3
+- Duration: 22.391s
+- Long Markdown/table/code scenario: PASS on bounded retry
+- Initial broader long-format attempt failed closed due model-output compliance
+
+  1. Real HITL / LocalWrite
+
+- Production composition readiness: PASS
+- Bubblewrap 0.11.2, static worker, seal key, workspace binding and tool contract verified
+- Deny: PASS, zero tool starts, file absent
+- Approve after service restart: PASS
+- Exactly one observed contained dispatch
+- Output file: mode 0600, 27 bytes, inside disposable workspace only
+- Outside target: absent
+- Stale duplicate decision: rejected without execution, although represented as sanitized HTTP 500 rather than conflict
+- Unmapped OS principal: rejected at Unix-socket boundary
+
+  1. Linux Native
+
+- Real Wayland startup: PASS
+- XWayland startup: PASS
+- Close/reopen: PASS
+- Install/upgrade/remove/reinstall: PASS
+- Service unavailable and reconnect: PASS
+- Multiple desktop observers: PASS
+- 105-session paginated history: PASS
+- RSS: approximately 165 MiB; PSS: approximately 92 MiB
+- Physical suspend/wake: not executed
+
+  1. Platform Scope
+
+- v1 scope is explicitly Linux x86_64 only.
+- macOS is post-v1 and is not advertised as validated.
+
+  1. Release Gates
+
+- Frontend checks/build: PASS
+- Rust formatting, strict Clippy, workspace tests: PASS
+- Persistence tests: PASS
+- Dependency vulnerability scans: PASS
+- M11 cleanup test: PASS
+- Non-skipping M6.1 certification: PASS
+- Package and manifest verification: PASS
+- Fixed-sleep race replacement: PASS
+- Organizational license approval: PENDING
+
+  1. Remaining Blockers
+
+- Organizational approval of the recorded dependency/license inventory.
+- Physical Linux suspend/wake acceptance.
+- Real delegated-approver rejection was not exercised because only one mapped OS principal was available.
+- Real ManualReconciliationRequired desktop display was not induced; deterministic coverage remains green.
+
+  1. Final Verdict
+  M18 FAIL
+
+  The RC implementation and core real-stack flows pass, but mandatory release gates remain incomplete. It should not be promoted until license approval and physical suspend/wake validation are recorded.

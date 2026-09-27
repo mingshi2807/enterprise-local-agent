@@ -880,6 +880,13 @@ impl From<ServiceError> for ApiError {
             ServiceError::Draining => Self::Unavailable,
             ServiceError::WorkflowUnavailable => Self::NotFound,
             ServiceError::LegacyUnowned => Self::Conflict,
+            ServiceError::Harness(agent_harness::HarnessError::DurableApprovalMismatch)
+            | ServiceError::Harness(agent_harness::HarnessError::Persistence(
+                agent_harness::PersistencePortError::Conflict,
+            ))
+            | ServiceError::Persistence(agent_harness::PersistencePortError::Conflict) => {
+                Self::Conflict
+            }
             ServiceError::Configuration
             | ServiceError::SecurityAudit
             | ServiceError::IdentityStore(_)
@@ -931,6 +938,20 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[test]
+    fn stale_approval_errors_map_to_stable_conflict_response() {
+        for error in [
+            ServiceError::Harness(agent_harness::HarnessError::DurableApprovalMismatch),
+            ServiceError::Harness(agent_harness::HarnessError::Persistence(
+                agent_harness::PersistencePortError::Conflict,
+            )),
+            ServiceError::Persistence(agent_harness::PersistencePortError::Conflict),
+        ] {
+            let response = ApiError::from(error).into_response();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+    }
 
     fn test_principal() -> VerifiedPrincipal {
         principal(

@@ -70,14 +70,14 @@ closure without installing it:
 
 ```bash
 apps/agent-desktop/scripts/verify-linux-deb.sh \
-  "target/release/bundle/deb/Enterprise Local Agent Desktop_0.1.0-rc.1_amd64.deb"
+  "target/release/bundle/deb/Enterprise Local Agent Desktop_0.1.0-rc.2_amd64.deb"
 ```
 
 Install/uninstall testing must run in a disposable Debian-compatible VM or
 container, never on a release operator's workstation:
 
 ```bash
-dpkg -i "/release/Enterprise Local Agent Desktop_0.1.0-rc.1_amd64.deb"
+dpkg -i "/release/Enterprise Local Agent Desktop_0.1.0-rc.2_amd64.deb"
 test -x /usr/bin/agent-desktop
 dpkg -r enterprise-local-agent-desktop
 test ! -e /usr/bin/agent-desktop
@@ -129,7 +129,7 @@ and file or `.app` tree SHA-256 values are deterministic for identical inputs:
 node apps/agent-desktop/scripts/desktop-release.mjs manifest \
   --target linux-x86_64 \
   --output target/release/enterprise-local-agent-desktop-linux-x86_64.json \
-  "target/release/bundle/deb/Enterprise Local Agent Desktop_0.1.0-rc.1_amd64.deb"
+  "target/release/bundle/deb/Enterprise Local Agent Desktop_0.1.0-rc.2_amd64.deb"
 
 node apps/agent-desktop/scripts/desktop-release.mjs verify \
   --manifest target/release/enterprise-local-agent-desktop-linux-x86_64.json \
