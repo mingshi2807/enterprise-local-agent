@@ -1,0 +1,74 @@
+schema_version = 2
+
+[listener]
+kind = "unix"
+socket_path = "/run/user/1000/enterprise-local-agent.sock"
+
+[identity]
+policy_version = 1
+approval_separation = "requester_may_approve"
+
+[[identity.principals]]
+principal_id = "local:ming"
+kind = "human"
+roles = ["user", "approver", "operator"]
+unix_uid = 1000
+unix_gid = 1000
+loopback_bearer = false
+
+[storage]
+data_directory = "/tmp/ela-user-quickstart/data"
+database_file = "runs.sqlite3"
+audit_file = "audit.jsonl"
+
+[workflows]
+readonly_enabled = true
+readonly_required = true
+local_write_enabled = true
+local_write_required = false
+
+[model]
+base_url = "http://127.0.0.1:18000/v1"
+model_id = "mtplx-qwen38-27b-optimized-speed-fp16"
+provider_label = "local-qwen-mtplx"
+disable_reasoning = true
+readiness_timeout_ms = 120000
+
+[model.auth]
+kind = "no_auth_loopback"
+
+[knowledge]
+route = "federated"
+ocpp_base_url = "http://127.0.0.1:8000"
+standards_executable = "/home/ming/workspace/Agentic_Workflow_Integration/.venv/bin/python"
+standards_arguments = ["-m", "standards_mcp.server"]
+allow_partial = true
+readiness_query = "What is the ISO 15118-20 AC DER service?"
+
+[[knowledge.standards_environment]]
+name = "PYTHONPATH"
+literal = "/home/ming/workspace/Agentic_Workflow_Integration/services/standards-mcp/src"
+
+[[knowledge.standards_environment]]
+name = "HF_HOME"
+literal = "/home/ming/workspace/Agentic_Workflow_Integration/knowledge/processed/.cache/huggingface"
+
+[local_write]
+workspace = "/tmp/ela-user-quickstart/workspace"
+workspace_binding_id = "95a9fd71-2fa2-4287-a541-323cb0f02480"
+seal_key_id = "quickstart-local-key-v1"
+bwrap_path = "/opt/enterprise-local-agent/bin/bwrap"
+bwrap_sha256 = "52461e70c92497b12ebe637eceb0a651b9cc66251a39f45afb755f84dd815581"
+worker_path = "/opt/enterprise-local-agent/bin/enterprise-local-write-worker"
+worker_sha256 = "d0be2acd1b688e12826752a608442fae1431f9a3f60333204b7e874a481a5b01"
+worker_protocol_version = 1
+tool_contract_sha256 = "e38a90a62fab7fb0ce449a137f5296e4d735d7903b4c8cfed1ff5dd93ce5e999"
+
+[local_write.seal_key]
+file = "/tmp/ela-user-quickstart/action-seal-key"
+
+[limits]
+max_active_runs = 8
+max_connections = 16
+shutdown_grace_seconds = 30
+readiness_cache_seconds = 30
