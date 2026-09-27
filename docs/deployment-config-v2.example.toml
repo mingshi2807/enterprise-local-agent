@@ -28,7 +28,7 @@ local_write_enabled = false
 local_write_required = false
 
 [model]
-base_url = "http://127.0.0.1:18080/v1"
+base_url = "http://127.0.0.1:18000/v1"
 model_id = "trusted-local-model"
 provider_label = "local-openai-compatible"
 disable_reasoning = true

@@ -13,6 +13,7 @@ use zeroize::Zeroize;
 
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_ITEMS: usize = 64;
+const MAX_SERVICE_READ_PAGE_ITEMS: u16 = 256;
 const MAX_TEXT_BYTES: usize = 256;
 const MAX_RUN_INPUT_BYTES: usize = 8 * 1024;
 const MAX_FINAL_ANSWER_BYTES: usize = 8 * 1024;
@@ -560,7 +561,7 @@ impl BoundedResponse for RuntimeStatusV1 {
             || self.max_active_runs == 0
             || self.max_run_input_bytes == 0
             || self.max_read_page_items == 0
-            || self.max_read_page_items as usize > MAX_ITEMS
+            || self.max_read_page_items > MAX_SERVICE_READ_PAGE_ITEMS
             || self.workflow_budgets.len() > 32
             || self.workflow_budgets.iter().any(|budget| {
                 !matches!(
@@ -1809,10 +1810,18 @@ mod tests {
     #[test]
     fn runtime_status_contract_is_bounded_and_rejects_payload_fields() {
         let status = serde_json::from_str::<RuntimeStatusV1>(
-            r#"{"principal":{"principal_id":"desktop-user","kind":"human","roles":["user"]},"max_active_runs":8,"max_run_input_bytes":16384,"max_read_page_items":64,"workflow_budgets":[{"workflow_id":"enterprise-engineering-readonly-v1","max_model_calls":1,"max_tool_calls":0,"max_iterations":0,"max_approval_requests":0,"max_graph_steps":8,"max_elapsed_millis":30000}]}"#,
+            r#"{"principal":{"principal_id":"desktop-user","kind":"human","roles":["user"]},"max_active_runs":8,"max_run_input_bytes":16384,"max_read_page_items":256,"workflow_budgets":[{"workflow_id":"enterprise-engineering-readonly-v1","max_model_calls":1,"max_tool_calls":0,"max_iterations":0,"max_approval_requests":0,"max_graph_steps":8,"max_elapsed_millis":30000}]}"#,
         )
         .unwrap_or_else(|error| panic!("decode runtime status: {error}"));
         assert!(status.validate().is_ok());
+        let excessive = serde_json::from_str::<RuntimeStatusV1>(
+            r#"{"principal":{"principal_id":"desktop-user","kind":"human","roles":["user"]},"max_active_runs":8,"max_run_input_bytes":16384,"max_read_page_items":257,"workflow_budgets":[]}"#,
+        )
+        .unwrap_or_else(|error| panic!("decode excessive runtime status: {error}"));
+        assert!(matches!(
+            excessive.validate(),
+            Err(LocalServiceError::InvalidResponse)
+        ));
         assert!(
             serde_json::from_str::<RuntimeStatusV1>(
                 r#"{"principal":{"principal_id":"desktop-user","kind":"human","roles":["user"],"token":"secret"},"max_active_runs":8,"max_run_input_bytes":16384,"max_read_page_items":64,"workflow_budgets":[]}"#,

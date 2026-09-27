@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "@/app/App";
 import { ThemeProvider } from "@/app/ThemeProvider";
-import { serviceEventSchema } from "@/bridge/contracts";
+import { readinessSchema, serviceEventSchema } from "@/bridge/contracts";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -47,7 +47,7 @@ function readiness(overrides: Record<string, unknown> = {}) {
       principal: { principal_id: "desktop-user", kind: "human", roles: ["user", "approver"] },
       max_active_runs: 8,
       max_run_input_bytes: 16_384,
-      max_read_page_items: 64,
+      max_read_page_items: 256,
       workflow_budgets: [
         { workflow_id: workflow, max_model_calls: 1, max_tool_calls: 0, max_iterations: 0, max_approval_requests: 0, max_graph_steps: 8, max_elapsed_millis: 30_000 },
         { workflow_id: localWriteWorkflow, max_model_calls: 1, max_tool_calls: 1, max_iterations: 0, max_approval_requests: 1, max_graph_steps: 12, max_elapsed_millis: 60_000 },
@@ -88,6 +88,13 @@ async function submit(prompt = "Explain the charging requirement") {
 }
 
 describe("App conversation", () => {
+  it("accepts the service read-page contract bound and rejects larger values", () => {
+    expect(readinessSchema.safeParse(readiness()).success).toBe(true);
+    const excessive = readiness();
+    excessive.runtime.max_read_page_items = 257;
+    expect(readinessSchema.safeParse(excessive).success).toBe(false);
+  });
+
   afterEach(cleanup);
   beforeEach(() => { invoke.mockReset(); window.localStorage.clear(); window.innerWidth = 1280; });
 

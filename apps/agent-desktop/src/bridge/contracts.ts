@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+const MAX_SERVICE_READ_PAGE_ITEMS = 256;
 const readinessStatus = z.enum(["ready", "degraded", "unavailable"]);
 const principalRole = z.enum(["user", "approver", "operator"]);
 const uuid = z.string().uuid();
@@ -55,7 +56,7 @@ export const readinessSchema = z
           .strict(),
         max_active_runs: z.number().int().positive(),
         max_run_input_bytes: z.number().int().positive(),
-        max_read_page_items: z.number().int().positive().max(64),
+        max_read_page_items: z.number().int().positive().max(MAX_SERVICE_READ_PAGE_ITEMS),
         workflow_budgets: z
           .array(
             z
