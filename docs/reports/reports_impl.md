@@ -2676,3 +2676,97 @@ M11 is resolved: the runtime was not defective; tests had misclassified PID 1–
   M18 FAIL
 
   The RC implementation and core real-stack flows pass, but mandatory release gates remain incomplete. It should not be promoted until license approval and physical suspend/wake validation are recorded.
+
+# M18.3 reporting
+
+• All technical gates are complete. To close the mandatory license gate without inventing organizational authority, please provide: approving authority or sanitized reference, approval date, and status for the
+  rc.2 inventory (Cargo.lock 575 packages; npm lock 547 packages; zero missing third-party license declarations).
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• 1. Final RC commit/tag
+      - Version: 0.1.0-rc.2
+      - Commit: 69667f626566ad29bafe6ea26ea6c7d9a6cee89e
+      - Tag: m18.3-linux-rc2
+      - Clean release checkout: PASS
+      - source_dirty=false
+
+  1. Package + manifest hashes
+      - Debian package: db2cb9db4dcd88dadbebbb5400491900d041b11870dee36a2e9afb6c0fd1af04
+      - Release manifest: 2b1ad203e697349109dbfb76609e0144d82002f73cda924da852ffcccf9bb20b
+      - Compatibility fingerprint: 9244db3dd8e2b578ac5b7424c9c5f3f9c29262310db183ccd5c92ba3c434c578
+      - Manifest verification: PASS
+
+  2. License approval
+      - Inventory: 575 Rust packages and 547 npm packages.
+      - Missing third-party license declarations: 0.
+      - Vulnerabilities: 0 npm, 0 RustSec vulnerabilities; eight previously reviewed RustSec warnings.
+      - Organizational authority/reference/date: not provided.
+      - Status: PENDING
+
+  3. Physical suspend/wake
+      - Idle desktop: PASS.
+      - Active ReadOnly run: PASS lifecycle behavior. Contiguous events 1–10, one model dispatch, no duplicate dispatch, strict output failure surfaced accurately.
+      - Durable Waiting: PASS. Same WaitId and row version, sequence remained 18, zero tool starts, target remained absent.
+      - Service generation remained 053ab4c2-2ef6-4b4b-9a5b-5c5959bec185.
+      - Health, readiness, principal authorization, status, and event catch-up remained available after wake.
+      - Kernel journal confirmed three real s2idle suspend/resume cycles.
+
+  4. Stale-approval status mapping
+      - Expected stale/already-decided conflicts now return HTTP 409.
+      - Stable response: {"code":"state_conflict"}.
+      - First Deny: HTTP 204.
+      - Duplicate Deny: HTTP 409.
+      - Zero tool dispatch and no file creation.
+      - CAS, authorization, M10 bindings, and state-machine semantics unchanged.
+
+  5. Optional identity/reconciliation checks
+      - Real two-principal RequesterMustDiffer: not executed because only one OS principal was mapped.
+      - Real ManualReconciliationRequired UI state: not deliberately induced.
+      - Both remain covered by deterministic tests and are non-blocking known limitations.
+
+  6. Release gates
+
+      Gate                                   Status
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━
+      Clean tagged source                    PASS
+     ─────────────────────────────────────  ─────────
+      Frontend typecheck/lint/tests/build    PASS
+     ─────────────────────────────────────  ─────────
+      Rust formatting                        PASS
+     ─────────────────────────────────────  ─────────
+      Strict workspace Clippy                PASS
+     ─────────────────────────────────────  ─────────
+      Unfiltered workspace tests             PASS
+     ─────────────────────────────────────  ─────────
+      Persistence/recovery tests             PASS
+     ─────────────────────────────────────  ─────────
+      M11 live-descendant cleanup            PASS
+     ─────────────────────────────────────  ─────────
+      M6.1 non-skipping certification        PASS
+     ─────────────────────────────────────  ─────────
+      Package verification                   PASS
+     ─────────────────────────────────────  ─────────
+      Upgrade/remove/reinstall/startup       PASS
+     ─────────────────────────────────────  ─────────
+      Manifest/checksums                     PASS
+     ─────────────────────────────────────  ─────────
+      Physical suspend/wake                  PASS
+     ─────────────────────────────────────  ─────────
+      Dependency vulnerability scans         PASS
+     ─────────────────────────────────────  ─────────
+      Organizational license approval        PENDING
+
+  7. Accepted limitations
+      - Linux x86_64 is the v1 platform; macOS remains post-v1.
+      - Real delegated-approver and reconciliation projections were not exercised.
+      - The local model can still fail strict structured-output validation; runtime correctly fails closed.
+
+  8. Remaining blockers
+      - Organizational approval authority/reference and approval date for the existing dependency/license inventory.
+
+  9. Verdict
+
+- M18 FAIL
+
+  All technical release gates pass. Promotion remains blocked solely because mandatory organizational license approval has not been supplied or recorded.
