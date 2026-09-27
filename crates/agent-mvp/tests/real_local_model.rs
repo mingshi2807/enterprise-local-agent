@@ -91,7 +91,7 @@ fn model_config() -> OpenAiCompatibleConfig {
         _ => panic!("ELA_SMOKE_MODEL_AUTH must be bearer or no-auth-loopback"),
     };
     config
-        .with_json_object_output(256)
+        .with_json_object_output(agent_mvp::MVP_STRUCTURED_OUTPUT_MAX_TOKENS)
         .expect("bounded JSON model output")
         .with_reasoning_disabled()
 }

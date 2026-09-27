@@ -667,7 +667,7 @@ fn model_config(model: &ModelConfigV1) -> anyhow::Result<OpenAiCompatibleConfig>
     };
     let config = config
         .with_provider_label(label)
-        .with_json_object_output(256)?;
+        .with_json_object_output(agent_mvp::MVP_STRUCTURED_OUTPUT_MAX_TOKENS)?;
     Ok(if model.disable_reasoning {
         config.with_reasoning_disabled()
     } else {

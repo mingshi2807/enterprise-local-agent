@@ -30,6 +30,7 @@ use thiserror::Error;
 pub const READONLY_WORKFLOW_ID: &str = "enterprise-engineering-readonly-v1";
 pub const LOCALWRITE_WORKFLOW_ID: &str = "enterprise-engineering-localwrite-v1";
 pub const MAX_MVP_MODEL_OUTPUT_BYTES: usize = 16 * 1024;
+pub const MVP_STRUCTURED_OUTPUT_MAX_TOKENS: u64 = 1_024;
 
 const RECOVERY_VERSION: u32 = 1;
 const FINAL_BRANCH: &str = "final-answer";
