@@ -195,3 +195,7 @@
 ## [2026-09-26] update
 - **Pages:** enterprise-local-agent-milestone-index.md, m16-desktop-foundation.md, m17-production-desktop-hardening.md, index.md
 - **Summary:** Added M17 compatibility, lifecycle, security, process-cleanup, soak, Linux package evidence, release gates, and RC validation items
+
+## [2026-09-27] update
+- **Pages:** enterprise-local-agent-milestone-index.md, m17-production-desktop-hardening.md, m18-release-candidate-closure.md, index.md
+- **Summary:** Closed M18 PASS for Linux x86_64 with clean rc.2 identity, real-stack and HITL acceptance, physical suspend/wake, license approval, stable approval conflicts, and durable release evidence

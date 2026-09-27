@@ -2770,3 +2770,34 @@ M11 is resolved: the runtime was not defective; tests had misclassified PID 1–
 - M18 FAIL
 
   All technical release gates pass. Promotion remains blocked solely because mandatory organizational license approval has not been supplied or recorded.
+
+## M18 Administrative Closure
+
+- RC: 0.1.0-rc.2
+- Commit: 69667f626566ad29bafe6ea26ea6c7d9a6cee89e
+- Tag: m18.3-linux-rc2
+- RC checkout: clean, zero porcelain bytes
+- Manifest: verified, source_dirty=false
+
+  Approval corresponds to these exact lockfiles:
+
+- Cargo.lock: 9da1946dc250bc76be269fd2ac04b3697205d250c003a2af317e875f02bd3eab
+  - 575 packages
+  - 0 missing third-party license declarations
+
+- package-lock.json: d6e2364c234cc9403ce6af9b48262e17c8427acd11800df1aeee0ced446a6dfb
+  - 547 dependency packages
+  - 0 missing license declarations
+
+  Artifacts:
+
+- .deb: db2cb9db4dcd88dadbebbb5400491900d041b11870dee36a2e9afb6c0fd1af04
+- Manifest: 2b1ad203e697349109dbfb76609e0144d82002f73cda924da852ffcccf9bb20b
+
+  License approval by Ming SHI, Project Owner / Release Authority, dated 2026-09-27, is accepted for this exact RC inventory.
+
+  The development checkout contains only an untracked .codebase-memory/ cache; it was excluded from the clean tagged release checkout and artifacts.
+
+## Final Verdict
+
+  M18 PASS

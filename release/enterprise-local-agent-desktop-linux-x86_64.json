@@ -1,0 +1,31 @@
+{
+  "manifest_version": 1,
+  "application": "enterprise-local-agent-desktop",
+  "application_version": "0.1.0-rc.2",
+  "bundle_identifier": "com.enterprise-local-agent.desktop",
+  "target": "linux-x86_64",
+  "git_revision": "69667f626566ad29bafe6ea26ea6c7d9a6cee89e",
+  "build_profile": "release",
+  "build_timestamp_utc": "2026-09-27T07:28:50.000Z",
+  "source_dirty": false,
+  "supported_platforms": [
+    "linux-x86_64"
+  ],
+  "service_deployment": "separate",
+  "automatic_updates": false,
+  "compatibility": {
+    "handshake_version": 1,
+    "service_api_version": 1,
+    "service_event_version": 2,
+    "contract_fingerprint": "9244db3dd8e2b578ac5b7424c9c5f3f9c29262310db183ccd5c92ba3c434c578"
+  },
+  "artifacts": [
+    {
+      "filename": "Enterprise Local Agent Desktop_0.1.0-rc.2_amd64.deb",
+      "format": "deb",
+      "kind": "file",
+      "sha256": "db2cb9db4dcd88dadbebbb5400491900d041b11870dee36a2e9afb6c0fd1af04",
+      "size_bytes": 3493310
+    }
+  ]
+}

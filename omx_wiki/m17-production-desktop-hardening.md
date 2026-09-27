@@ -4,7 +4,7 @@ tags: ["enterprise-local-agent", "m17", "desktop", "hardening", "compatibility",
 created: 2026-09-26
 updated: 2026-09-26
 sources: ["README.md", "docs/reports/reports_impl.md", "git history"]
-links: ["enterprise-local-agent-milestone-index.md", "m16-desktop-foundation.md", "m14-deployment-operations-hardening.md", "m11-governed-mcp-integration.md", "m6-1-production-linux-localwrite-containment.md"]
+links: ["enterprise-local-agent-milestone-index.md", "m16-desktop-foundation.md", "m18-release-candidate-closure.md", "m14-deployment-operations-hardening.md", "m11-governed-mcp-integration.md", "m6-1-production-linux-localwrite-containment.md"]
 category: architecture
 confidence: high
 schemaVersion: 1
@@ -121,6 +121,11 @@ Apple Silicon `.app`/DMG production, hardened-runtime validation, native service
 connection, close/reopen, and sleep/wake are pending an Apple environment and
 are not claimed. A dirty-source manifest verified during development, but only
 a clean-source manifest may be published.
+
+M18 subsequently closed the Linux x86_64 RC items: native Wayland, physical
+idle/active/Waiting suspend-wake, clean-source package and manifest, and
+organizational dependency-license approval all passed. See
+[[m18-release-candidate-closure]]. Apple Silicon remains post-v1.
 
 ## Forward Constraints
 

@@ -586,6 +586,39 @@ suspend/wake checks, and organizational dependency-license approval. Apple
 Silicon package and lifecycle validation is a post-v1 item; untested macOS
 behavior is not claimed.
 
+## M18 Linux release candidate closure
+
+M18 closes the Linux x86_64 release candidate at **PASS** without adding agent
+capability or changing runtime authority. The final release source is commit
+`69667f626566ad29bafe6ea26ea6c7d9a6cee89e`, tagged
+`m18.3-linux-rc2`, with version `0.1.0-rc.2`. The release manifest binds that
+exact clean checkout (`source_dirty=false`) to the verified Debian package and
+the unchanged compatibility fingerprint.
+
+Real-stack acceptance used the local Qwen endpoint, the Standards knowledge
+backend, durable SQLite/audit, M15 identity, and the certified M6.1 LocalWrite
+composition. Native Wayland startup, package upgrade/remove/reinstall, service
+reconnect, multiple desktop observers, durable Waiting, stale decision
+handling, and physical Linux `s2idle` wake behavior were exercised. Idle,
+active ReadOnly, and durable-Waiting suspend/wake cases retained authoritative
+service state and contiguous event history without duplicate model or tool
+dispatch. Waiting retained its exact identity and authorization context and
+performed zero writes.
+
+Expected stale or already-decided approval CAS conflicts now map to stable HTTP
+`409 state_conflict`; the correction changes only transport classification and
+does not alter M10 bindings, M15 authorization, CAS, budgets, approval state,
+or containment. The final M6.1 suite passed without skipping against
+Bubblewrap 0.11.2 and the commit-specific static worker.
+
+The reviewed dependency inventory contains 575 Rust packages and 547 npm
+packages, with zero missing third-party license declarations and zero known
+vulnerabilities. Project release authority approved that exact lockfile
+inventory on 2026-09-27. Durable release evidence is stored in
+[`release/`](release/): the Debian package, manifest, exact lockfiles,
+administrative approval, and `SHA256SUMS`. Linux x86_64 is the v1 release scope;
+macOS remains explicitly post-v1.
+
 ## Deterministic demonstration
 
 The default CLI path is network-free. It uses `RigModelAdapter<FakeRigModel>`

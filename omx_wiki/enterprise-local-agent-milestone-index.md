@@ -2,9 +2,9 @@
 title: "Enterprise Local Agent Milestone Index"
 tags: ["enterprise-local-agent", "milestones", "roadmap", "index"]
 created: 2026-08-15T13:34:09.996Z
-updated: 2026-09-26
+updated: 2026-09-27
 sources: ["docs/proposal/proposal.md", "docs/reports/reports_impl.md", "git history"]
-links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m6-1-production-linux-localwrite-containment.md", "m7-durable-event-persistence-and-recovery.md", "m8-enterprise-knowledge-integration.md", "m9-deterministic-graph-engine-poc.md", "m10-durable-graph-pause-resume-hitl.md", "m11-governed-mcp-integration.md", "m12-agent-service-api.md", "m13-local-enterprise-agent-mvp.md", "m14-deployment-operations-hardening.md", "m15-enterprise-identity-authorization.md", "m16-desktop-foundation.md", "m17-production-desktop-hardening.md"]
+links: ["m0-foundation.md", "m1-enterprise-harness.md", "m2-deterministic-loop.md", "m3-rig-model-adapter.md", "m4-openai-compatible-gateway.md", "m5-typed-action-planning.md", "m6-approval-and-containment-boundary.md", "m6-1-production-linux-localwrite-containment.md", "m7-durable-event-persistence-and-recovery.md", "m8-enterprise-knowledge-integration.md", "m9-deterministic-graph-engine-poc.md", "m10-durable-graph-pause-resume-hitl.md", "m11-governed-mcp-integration.md", "m12-agent-service-api.md", "m13-local-enterprise-agent-mvp.md", "m14-deployment-operations-hardening.md", "m15-enterprise-identity-authorization.md", "m16-desktop-foundation.md", "m17-production-desktop-hardening.md", "m18-release-candidate-closure.md"]
 category: reference
 confidence: high
 schemaVersion: 1
@@ -35,6 +35,7 @@ This is the durable navigation page for architectural milestones. Git and the im
 | M15 Enterprise Identity and Authorization | Completed, verified, and Linux containment-certified | `m15-enterprise-identity` | [[m15-enterprise-identity-authorization]] |
 | M16 Desktop Foundation and Governed Conversation | Completed and committed | `m16-desktop-app` | [[m16-desktop-foundation]] |
 | M17 Production Desktop Hardening | Implemented, committed, and closed with RC validation items | Not tagged | [[m17-production-desktop-hardening]] |
+| M18 Release Candidate and Real-User Validation | Completed; Linux x86_64 RC approved and closed PASS | `m18.3-linux-rc2` | [[m18-release-candidate-closure]] |
 
 ## Stable architecture
 
@@ -121,8 +122,12 @@ stress evidence, and explicit platform release gates. The M11 process cleanup
 investigation distinguishes live processes, zombies, disappearance, and PID
 reuse; runtime cleanup remains unchanged and repeated tests prove that no live
 owned descendant survives termination. Linux packaged and M6.1 gates pass;
-native Wayland, physical suspend/wake, clean-source release manifest, and Apple
-Silicon validation remain release-candidate items rather than claimed support.
+M18 closes the Linux x86_64 release candidate at `0.1.0-rc.2`. It verifies the
+clean tagged source, real Qwen and Standards paths, durable LocalWrite HITL,
+native Wayland packaging, physical idle/active/Waiting suspend-wake behavior,
+stable HTTP 409 approval conflicts, dependency-license approval, and durable
+project-local release evidence. Apple Silicon remains post-v1 and is not
+claimed as validated.
 
 Provider and framework types remain outside agent-core, agent-harness, agent-loop,
 and agent-graph. ExecutionHarness remains the authority for lifecycle, budgets,
