@@ -2801,3 +2801,88 @@ M11 is resolved: the runtime was not defective; tests had misclassified PID 1–
 ## Final Verdict
 
   M18 PASS
+
+# M19 reporting
+
+1. **v1.0 Commit/Tag**
+   - Commit: `4984e4dfcea92d7b78dca4ded1357f84c313312c`
+   - Tag: `v1.0.0`
+   - Published atomically to `origin/main`
+   - Release date: 2026-09-28
+   - Platform: Linux x86\_64
+   - Manifest: `source_dirty=false`
+   - Compatibility fingerprint: `bc71818690ec583a7dc36b0d6c9ae21954804b891ea142a4157f28da33a683a3`
+2. **Artifact Hashes**
+   - Debian package: `7c03cf50c668d89a8a382c89c6e815a575d5de9c816289e2dd23fe065de6470a`
+   - Manifest: `79f5899c38407dd69feb7cd0104077f074f0a76f9754025db4ed68378a5c5dc6`
+   - License inventory: `2e195cd70ac0d54249de0d586d495b8f7000f02df6206b558243bc71e08c6699`
+   - Release notes: `0c1554d2c4fc59250302e66551662b6436239a269f2a5c4cca9c59d26cd00acc`
+   - `SHA256SUMS`: `789d1bd75c7f9521a70a2e698f4431ad3fca5b99bd42f4f60a65b3480f40c757`
+3. **Release Manifest**
+   - Manifest (release/v1.0.0/enterprise-local-agent-desktop-linux-x86\_64.json)
+   - Debian package (release/v1.0.0/Enterprise Local Agent Desktop\_1.0.0\_amd64.deb)
+   - Package: `enterprise-local-agent-desktop`
+   - Version: `1.0.0`
+   - Architecture: `amd64`
+   - Service deployment: separate
+4. **Final Gates**
+
+| Gate | Result |
+|---|---|
+| Frontend typecheck, ESLint, 44 tests, build | PASS |
+| Rust formatting and strict Clippy | PASS |
+| Unfiltered all-feature workspace tests | PASS |
+| Persistence/recovery tests | PASS |
+| M11 live-descendant cleanup | PASS |
+| M6.1 non-skipping certification | PASS |
+| Compatibility/capability/security checks | PASS |
+| npm vulnerabilities | PASS, 0 found |
+| Rust vulnerabilities | PASS, 0 found |
+| Eight reviewed RustSec warnings | ACCEPTED |
+| License inventory, 555 Cargo + 547 npm | PASS |
+| Manifest/checksum verification | PASS |
+| Upgrade rc.2 to v1.0.0 | PASS |
+| Native packaged startup | PASS |
+| Remove and reinstall | PASS |
+
+1. **Documentation**
+   - Quickstart (quickstart.md)
+   - Release notes (release/RELEASE-NOTES-v1.0.0.md)
+   - License inventory (release/THIRD-PARTY-LICENSES.json)
+   - README and OMX wiki updated for M19.
+   - Installation, Qwen, Standards MCP, ReadOnly, LocalWrite/HITL, troubleshooting, upgrade/remove, limitations, and security model are covered.
+2. **Release Summary**
+   - Governed model, knowledge, tool, approval, audit, containment, persistence, recovery, MCP, identity, service, deployment, and desktop layers.
+   - Real Qwen and Standards validation carried forward from M18.
+   - Durable restart-safe HITL and contained LocalWrite.
+   - Exactly one contained dispatch observed in the validated approval/restart/resume scenario. No global exactly-once claim.
+3. **Known Limitations**
+   - Linux x86\_64 only; macOS is post-v1.
+   - OCPP remains unavailable while its corpus is empty.
+   - Invalid model structured output fails closed.
+   - Uncertain external effects require manual reconciliation.
+   - Real delegated two-principal and induced reconciliation UI scenarios remain deterministic-test-backed.
+   - Automatic desktop updates remain disabled.
+4. **Production Installation**
+
+```
+sudo apt install \
+  "./release/v1.0.0/Enterprise Local Agent Desktop_1.0.0_amd64.deb"
+```
+
+1. **Final Verdict**
+
+**M19 PASS — v1.0 RELEASED**
+
+The v1.0.0 release artifacts are in:
+
+- Debian package (release/v1.0.0/Enterprise Local Agent Desktop\_1.0.0\_amd64.deb)
+- Release manifest (release/v1.0.0/enterprise-local-agent-desktop-linux-x86\_64.json)
+- SHA-256 checksums (release/v1.0.0/SHA256SUMS)
+- Third-party licenses (release/THIRD-PARTY-LICENSES.json)
+- Release notes (release/RELEASE-NOTES-v1.0.0.md)
+- M19 release record (release/M19-PRODUCTION-RELEASE.md)
+
+All four v1.0.0 checksum entries currently verify successfully.
+
+The files directly under `release/` named `0.1.0-rc.2` are retained M18 RC evidence, not v1.0.0 artifacts.
