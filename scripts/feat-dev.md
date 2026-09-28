@@ -134,3 +134,92 @@ The development loop does not:
 
 Perform packaging, clean installation, native lifecycle testing, and full
 release gates only after the feature batch is stable.
+
+## Note
+
+The installed `.deb` does not affect `dev-loop.sh`.
+
+The script launches:
+
+```
+npm run tauri -- dev
+```
+
+This builds and runs the repository’s debug desktop, not `/usr/bin/agent-desktop`.
+
+To avoid confusion:
+
+- Close the installed desktop before running `dev-loop.sh`.
+- Do not launch `agent-desktop` from the application menu during development.
+- Keep only the Tauri development window open.
+- Both clients may access the same service, but the service prevents duplicate run/resume operations.
+
+The installed package can remain for stable usage. Remove it only if distinguishing stable and development windows becomes confusing:
+
+```
+sudo dpkg -r enterprise-local-agent-desktop
+```
+
+## launcher
+
+```
+Running env ELA_DESKTOP_SERVICE_SOCKET=/run/user/1000/enterprise-local-agent.sock /usr/bin/agent-desktop
+```
+
+The installed desktop stack is active.
+
+- Qwen tunnel: **ready**
+- OCPP knowledge backend: **ready**
+- Standards backend: **ready**
+- `agent-service-daemon`: **running**
+- Operator readiness check: **passed**
+- ReadOnly workflow: **ready**
+- LocalWrite workflow: **ready**
+- Linux containment probe: **passed**
+- Installed `/usr/bin/agent-desktop`: **running**
+- Service socket: `/run/user/1000/enterprise-local-agent.sock`
+
+The deployment configuration was restored at:
+
+```
+~/.config/enterprise-local-agent/deployment.toml
+```
+
+The previous `/tmp` database had been removed, so this activation starts with new disposable run history and a new LocalWrite seal key.
+
+The startup is long because the desktop is only a thin client: the model tunnel, OCPP backend, Standards adapter readiness, daemon, containment probe, and operator check must be available first. I’ll add one Fish-callable executable that starts only missing components, waits for readiness, runs the operator check, and launches the installed desktop; it will also support `status`, `stop`, and `restart`.
+
+Created executable scripts/start-installed.sh.
+
+From Fish, start everything with:
+
+```
+./scripts/start-installed.sh
+```
+
+Available commands:
+
+```
+./scripts/start-installed.sh start
+./scripts/start-installed.sh status
+./scripts/start-installed.sh stop
+./scripts/start-installed.sh restart
+```
+
+It automatically:
+
+1. Reuses or establishes the Qwen SSH tunnel.
+2. Reuses or starts the OCPP backend.
+3. Reuses or starts `agent-service-daemon`.
+4. Waits for readiness.
+5. Runs the operator readiness check.
+6. Launches `/usr/bin/agent-desktop`.
+7. Avoids duplicate desktop processes.
+
+`stop` only terminates processes started by this script. Logs are stored under:
+
+```
+~/.local/state/enterprise-local-agent/logs/
+```
+
+Syntax, status detection, idempotent startup, and full readiness were verified successfully
