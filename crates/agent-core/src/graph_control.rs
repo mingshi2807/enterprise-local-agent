@@ -149,11 +149,13 @@ pub enum GraphProgressEvent {
         action_proposal_id: ActionProposalId,
         tool_call_id: ToolCallId,
         action_digest: ActionDigest,
+        active_elapsed_millis: u64,
     },
     GraphResumed {
         attempt_id: GraphNodeAttemptId,
         node_id: GraphNodeId,
         wait_id: DurableApprovalWaitId,
+        resumed_at_unix_millis: u64,
     },
     GraphCompleted {
         attempt_id: GraphNodeAttemptId,

@@ -7,7 +7,7 @@ use crate::{
     ToolDomainFailureKind, ToolName, WorkspaceBindingId,
 };
 
-pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(9);
+pub const CURRENT_EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion::new(10);
 
 pub const MAX_DURABLE_KNOWLEDGE_BACKENDS: usize = 2;
 pub const MAX_DURABLE_EVIDENCE_REFERENCES: usize = 8;
@@ -422,7 +422,7 @@ mod tests {
         );
 
         assert_eq!(event.schema_version(), CURRENT_EVENT_SCHEMA_VERSION);
-        assert_eq!(event.schema_version().get(), 9);
+        assert_eq!(event.schema_version().get(), 10);
         assert_eq!(event.sequence().get(), 7);
 
         let json = serde_json::to_string(&event).expect("event must serialize");

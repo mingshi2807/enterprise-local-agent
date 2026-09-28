@@ -11,7 +11,7 @@ use agent_identity::DurableRunAuthorization;
 use crate::{DurableApprovalDecisionCommand, DurableApprovalRecord, DurableApprovalStatus};
 
 pub const CURRENT_STORE_SCHEMA_VERSION: u16 = 2;
-pub const CURRENT_CHECKPOINT_SCHEMA_VERSION: u16 = 4;
+pub const CURRENT_CHECKPOINT_SCHEMA_VERSION: u16 = 5;
 
 pub type PersistenceFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 

@@ -46,7 +46,7 @@ pub const COMPATIBILITY_HANDSHAKE_VERSION: u16 = 1;
 
 const COMPATIBILITY_DOMAIN: &[u8] = b"enterprise-local-agent/service-compatibility/v1\0";
 const REQUIRED_COMPATIBILITY_CONTRACTS: [(&str, u16); 2] =
-    [("durable-waiting", 1), ("owner-authorized-history", 2)];
+    [("durable-waiting", 2), ("owner-authorized-history", 2)];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2084,7 +2084,7 @@ mod tests {
             [
                 CompatibilityContractV1 {
                     name: "durable-waiting".to_owned(),
-                    version: 1,
+                    version: 2,
                 },
                 CompatibilityContractV1 {
                     name: "owner-authorized-history".to_owned(),

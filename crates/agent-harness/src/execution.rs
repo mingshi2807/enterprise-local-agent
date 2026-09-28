@@ -143,12 +143,7 @@ impl ExecutionHarness {
             .load_run(key)
             .await
             .map_err(HarnessError::Persistence)?;
-        let now_wall = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| HarnessError::Recovery(crate::RecoveryError::ClockAmbiguous))?
-            .as_millis()
-            .try_into()
-            .map_err(|_| HarnessError::Recovery(crate::RecoveryError::ClockAmbiguous))?;
+        let now_wall = trusted_unix_millis()?;
         crate::recovery::recover_loaded_run(loaded, now_wall, Instant::now())
             .map_err(HarnessError::Recovery)
     }
@@ -823,6 +818,10 @@ impl ExecutionHarness {
         .await?;
 
         let sealed = action_seal.seal_local_write(&seal_binding, &capsule)?;
+        let suspended_at_unix_millis = trusted_unix_millis()?;
+        let active_elapsed_millis = suspended_at_unix_millis
+            .checked_sub(context.started_at_unix_millis()?)
+            .ok_or(HarnessError::Recovery(crate::RecoveryError::ClockAmbiguous))?;
         let event = context.next_event(AgentEventKind::Graph {
             event: GraphProgressEvent::GraphSuspended {
                 attempt_id: durable.attempt_id,
@@ -832,6 +831,7 @@ impl ExecutionHarness {
                 action_proposal_id,
                 tool_call_id,
                 action_digest,
+                active_elapsed_millis,
             },
         })?;
         let transition = self.transition_for_event(context, &event, true);
@@ -1091,6 +1091,7 @@ impl ExecutionHarness {
                     attempt_id,
                     node_id: node_id.clone(),
                     wait_id,
+                    resumed_at_unix_millis: trusted_unix_millis()?,
                 },
             })?;
             if let Err(error) = persistence
@@ -1167,6 +1168,7 @@ impl ExecutionHarness {
                 attempt_id,
                 node_id: node_id.clone(),
                 wait_id,
+                resumed_at_unix_millis: trusted_unix_millis()?,
             },
         })?;
         if let Err(error) = persistence
@@ -2496,6 +2498,7 @@ impl ExecutionHarness {
                     action_proposal_id,
                     tool_call_id,
                     action_digest,
+                    ..
                 }) if *attempt_id == binding.attempt_id()
                     && node_id == binding.node_id()
                     && *wait_id == binding.wait_id()
@@ -2734,6 +2737,15 @@ impl ExecutionHarness {
         }
         Ok(())
     }
+}
+
+fn trusted_unix_millis() -> Result<u64, HarnessError> {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| HarnessError::Recovery(crate::RecoveryError::ClockAmbiguous))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| HarnessError::Recovery(crate::RecoveryError::ClockAmbiguous))
 }
 
 fn audit_stage(phase: AuditPhase) -> ExecutionStage {

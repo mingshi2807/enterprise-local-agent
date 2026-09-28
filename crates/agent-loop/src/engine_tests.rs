@@ -1080,7 +1080,11 @@ async fn loop_and_event_ordering_is_deterministic_and_payload_free() {
             .collect::<Vec<_>>(),
         (0..events.len() as u64).collect::<Vec<_>>()
     );
-    assert!(events.iter().all(|event| event.schema_version().get() == 9));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.schema_version().get() == 10)
+    );
     assert!(matches!(
         events.last().map(agent_core::AgentEvent::kind),
         Some(AgentEventKind::RunFinished {

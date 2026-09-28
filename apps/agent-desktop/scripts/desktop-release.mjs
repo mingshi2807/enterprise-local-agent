@@ -14,7 +14,7 @@ export const repositoryRoot = path.resolve(desktopRoot, "../..");
 
 const TARGETS = new Set(["linux-x86_64"]);
 const SUPPORTED_PLATFORMS = ["linux-x86_64"];
-const COMPATIBILITY_CONTRACT_FINGERPRINT = "00b4a3d48efc9bb12a2d54aa137e3d734977d59271175920d1bec14d1a692490";
+const COMPATIBILITY_CONTRACT_FINGERPRINT = "bc71818690ec583a7dc36b0d6c9ae21954804b891ea142a4157f28da33a683a3";
 const REQUIRED_CAPABILITIES = new Set([
   "allow-desktop-build-info",
   "allow-service-health",

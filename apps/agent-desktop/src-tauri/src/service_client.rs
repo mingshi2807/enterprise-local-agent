@@ -28,7 +28,7 @@ const SERVICE_API_VERSION: u16 = 1;
 const SERVICE_EVENT_VERSION: u16 = 2;
 const COMPATIBILITY_DOMAIN: &[u8] = b"enterprise-local-agent/service-compatibility/v1\0";
 const REQUIRED_COMPATIBILITY_CONTRACTS: [(&str, u16); 2] =
-    [("durable-waiting", 1), ("owner-authorized-history", 2)];
+    [("durable-waiting", 2), ("owner-authorized-history", 2)];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1611,7 +1611,7 @@ mod tests {
         assert!(handshake.validate().is_ok());
         assert!(
             serde_json::from_str::<CompatibilityHandshakeV1>(
-                r#"{"handshake_version":1,"service_api_version":1,"supported_service_event_versions":[2],"required_contracts":[{"name":"durable-waiting","version":1},{"name":"owner-authorized-history","version":2}],"compatibility_contract_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","service_generation":"11111111-1111-4111-8111-111111111111","prompt":"secret"}"#,
+                r#"{"handshake_version":1,"service_api_version":1,"supported_service_event_versions":[2],"required_contracts":[{"name":"durable-waiting","version":2},{"name":"owner-authorized-history","version":2}],"compatibility_contract_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","service_generation":"11111111-1111-4111-8111-111111111111","prompt":"secret"}"#,
             )
             .is_err()
         );
@@ -1812,8 +1812,8 @@ mod tests {
             deployment_fingerprint: "test".to_owned(),
             config_schema_version: 2,
             store_schema_version: 2,
-            event_schema_version: 9,
-            checkpoint_schema_version: 4,
+            event_schema_version: 10,
+            checkpoint_schema_version: 5,
         };
         assert!(response.validate().is_err());
 
@@ -1822,8 +1822,8 @@ mod tests {
             version: "0.1.0".to_owned(),
             config_schema_version: 2,
             store_schema_version: 2,
-            event_schema_version: 9,
-            checkpoint_schema_version: 4,
+            event_schema_version: 10,
+            checkpoint_schema_version: 5,
         };
         let encoded = serde_json::to_string(&desktop)
             .unwrap_or_else(|error| panic!("serialize desktop build info: {error}"));

@@ -124,6 +124,7 @@ pub enum DurableGraphPosition {
         action_proposal_id: ActionProposalId,
         tool_call_id: ToolCallId,
         action_digest: ActionDigest,
+        active_elapsed_millis: u64,
     },
     Finished,
 }
@@ -827,6 +828,7 @@ impl DurableRunState {
                 action_proposal_id,
                 tool_call_id,
                 action_digest,
+                active_elapsed_millis,
             } => {
                 let graph = self.graph.as_mut().ok_or(TransitionError::Graph)?;
                 if graph.position
@@ -838,6 +840,8 @@ impl DurableRunState {
                     })
                     || !self.pending_effects.is_empty()
                     || self.pending_knowledge_retrieval.is_some()
+                    || Duration::from_millis(*active_elapsed_millis)
+                        >= self.context.budget.max_elapsed()
                 {
                     return Err(TransitionError::Graph);
                 }
@@ -849,6 +853,7 @@ impl DurableRunState {
                     action_proposal_id: *action_proposal_id,
                     tool_call_id: *tool_call_id,
                     action_digest: *action_digest,
+                    active_elapsed_millis: *active_elapsed_millis,
                 };
                 graph.restart_anchor = None;
                 self.continuation = ContinuationState::RestartableBoundary;
@@ -857,8 +862,16 @@ impl DurableRunState {
                 attempt_id,
                 node_id,
                 wait_id,
+                resumed_at_unix_millis,
             } => {
                 let graph = self.graph.as_mut().ok_or(TransitionError::Graph)?;
+                let active_elapsed_millis = match &graph.position {
+                    DurableGraphPosition::Waiting {
+                        active_elapsed_millis,
+                        ..
+                    } => *active_elapsed_millis,
+                    _ => return Err(TransitionError::Graph),
+                };
                 let waiting_matches = matches!(
                     &graph.position,
                     DurableGraphPosition::Waiting {
@@ -870,9 +883,13 @@ impl DurableRunState {
                         && current_node == node_id
                         && current_wait == wait_id
                 );
+                let rebased_started_at = resumed_at_unix_millis
+                    .checked_sub(active_elapsed_millis)
+                    .ok_or(TransitionError::Graph)?;
                 if !waiting_matches || !self.pending_effects.is_empty() {
                     return Err(TransitionError::Graph);
                 }
+                self.context.started_at_unix_millis = Some(rebased_started_at);
                 graph.position = DurableGraphPosition::Running {
                     attempt_id: *attempt_id,
                     node_id: node_id.clone(),
@@ -1377,7 +1394,17 @@ pub(crate) fn recover_loaded_run(
             let elapsed_millis = now_unix_millis
                 .checked_sub(started)
                 .ok_or(RecoveryError::ClockAmbiguous)?;
-            let elapsed = Duration::from_millis(elapsed_millis);
+            let waiting_elapsed = match state.graph().map(DurableGraphState::position) {
+                Some(DurableGraphPosition::Waiting {
+                    active_elapsed_millis,
+                    ..
+                }) => Some(*active_elapsed_millis),
+                _ => None,
+            };
+            if waiting_elapsed.is_some_and(|active| elapsed_millis < active) {
+                return Err(RecoveryError::ClockAmbiguous);
+            }
+            let elapsed = Duration::from_millis(waiting_elapsed.unwrap_or(elapsed_millis));
             if elapsed >= state.budget().max_elapsed() {
                 return Ok(RecoveryDisposition::TerminalFailure {
                     state,
@@ -1386,10 +1413,7 @@ pub(crate) fn recover_loaded_run(
                     },
                 });
             }
-            if matches!(
-                state.graph().map(DurableGraphState::position),
-                Some(DurableGraphPosition::Waiting { .. })
-            ) {
+            if waiting_elapsed.is_some() {
                 let context =
                     RunContext::from_recovery(&state, elapsed, now, record.recovery_contract())?;
                 return Ok(RecoveryDisposition::Waiting(Box::new(
@@ -1469,9 +1493,9 @@ mod tests {
     use std::time::Duration;
 
     use agent_core::{
-        ActionProposalId, ApprovalRequestId, GraphTransitionKey, KnowledgeBackendId,
-        KnowledgeEvidenceReference, KnowledgeFailureKind, KnowledgeRouteMetadata, RunBudget, RunId,
-        SessionId, ToolName,
+        ActionDigest, ActionProposalId, ApprovalRequestId, DurableApprovalWaitId,
+        GraphTransitionKey, KnowledgeBackendId, KnowledgeEvidenceReference, KnowledgeFailureKind,
+        KnowledgeRouteMetadata, RunBudget, RunId, SessionId, ToolCallId, ToolName,
     };
 
     use super::*;
@@ -1704,6 +1728,115 @@ mod tests {
             ],
             attempt_id,
         )
+    }
+
+    #[test]
+    fn durable_waiting_excludes_quiescent_time_without_resetting_active_elapsed() {
+        let record = graph_record();
+        let attempt_id = GraphNodeAttemptId::new();
+        let node_id = GraphNodeId::new("action").expect("node");
+        let wait_id = DurableApprovalWaitId::new();
+        let events = vec![
+            started(&record),
+            event(
+                &record,
+                1,
+                AgentEventKind::Graph {
+                    event: GraphProgressEvent::GraphStarted {
+                        definition_digest: [7; 32],
+                        start_node: node_id.clone(),
+                        start_kind: GraphNodeKind::Action,
+                        start_recovery: GraphRecoveryMode::Never,
+                    },
+                },
+            ),
+            event(
+                &record,
+                2,
+                AgentEventKind::Graph {
+                    event: GraphProgressEvent::GraphNodeEntered {
+                        attempt_id,
+                        node_id: node_id.clone(),
+                        node_kind: GraphNodeKind::Action,
+                        recovery: GraphRecoveryMode::Never,
+                        step: 1,
+                        limit: 8,
+                    },
+                },
+            ),
+            event(
+                &record,
+                3,
+                AgentEventKind::Graph {
+                    event: GraphProgressEvent::GraphSuspended {
+                        attempt_id,
+                        node_id: node_id.clone(),
+                        wait_id,
+                        approval_request_id: ApprovalRequestId::new(),
+                        action_proposal_id: ActionProposalId::new(),
+                        tool_call_id: ToolCallId::new(),
+                        action_digest: ActionDigest::from_bytes([5; 32]),
+                        active_elapsed_millis: 500,
+                    },
+                },
+            ),
+        ];
+
+        let disposition = recover_loaded_run(
+            LoadedRun::new(
+                record.clone(),
+                DurableCheckpoint::initial(&record),
+                events.clone(),
+            ),
+            STARTED_AT + 120_000,
+            Instant::now(),
+        )
+        .expect("waiting recovery");
+        assert!(matches!(disposition, RecoveryDisposition::Waiting(_)));
+
+        assert!(matches!(
+            recover_loaded_run(
+                LoadedRun::new(
+                    record.clone(),
+                    DurableCheckpoint::initial(&record),
+                    events.clone(),
+                ),
+                STARTED_AT + 400,
+                Instant::now(),
+            ),
+            Err(RecoveryError::ClockAmbiguous)
+        ));
+
+        let mut resumed_events = events;
+        resumed_events.push(event(
+            &record,
+            4,
+            AgentEventKind::Graph {
+                event: GraphProgressEvent::GraphResumed {
+                    attempt_id,
+                    node_id,
+                    wait_id,
+                    resumed_at_unix_millis: STARTED_AT + 120_000,
+                },
+            },
+        ));
+        let disposition = recover_loaded_run(
+            LoadedRun::new(
+                record.clone(),
+                DurableCheckpoint::initial(&record),
+                resumed_events,
+            ),
+            STARTED_AT + 120_100,
+            Instant::now(),
+        )
+        .expect("resumed recovery");
+        assert!(matches!(
+            disposition,
+            RecoveryDisposition::ManualReconciliationRequired {
+                reason: ManualReconciliationReason::TransientStateUnavailable,
+                ..
+            }
+        ));
     }
 
     #[test]
