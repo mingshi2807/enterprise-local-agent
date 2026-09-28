@@ -285,6 +285,8 @@ export function App() {
             selectedSessionId={selectedSessionId}
             onSelectSession={setSelectedSessionId}
             onNewTask={newTask}
+            onArchive={(sessionId) => void conversation.archiveConversation(sessionId)}
+            archivingSessionId={conversation.archivingSessionId}
           />
         </motion.div>
 

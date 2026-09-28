@@ -46,7 +46,7 @@ pub const COMPATIBILITY_HANDSHAKE_VERSION: u16 = 1;
 
 const COMPATIBILITY_DOMAIN: &[u8] = b"enterprise-local-agent/service-compatibility/v1\0";
 const REQUIRED_COMPATIBILITY_CONTRACTS: [(&str, u16); 2] =
-    [("durable-waiting", 1), ("owner-authorized-history", 1)];
+    [("durable-waiting", 1), ("owner-authorized-history", 2)];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -215,13 +215,25 @@ pub struct RunHistoryPageV1 {
     pub next_run_id: Option<RunId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationSummaryV1 {
     pub session_id: SessionId,
     pub title: String,
     pub last_activity_unix_millis: Option<u64>,
     pub latest_run: Option<RunHistoryItemV1>,
+}
+
+impl fmt::Debug for ConversationSummaryV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConversationSummaryV1")
+            .field("session_id", &self.session_id)
+            .field("title", &"[REDACTED]")
+            .field("last_activity_unix_millis", &self.last_activity_unix_millis)
+            .field("latest_run", &self.latest_run)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -724,7 +736,7 @@ impl AgentService {
             .load_session(session_id)
             .await?
             .ok_or(ServiceError::NotFound)?;
-        if session.owner() != principal.id() {
+        if session.owner() != principal.id() || session.archived() {
             return Err(ServiceError::Unauthorized);
         }
         self.authorize_mutation(
@@ -768,6 +780,16 @@ impl AgentService {
                     started_at: Instant::now(),
                 },
             );
+        }
+
+        let title = conversation_title_from_input(&input);
+        if let Err(error) = self
+            .ownership
+            .set_title_if_absent(session_id, principal.id(), &title)
+            .await
+        {
+            self.active.lock().await.remove(&session_id);
+            return Err(error.into());
         }
 
         match self.read.find_run(key).await {
@@ -988,7 +1010,10 @@ impl AgentService {
             };
             items.push(ConversationSummaryV1 {
                 session_id: session.session_id(),
-                title: conversation_title(session.session_id()),
+                title: session
+                    .title()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| conversation_title(session.session_id())),
                 last_activity_unix_millis: latest_run
                     .as_ref()
                     .and_then(|run| run.started_at_unix_millis),
@@ -999,6 +1024,83 @@ impl AgentService {
             items,
             next_session_id: page.next().map(SessionPageCursor::session_id),
         })
+    }
+
+    pub async fn archive_conversation(
+        &self,
+        principal: &VerifiedPrincipal,
+        session_id: SessionId,
+    ) -> Result<(), ServiceError> {
+        self.ensure_serving()?;
+        let session = self
+            .ownership
+            .load_session(session_id)
+            .await?
+            .ok_or(ServiceError::NotFound)?;
+        if session.archived() {
+            return Err(ServiceError::Conflict);
+        }
+        self.authorize_mutation(
+            principal,
+            AuthorizationAction::ArchiveSession,
+            AuthorizationResource::OwnedSession {
+                owner: session.owner(),
+            },
+            None,
+            None,
+        )
+        .await?;
+        if self.active.lock().await.contains_key(&session_id) {
+            return self
+                .audit_mutation_result(
+                    principal,
+                    AuthorizationAction::ArchiveSession,
+                    None,
+                    None,
+                    Err(ServiceError::Conflict),
+                )
+                .await;
+        }
+        let latest = self.read.list_session_runs(session_id, None, 1).await?;
+        let latest_disposition = match latest.items().first() {
+            Some(run) => Some(self.history_item(run).await?.disposition),
+            None => None,
+        };
+        if latest_disposition.is_some_and(|disposition| {
+            matches!(
+                disposition,
+                RunDispositionV1::Starting
+                    | RunDispositionV1::Running
+                    | RunDispositionV1::Waiting
+                    | RunDispositionV1::Resumable
+                    | RunDispositionV1::ManualReconciliationRequired
+            )
+        }) {
+            return self
+                .audit_mutation_result(
+                    principal,
+                    AuthorizationAction::ArchiveSession,
+                    None,
+                    None,
+                    Err(ServiceError::Conflict),
+                )
+                .await;
+        }
+        let result = self
+            .ownership
+            .archive_session(session_id, principal.id())
+            .await
+            .map_err(ServiceError::from);
+        self.audit_mutation_result(
+            principal,
+            AuthorizationAction::ArchiveSession,
+            None,
+            None,
+            result,
+        )
+        .await?;
+        self.sessions.lock().await.remove(&session_id);
+        Ok(())
     }
 
     pub async fn session_run_page(
@@ -1536,6 +1638,29 @@ fn conversation_title(session_id: SessionId) -> String {
     format!("Conversation {}", &value[..8])
 }
 
+fn conversation_title_from_input(input: &RunInput) -> String {
+    let text = String::from_utf8_lossy(input.bytes());
+    let collapsed = text
+        .chars()
+        .filter(|character| !character.is_control() || character.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut title = String::new();
+    for character in collapsed.chars() {
+        if title.len() + character.len_utf8() > agent_identity::MAX_CONVERSATION_TITLE_BYTES {
+            break;
+        }
+        title.push(character);
+    }
+    if title.is_empty() {
+        "New conversation".to_owned()
+    } else {
+        title
+    }
+}
+
 fn recovery_contract(disposition: &RecoveryDisposition) -> Option<RecoveryContract> {
     match disposition {
         RecoveryDisposition::Completed { state }
@@ -1963,7 +2088,7 @@ mod tests {
                 },
                 CompatibilityContractV1 {
                     name: "owner-authorized-history".to_owned(),
-                    version: 1,
+                    version: 2,
                 },
             ]
         );
@@ -2452,6 +2577,66 @@ mod tests {
                 .items()
                 .len(),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn first_task_titles_conversation_and_terminal_history_can_be_archived() {
+        let (_directory, service, _) = fixture(Duration::from_millis(1)).await;
+        let owner = test_principal();
+        let stranger = principal("other-user", &[PrincipalRole::User]);
+        let session = service.create_session(&owner).await.expect("session");
+        let run = service
+            .start_run(
+                &owner,
+                session,
+                Uuid::new_v4(),
+                &WorkflowId::new("test").expect("workflow"),
+                RunInput::new(b"  Explain\nenterprise   charging  ".to_vec()).expect("input"),
+            )
+            .await
+            .expect("start");
+        let key = RunKey::new(run.run_id, session);
+        for _ in 0..100 {
+            if service
+                .get_run_status(&owner, key)
+                .await
+                .is_ok_and(|view| view.disposition == RunDispositionV1::Completed)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let page = service
+            .conversation_page(&owner, None, 8)
+            .await
+            .expect("history");
+        assert_eq!(page.items[0].title, "Explain enterprise charging");
+        assert!(matches!(
+            service.archive_conversation(&stranger, session).await,
+            Err(ServiceError::Unauthorized)
+        ));
+
+        service
+            .archive_conversation(&owner, session)
+            .await
+            .expect("archive");
+        assert!(
+            service
+                .conversation_page(&owner, None, 8)
+                .await
+                .expect("history after archive")
+                .items
+                .is_empty()
+        );
+        assert_eq!(
+            service
+                .session_run_page(&owner, session, None, 8)
+                .await
+                .expect("durable run remains")
+                .items
+                .len(),
+            1
         );
     }
 

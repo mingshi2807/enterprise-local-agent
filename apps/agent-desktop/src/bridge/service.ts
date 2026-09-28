@@ -30,6 +30,9 @@ export const localService = {
   createSession: () => invokeAndValidate("conversation_create_session", sessionSchema),
   listSessions: (afterSessionId: string | null) =>
     invokeAndValidate("conversation_list_sessions", conversationPageSchema, { afterSessionId }),
+  archiveSession: async (sessionId: string) => {
+    await invoke("conversation_archive_session", { sessionId });
+  },
   listRuns: (sessionId: string, afterRunId: string | null) =>
     invokeAndValidate("conversation_list_runs", runHistoryPageSchema, { sessionId, afterRunId }),
   startReadonlyRun: (sessionId: string, startRequestId: string, input: string) =>

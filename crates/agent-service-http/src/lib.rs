@@ -266,6 +266,7 @@ pub fn router_with_operations(
         .route("/v1/operations/reconciliation", get(reconciliation_runs))
         .route("/v1/runtime/status", get(runtime_status))
         .route("/v1/sessions", get(list_sessions).post(create_session))
+        .route("/v1/sessions/{session_id}/archive", post(archive_session))
         .route(
             "/v1/sessions/{session_id}/runs",
             get(list_session_runs).post(start_run),
@@ -525,6 +526,19 @@ async fn create_session(
     Ok(Json(SessionResponse {
         session_id: state.service.create_session(&principal).await?,
     }))
+}
+
+async fn archive_session(
+    State(state): State<HttpState>,
+    Extension(principal): Extension<VerifiedPrincipal>,
+    Path(session_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let _permit = state.acquire_command()?;
+    state
+        .service
+        .archive_conversation(&principal, parse_id(&session_id)?)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -1290,6 +1304,40 @@ mod tests {
         ] {
             assert!(!String::from_utf8_lossy(&runs_body).contains(forbidden));
         }
+    }
+
+    #[tokio::test]
+    async fn archive_route_hides_session_without_accepting_payload_authority() {
+        let (_directory, service) = service().await;
+        let principal = test_principal();
+        let session = service.create_session(&principal).await.expect("session");
+        let app = unix_app(service);
+
+        let archived = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/sessions/{session}/archive"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(archived.status(), StatusCode::NO_CONTENT);
+
+        let listed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/sessions?limit=8")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = listed.into_body().collect().await.expect("body").to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+        assert_eq!(json["items"], serde_json::json!([]));
     }
 
     #[tokio::test]

@@ -537,6 +537,50 @@ impl SessionOwnershipPort for SqliteRunPersistence {
                 .map_err(|_| IdentityStoreError::Unavailable)?
         })
     }
+
+    fn set_title_if_absent<'a>(
+        &'a self,
+        session_id: SessionId,
+        owner: &'a PrincipalId,
+        title: &'a str,
+    ) -> IdentityFuture<'a, Result<(), IdentityStoreError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        let owner = owner.clone();
+        let title = title.to_owned();
+        Box::pin(async move {
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| IdentityStoreError::Unavailable)?;
+            tokio::task::spawn_blocking(move || {
+                set_session_title_if_absent(&path, session_id, &owner, &title)
+            })
+            .await
+            .map_err(|_| IdentityStoreError::Unavailable)?
+        })
+    }
+
+    fn archive_session<'a>(
+        &'a self,
+        session_id: SessionId,
+        owner: &'a PrincipalId,
+    ) -> IdentityFuture<'a, Result<(), IdentityStoreError>> {
+        let path = self.path.clone();
+        let blocking_permit = self.blocking_permit.clone();
+        let owner = owner.clone();
+        Box::pin(async move {
+            let _permit = blocking_permit
+                .acquire_owned()
+                .await
+                .map_err(|_| IdentityStoreError::Unavailable)?;
+            tokio::task::spawn_blocking(move || {
+                archive_session_ownership(&path, session_id, &owner)
+            })
+            .await
+            .map_err(|_| IdentityStoreError::Unavailable)?
+        })
+    }
 }
 
 impl RunReadPort for SqliteRunPersistence {
@@ -1055,6 +1099,12 @@ fn initialize(path: &Path) -> Result<(), PersistencePortError> {
                session_id TEXT PRIMARY KEY NOT NULL,
                record BLOB NOT NULL,
                checksum BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS service_conversation_metadata(
+               session_id TEXT PRIMARY KEY NOT NULL,
+               title TEXT,
+               archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)),
+               FOREIGN KEY(session_id) REFERENCES service_sessions(session_id)
              );",
         )
         .map_err(map_failed)?;
@@ -1112,11 +1162,13 @@ fn load_session_ownership(
     if checksum(&bytes) != stored_checksum {
         return Err(IdentityStoreError::Corrupt);
     }
-    let record: SessionOwnershipRecord =
+    let mut record: SessionOwnershipRecord =
         serde_json::from_slice(&bytes).map_err(|_| IdentityStoreError::Corrupt)?;
     if record.session_id() != session_id {
         return Err(IdentityStoreError::Corrupt);
     }
+    let metadata = load_session_metadata(&connection, session_id)?;
+    record.set_metadata(metadata.0, metadata.1);
     Ok(Some(record))
 }
 
@@ -1158,12 +1210,14 @@ fn list_session_ownership(
         if checksum(&bytes) != stored_checksum {
             return Err(IdentityStoreError::Corrupt);
         }
-        let record: SessionOwnershipRecord =
+        let mut record: SessionOwnershipRecord =
             serde_json::from_slice(&bytes).map_err(|_| IdentityStoreError::Corrupt)?;
         if record.session_id().to_string() != session_id {
             return Err(IdentityStoreError::Corrupt);
         }
-        if record.owner() == owner {
+        let metadata = load_session_metadata(&connection, record.session_id())?;
+        record.set_metadata(metadata.0, metadata.1);
+        if record.owner() == owner && !record.archived() {
             matching.push(record);
             if matching.len() > usize::from(limit) {
                 break;
@@ -1180,6 +1234,126 @@ fn list_session_ownership(
         })
         .flatten();
     Ok(SessionOwnershipPage::new(matching, next))
+}
+
+fn load_session_metadata(
+    connection: &Connection,
+    session_id: SessionId,
+) -> Result<(Option<String>, bool), IdentityStoreError> {
+    let (title, archived): (Option<String>, i64) = connection
+        .query_row(
+            "SELECT title,archived FROM service_conversation_metadata WHERE session_id=?1",
+            [session_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| IdentityStoreError::Unavailable)
+        .map(|value| value.unwrap_or((None, 0)))?;
+    if !matches!(archived, 0 | 1)
+        || title.as_ref().is_some_and(|value| {
+            value.is_empty()
+                || value.len() > agent_identity::MAX_CONVERSATION_TITLE_BYTES
+                || value.chars().any(char::is_control)
+        })
+    {
+        return Err(IdentityStoreError::Corrupt);
+    }
+    Ok((title, archived == 1))
+}
+
+fn set_session_title_if_absent(
+    path: &Path,
+    session_id: SessionId,
+    owner: &PrincipalId,
+    title: &str,
+) -> Result<(), IdentityStoreError> {
+    if title.is_empty()
+        || title.len() > agent_identity::MAX_CONVERSATION_TITLE_BYTES
+        || title.chars().any(char::is_control)
+    {
+        return Err(IdentityStoreError::Conflict);
+    }
+    let mut connection = Connection::open(path).map_err(|_| IdentityStoreError::Unavailable)?;
+    configure(&connection).map_err(map_identity_error)?;
+    validate_store_identity(&connection).map_err(map_identity_error)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| IdentityStoreError::Unavailable)?;
+    require_session_owner(&transaction, session_id, owner)?;
+    transaction
+        .execute(
+            "INSERT INTO service_conversation_metadata(session_id,title,archived) VALUES(?1,?2,0)
+             ON CONFLICT(session_id) DO UPDATE SET title=COALESCE(service_conversation_metadata.title,excluded.title)",
+            params![session_id.to_string(), title],
+        )
+        .map_err(|_| IdentityStoreError::Unavailable)?;
+    transaction
+        .commit()
+        .map_err(|_| IdentityStoreError::Unavailable)?;
+    Ok(())
+}
+
+fn archive_session_ownership(
+    path: &Path,
+    session_id: SessionId,
+    owner: &PrincipalId,
+) -> Result<(), IdentityStoreError> {
+    let mut connection = Connection::open(path).map_err(|_| IdentityStoreError::Unavailable)?;
+    configure(&connection).map_err(map_identity_error)?;
+    validate_store_identity(&connection).map_err(map_identity_error)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| IdentityStoreError::Unavailable)?;
+    require_session_owner(&transaction, session_id, owner)?;
+    transaction
+        .execute(
+            "INSERT INTO service_conversation_metadata(session_id,title,archived) VALUES(?1,NULL,1)
+             ON CONFLICT(session_id) DO UPDATE SET archived=1",
+            [session_id.to_string()],
+        )
+        .map_err(|_| IdentityStoreError::Unavailable)?;
+    transaction
+        .commit()
+        .map_err(|_| IdentityStoreError::Unavailable)?;
+    Ok(())
+}
+
+fn require_session_owner(
+    connection: &Connection,
+    session_id: SessionId,
+    owner: &PrincipalId,
+) -> Result<(), IdentityStoreError> {
+    let record = load_session_ownership_from_connection(connection, session_id)?
+        .ok_or(IdentityStoreError::Conflict)?;
+    if record.owner() != owner || record.archived() {
+        return Err(IdentityStoreError::Conflict);
+    }
+    Ok(())
+}
+
+fn load_session_ownership_from_connection(
+    connection: &Connection,
+    session_id: SessionId,
+) -> Result<Option<SessionOwnershipRecord>, IdentityStoreError> {
+    let stored: Option<(Vec<u8>, Vec<u8>)> = connection
+        .query_row(
+            "SELECT record,checksum FROM service_sessions WHERE session_id=?1",
+            [session_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| IdentityStoreError::Unavailable)?;
+    let Some((bytes, stored_checksum)) = stored else {
+        return Ok(None);
+    };
+    if checksum(&bytes) != stored_checksum {
+        return Err(IdentityStoreError::Corrupt);
+    }
+    let mut record: SessionOwnershipRecord =
+        serde_json::from_slice(&bytes).map_err(|_| IdentityStoreError::Corrupt)?;
+    let metadata = load_session_metadata(connection, session_id)?;
+    record.set_metadata(metadata.0, metadata.1);
+    Ok(Some(record))
 }
 
 fn map_identity_error(error: PersistencePortError) -> IdentityStoreError {
@@ -2139,6 +2313,59 @@ mod tests {
             store.list_sessions(&owner, None, 0).await,
             Err(IdentityStoreError::Conflict)
         );
+    }
+
+    #[tokio::test]
+    async fn conversation_title_is_first_write_wins_and_archive_hides_without_deleting() {
+        let (directory, _, _) = fixture();
+        let store = store(&directory).await;
+        let owner = agent_core::PrincipalId::new("owner-1").expect("principal");
+        let other = agent_core::PrincipalId::new("owner-2").expect("principal");
+        let session_id = SessionId::new();
+        store
+            .create_session(&SessionOwnershipRecord::new(session_id, owner.clone()))
+            .await
+            .expect("create session");
+
+        store
+            .set_title_if_absent(session_id, &owner, "First task")
+            .await
+            .expect("title");
+        store
+            .set_title_if_absent(session_id, &owner, "Later task")
+            .await
+            .expect("title remains stable");
+        let titled = store
+            .load_session(session_id)
+            .await
+            .expect("load")
+            .expect("record");
+        assert_eq!(titled.title(), Some("First task"));
+        assert!(!format!("{titled:?}").contains("First task"));
+        assert_eq!(
+            store.archive_session(session_id, &other).await,
+            Err(IdentityStoreError::Conflict)
+        );
+
+        store
+            .archive_session(session_id, &owner)
+            .await
+            .expect("archive");
+        assert!(
+            store
+                .list_sessions(&owner, None, 8)
+                .await
+                .expect("list")
+                .items()
+                .is_empty()
+        );
+        let archived = store
+            .load_session(session_id)
+            .await
+            .expect("load archived")
+            .expect("record remains durable");
+        assert!(archived.archived());
+        assert_eq!(archived.title(), Some("First task"));
     }
 
     #[tokio::test]

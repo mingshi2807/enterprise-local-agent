@@ -14,7 +14,7 @@ export const repositoryRoot = path.resolve(desktopRoot, "../..");
 
 const TARGETS = new Set(["linux-x86_64"]);
 const SUPPORTED_PLATFORMS = ["linux-x86_64"];
-const COMPATIBILITY_CONTRACT_FINGERPRINT = "9244db3dd8e2b578ac5b7424c9c5f3f9c29262310db183ccd5c92ba3c434c578";
+const COMPATIBILITY_CONTRACT_FINGERPRINT = "00b4a3d48efc9bb12a2d54aa137e3d734977d59271175920d1bec14d1a692490";
 const REQUIRED_CAPABILITIES = new Set([
   "allow-desktop-build-info",
   "allow-service-health",
@@ -23,6 +23,7 @@ const REQUIRED_CAPABILITIES = new Set([
   "allow-service-version",
   "allow-conversation-create-session",
   "allow-conversation-list-sessions",
+  "allow-conversation-archive-session",
   "allow-conversation-list-runs",
   "allow-conversation-start-readonly-run",
   "allow-conversation-start-localwrite-run",

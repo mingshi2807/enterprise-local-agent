@@ -28,7 +28,7 @@ const SERVICE_API_VERSION: u16 = 1;
 const SERVICE_EVENT_VERSION: u16 = 2;
 const COMPATIBILITY_DOMAIN: &[u8] = b"enterprise-local-agent/service-compatibility/v1\0";
 const REQUIRED_COMPATIBILITY_CONTRACTS: [(&str, u16); 2] =
-    [("durable-waiting", 1), ("owner-authorized-history", 1)];
+    [("durable-waiting", 1), ("owner-authorized-history", 2)];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -301,13 +301,25 @@ pub struct RunHistoryPageV1 {
     next_run_id: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationSummaryV1 {
     session_id: String,
     title: String,
     last_activity_unix_millis: Option<u64>,
     latest_run: Option<RunHistoryItemV1>,
+}
+
+impl fmt::Debug for ConversationSummaryV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConversationSummaryV1")
+            .field("session_id", &self.session_id)
+            .field("title", &"[REDACTED]")
+            .field("last_activity_unix_millis", &self.last_activity_unix_millis)
+            .field("latest_run", &self.latest_run)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1061,6 +1073,18 @@ impl LocalServiceClient {
         self.get(&path).await
     }
 
+    pub async fn archive_session(&self, session_id: &str) -> Result<(), LocalServiceError> {
+        if !valid_uuid(session_id) {
+            return Err(LocalServiceError::InvalidRequest);
+        }
+        let response = self
+            .request(Method::POST, &format!("v1/sessions/{session_id}/archive"))?
+            .send()
+            .await
+            .map_err(|_| LocalServiceError::Unavailable)?;
+        self.require_status(response.status(), StatusCode::NO_CONTENT)
+    }
+
     pub async fn list_session_runs(
         &self,
         session_id: &str,
@@ -1587,7 +1611,7 @@ mod tests {
         assert!(handshake.validate().is_ok());
         assert!(
             serde_json::from_str::<CompatibilityHandshakeV1>(
-                r#"{"handshake_version":1,"service_api_version":1,"supported_service_event_versions":[2],"required_contracts":[{"name":"durable-waiting","version":1},{"name":"owner-authorized-history","version":1}],"compatibility_contract_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","service_generation":"11111111-1111-4111-8111-111111111111","prompt":"secret"}"#,
+                r#"{"handshake_version":1,"service_api_version":1,"supported_service_event_versions":[2],"required_contracts":[{"name":"durable-waiting","version":1},{"name":"owner-authorized-history","version":2}],"compatibility_contract_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","service_generation":"11111111-1111-4111-8111-111111111111","prompt":"secret"}"#,
             )
             .is_err()
         );

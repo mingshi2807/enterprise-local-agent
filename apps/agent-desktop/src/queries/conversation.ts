@@ -323,6 +323,24 @@ export function useConversationController(
     },
   });
 
+  const archiveConversationMutation = useMutation({
+    mutationFn: async (sessionId: string) => {
+      await localService.archiveSession(sessionId);
+      return sessionId;
+    },
+    onSuccess: (sessionId) => {
+      let nextSelection: string | null = null;
+      setConversations((current) => {
+        const remaining = current.filter((conversation) => conversation.sessionId !== sessionId);
+        nextSelection = remaining[0]?.sessionId ?? null;
+        return remaining;
+      });
+      if (selectedSessionId === sessionId) onSelectSession(nextSelection);
+      queryClient.removeQueries({ queryKey: ["conversation-runs", serviceGeneration, sessionId] });
+      void queryClient.invalidateQueries({ queryKey: historyKey });
+    },
+  });
+
   const sendMutation = useMutation({
     mutationFn: async ({ prompt, mode }: { prompt: string; mode: WorkflowMode }) => {
       const existing = selectedSessionId === null
@@ -362,6 +380,7 @@ export function useConversationController(
         }
         return replaceConversation(current, sessionId, (conversation) => ({
           ...conversation,
+          title: conversation.messages.length === 0 ? titleFor(prompt) : conversation.title,
           messages: [...conversation.messages, userMessage],
           lastPrompt: prompt,
         }));
@@ -737,6 +756,10 @@ export function useConversationController(
     historyLoading: history.isPending,
     historyError: history.isError,
     newConversation: () => newConversationMutation.mutateAsync(),
+    archiveConversation: (sessionId: string) => archiveConversationMutation.mutateAsync(sessionId),
+    archivingSessionId: archiveConversationMutation.isPending
+      ? archiveConversationMutation.variables ?? null
+      : null,
     send: (prompt: string, mode: WorkflowMode = "readonly") => sendMutation.mutateAsync({ prompt, mode }),
     cancel: () => cancelMutation.mutateAsync(),
     retry: selected === null || selected.lastPrompt === "" ? null : () => sendMutation.mutateAsync({ prompt: selected.lastPrompt, mode: "readonly" }),

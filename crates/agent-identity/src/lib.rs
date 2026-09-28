@@ -9,6 +9,7 @@ use thiserror::Error;
 pub const MAX_PRINCIPAL_ROLES: usize = 3;
 pub const MAX_WORKFLOW_ID_BYTES: usize = 96;
 pub const MAX_SESSION_PAGE_ITEMS: u16 = 256;
+pub const MAX_CONVERSATION_TITLE_BYTES: usize = 80;
 pub const AUTHORIZATION_POLICY_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -106,6 +107,7 @@ pub enum ApprovalSeparation {
 pub enum AuthorizationAction {
     CreateSession,
     ListSessions,
+    ArchiveSession,
     ReadSessionHistory,
     StartWorkflow,
     ReadRun,
@@ -214,6 +216,9 @@ impl ServiceAuthorizationPolicy for DefaultDenyServiceAuthorizationPolicy {
         let granted = match (action, resource) {
             (A::CreateSession, R::Global) => principal.has_role(Role::User),
             (A::ListSessions, R::Global) => principal.has_role(Role::User),
+            (A::ArchiveSession, R::OwnedSession { owner }) => {
+                principal.has_role(Role::User) && principal.id() == owner
+            }
             (A::ReadSessionHistory, R::OwnedSession { owner }) => {
                 principal.has_role(Role::User) && principal.id() == owner
             }
@@ -342,11 +347,15 @@ impl DurableRunAuthorization {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionOwnershipRecord {
     session_id: SessionId,
     owner: PrincipalId,
+    #[serde(skip)]
+    title: Option<String>,
+    #[serde(skip)]
+    archived: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -392,7 +401,12 @@ impl SessionOwnershipPage {
 impl SessionOwnershipRecord {
     #[must_use]
     pub const fn new(session_id: SessionId, owner: PrincipalId) -> Self {
-        Self { session_id, owner }
+        Self {
+            session_id,
+            owner,
+            title: None,
+            archived: false,
+        }
     }
     #[must_use]
     pub const fn session_id(&self) -> SessionId {
@@ -401,6 +415,30 @@ impl SessionOwnershipRecord {
     #[must_use]
     pub const fn owner(&self) -> &PrincipalId {
         &self.owner
+    }
+    #[must_use]
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+    #[must_use]
+    pub const fn archived(&self) -> bool {
+        self.archived
+    }
+    pub fn set_metadata(&mut self, title: Option<String>, archived: bool) {
+        self.title = title;
+        self.archived = archived;
+    }
+}
+
+impl std::fmt::Debug for SessionOwnershipRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionOwnershipRecord")
+            .field("session_id", &self.session_id)
+            .field("owner", &self.owner)
+            .field("title", &self.title.as_ref().map(|_| "[REDACTED]"))
+            .field("archived", &self.archived)
+            .finish()
     }
 }
 
@@ -421,6 +459,17 @@ pub trait SessionOwnershipPort: Send + Sync {
         after: Option<SessionPageCursor>,
         limit: u16,
     ) -> IdentityFuture<'a, Result<SessionOwnershipPage, IdentityStoreError>>;
+    fn set_title_if_absent<'a>(
+        &'a self,
+        session_id: SessionId,
+        owner: &'a PrincipalId,
+        title: &'a str,
+    ) -> IdentityFuture<'a, Result<(), IdentityStoreError>>;
+    fn archive_session<'a>(
+        &'a self,
+        session_id: SessionId,
+        owner: &'a PrincipalId,
+    ) -> IdentityFuture<'a, Result<(), IdentityStoreError>>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

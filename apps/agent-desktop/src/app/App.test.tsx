@@ -69,6 +69,7 @@ function installServiceMock(handler?: (command: string, args?: Record<string, un
     if (command === "service_version") return Promise.resolve({ application: "enterprise-local-agent", version: "0.1.0", config_schema_version: 2, store_schema_version: 2, event_schema_version: 9, checkpoint_schema_version: 4 });
     if (command === "conversation_create_session") return Promise.resolve({ session_id: sessionId });
     if (command === "conversation_list_sessions") return Promise.resolve({ items: [], next_session_id: null });
+    if (command === "conversation_archive_session") return Promise.resolve(null);
     if (command === "conversation_list_runs") return Promise.resolve({ items: [], next_run_id: null });
     if (command === "conversation_start_readonly_run") return Promise.resolve(runView());
     if (command === "conversation_read_events") return Promise.resolve([]);
@@ -311,6 +312,32 @@ describe("App conversation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show inspector" }));
     expect(await screen.findByRole("heading", { name: "Previous runs" })).toBeInTheDocument();
     expect(screen.getByText(previousRunId.slice(0, 8))).toBeInTheDocument();
+  });
+
+  it("archives terminal history through the named service command", async () => {
+    let archived = false;
+    installServiceMock((command) => {
+      if (command === "conversation_list_sessions") return {
+        items: archived ? [] : [{
+          session_id: sessionId,
+          title: "Durable first task",
+          last_activity_unix_millis: 1_000,
+          latest_run: { run_id: runId, disposition: "completed", last_sequence: 0, outcome: "completed", workflow_id: workflow, started_at_unix_millis: 1_000, result_available: false },
+        }],
+        next_session_id: null,
+      };
+      if (command === "conversation_archive_session") {
+        archived = true;
+        return null;
+      }
+      if (command === "conversation_list_runs") return { items: [], next_run_id: null };
+      return undefined;
+    });
+    renderApp();
+    const remove = await screen.findByRole("button", { name: "Remove from history" });
+    fireEvent.click(remove);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("conversation_archive_session", { sessionId }));
+    await waitFor(() => expect(screen.queryByText("Durable first task")).not.toBeInTheDocument());
   });
 
   it("paginates session summaries and switches conversations lazily", async () => {

@@ -95,6 +95,18 @@ async fn conversation_list_sessions(
 }
 
 #[tauri::command]
+async fn conversation_archive_session(
+    client: State<'_, LocalServiceClient>,
+    session_id: String,
+) -> Result<(), DesktopCommandError> {
+    client.require_compatible().await?;
+    client
+        .archive_session(&session_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 async fn conversation_list_runs(
     client: State<'_, LocalServiceClient>,
     session_id: String,
@@ -260,6 +272,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             service_version,
             conversation_create_session,
             conversation_list_sessions,
+            conversation_archive_session,
             conversation_list_runs,
             conversation_start_readonly_run,
             conversation_start_localwrite_run,

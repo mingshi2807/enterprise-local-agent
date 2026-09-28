@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-conversation-archive-session"
+description = "Enables the conversation_archive_session command without any pre-configured scope."
+commands.allow = ["conversation_archive_session"]
+
+[[permission]]
+identifier = "deny-conversation-archive-session"
+description = "Denies the conversation_archive_session command without any pre-configured scope."
+commands.deny = ["conversation_archive_session"]
