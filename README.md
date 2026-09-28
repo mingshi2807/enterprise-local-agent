@@ -619,6 +619,35 @@ inventory on 2026-09-27. Durable release evidence is stored in
 administrative approval, and `SHA256SUMS`. Linux x86_64 is the v1 release scope;
 macOS remains explicitly post-v1.
 
+## M19 production v1.0 release
+
+M19 promotes the validated Linux release candidate and the subsequent
+end-user fixes on `main` to Enterprise Local Agent **1.0.0**. The production
+tag is `v1.0.0`; its release manifest records the exact clean source commit,
+`source_dirty=false`, Linux x86_64 target, separate-service deployment, and
+compatibility fingerprint
+`bc71818690ec583a7dc36b0d6c9ae21954804b891ea142a4157f28da33a683a3`.
+
+The Debian package remains a thin Tauri desktop. It does not embed or own the
+service, model, enterprise knowledge backends, audit/persistence database,
+action-seal key, Bubblewrap, or containment worker. The deployed path remains:
+
+```text
+Desktop -> agent-service -> model / knowledge -> governed execution
+```
+
+Production installation, Qwen/OpenAI-compatible configuration, Standards MCP
+configuration, ReadOnly use, LocalWrite approval/resume, troubleshooting,
+upgrade/removal, security boundaries, and limitations are documented in
+[`quickstart.md`](quickstart.md). Release notes and the generated third-party
+license inventory are under [`release/`](release/); generated v1 package,
+manifest, and checksums are kept under `release/v1.0.0/`.
+
+Version 1.0 supports Linux x86_64 only. macOS remains post-v1. The runtime does
+not claim global exactly-once external effects: uncertain effects fail closed
+to manual reconciliation, while the validated approved LocalWrite acceptance
+scenario observed exactly one contained dispatch.
+
 ## Deterministic demonstration
 
 The default CLI path is network-free. It uses `RigModelAdapter<FakeRigModel>`

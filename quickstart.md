@@ -1,6 +1,6 @@
 # Enterprise Local Agent Quickstart
 
-Enterprise Local Agent v0.1 is released for Linux x86_64. The desktop is a
+Enterprise Local Agent v1.0 is released for Linux x86_64. The desktop is a
 thin client and requires separately operated runtime components:
 
 1. `agent-service-daemon`, which owns governed execution.
@@ -107,7 +107,7 @@ Verify the checked-in release artifacts:
 
 ```bash
 (
-  cd release
+  cd release/v1.0.0
   sha256sum -c SHA256SUMS
 )
 ```
@@ -116,7 +116,7 @@ Install the Debian package:
 
 ```bash
 sudo apt install \
-  "./release/Enterprise Local Agent Desktop_0.1.0-rc.2_amd64.deb"
+  "./release/v1.0.0/Enterprise Local Agent Desktop_1.0.0_amd64.deb"
 ```
 
 Launch **Enterprise Local Agent Desktop** from the application menu or run:
@@ -218,6 +218,51 @@ compatible release set. In particular, use a desktop build that accepts the
 service contract's bounded `max_read_page_items` value of 256; earlier builds
 that incorrectly capped this metadata field at 64 reject an otherwise healthy
 service response.
+
+## Upgrade and Remove
+
+Stop the desktop before upgrading. Install a compatible replacement package
+with `apt`; the separately deployed service and its durable data are not part
+of the desktop package:
+
+```bash
+sudo apt install "./Enterprise Local Agent Desktop_1.0.0_amd64.deb"
+```
+
+Remove only the desktop application with:
+
+```bash
+sudo apt remove enterprise-local-agent-desktop
+```
+
+Removing the desktop does not remove the service, model, knowledge backends,
+SQLite state, audit records, containment worker, or operator configuration.
+
+## Security Model
+
+The desktop is a request and observation client. Its named Tauri commands talk
+to `agent-service-daemon`; it has no generic shell, filesystem, HTTP, SQL,
+model, MCP, persistence, policy, approval, or containment authority. The
+service owns identity, authorization, budgets, audit, persistence, recovery,
+policy, approval, and execution. Retrieved knowledge and model output remain
+untrusted data. LocalWrite executes only after typed validation, policy,
+required audit, exact-action approval binding, and the certified Linux
+containment path.
+
+## Known Limitations
+
+- Version 1.0 supports Linux x86_64 only. macOS validation is post-v1.
+- The OCPP knowledge route is unavailable when its corpus is empty; Standards
+  remains independently usable when configured.
+- A local model that does not satisfy the strict structured-output contract
+  fails closed. The runtime does not heuristically reinterpret prose.
+- Global exactly-once execution is not claimed. Uncertain external effects are
+  surfaced for manual reconciliation and are not automatically retried.
+- The delegated two-principal approval scenario and deliberately induced real
+  ManualReconciliationRequired desktop state are covered deterministically but
+  have not been exercised in the real acceptance environment.
+
+## Operator Inspection
 
 Operational inspection commands include:
 
